@@ -356,18 +356,17 @@ fn render_now_playing(frame: &mut Frame, app: &App, area: Rect) {
     ])
     .split(inner);
 
-    render_now_playing_title(frame, app, rows[0]);
+    render_now_playing_header(frame, app, rows[0]);
     render_playback_bar(frame, app, rows[1]);
     render_cache_and_eq(frame, app, rows[2]);
 }
 
-fn render_now_playing_title(frame: &mut Frame, app: &App, area: Rect) {
+pub(crate) fn render_now_playing_header(frame: &mut Frame, app: &App, area: Rect) {
+    let width = area.width as usize;
+
     // Show "fetching…" while metadata is in flight
     if app.pending_fetches > 0 && app.playlist.current_track.is_none() {
-        let line = Line::from(vec![
-            Span::raw("  "),
-            Span::styled("⏳ fetching metadata…", Style::new().fg(GOLD)),
-        ]);
+        let line = build_now_playing_header_line(width, None, None);
         frame.render_widget(Paragraph::new(line), area);
         return;
     }
@@ -379,42 +378,77 @@ fn render_now_playing_title(frame: &mut Frame, app: &App, area: Rect) {
         .and_then(|id| app.playlist.tracks.iter().position(|t| t.video_id == id));
 
     let Some(track) = current_idx.and_then(|i| app.playlist.tracks.get(i)) else {
-        frame.render_widget(
-            Paragraph::new(Span::styled(" No track selected", Style::new().fg(TEXT_DIM))),
-            area,
-        );
+        let line = build_now_playing_header_line(width, None, None);
+        frame.render_widget(Paragraph::new(line), area);
         return;
     };
 
-    let play_icon = if app.is_paused { "⏸" } else { "▶" };
     let speed = effective_speed(track, &app.playlist, &app.config);
     let speed_str = format!("{:.1}×", speed);
+    let (status_icon, status_text) =
+        format_playback_state(app.player.is_some(), app.is_paused, true);
 
-    let title = track.user_title.as_deref().unwrap_or(&track.title);
-    let artist = track.user_artist.as_deref().unwrap_or(&track.artist);
+    let center_text = if status_icon.is_empty() {
+        status_text.to_string()
+    } else {
+        format!("{} {}", status_icon, status_text)
+    };
 
-    let meta_max = area.width.saturating_sub(
-        2 + play_icon.len() as u16 + 2 + speed_str.len() as u16 + 1,
-    ) as usize;
-    let meta = format!("{} · {} · {}", title, artist, track.source);
-    let meta_truncated = truncate(&meta, meta_max);
-    let pad = (area.width as usize)
-        .saturating_sub(2 + play_icon.len() + 1 + meta_truncated.len() + 1 + speed_str.len());
-
-    let line = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(play_icon, Style::new().fg(SEA_GREEN)),
-        Span::raw("  "),
-        Span::styled(title.to_string(), Style::new().bold()),
-        Span::styled(
-            format!(" · {} · {}", artist, track.source),
-            Style::new().fg(TEXT_DIM),
-        ),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(speed_str, Style::new().fg(ACCENT).bold()),
-        Span::raw(" "),
-    ]);
+    let line = build_now_playing_header_line(width, Some(&center_text), Some(&speed_str));
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Build the header line spans for the now-playing area.
+/// `width` is the available display width.
+/// `center` is the playback status text (e.g. "▶ Playing"). None = no track / fetching.
+/// `speed` is the speed string (e.g. "1.4×"). None = no track / fetching.
+pub(crate) fn build_now_playing_header_line<'a>(
+    width: usize,
+    center: Option<&str>,
+    speed: Option<&str>,
+) -> Line<'a> {
+    let label = "🎵 Now Playing";
+
+    match (center, speed) {
+        (Some(center_text), Some(speed_str)) => {
+            // Three-section layout: label | center status | speed
+            let label_section_len = 1 + label.chars().count(); // leading space + label
+            let speed_section_len = speed_str.chars().count() + 1; // speed + trailing space
+            let center_len = center_text.chars().count();
+
+            let fixed = [(0, label_section_len), (2, speed_section_len)];
+            let widths = calculate_distributed_widths(width, 3, &fixed);
+            let center_width = widths[1];
+
+            let center_pad = center_width.saturating_sub(center_len);
+            let left_pad = center_pad / 2;
+            let right_pad = center_pad - left_pad;
+
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(label.to_string(), Style::new().fg(GOLD).bold()),
+                Span::raw(" ".repeat(left_pad)),
+                Span::styled(center_text.to_string(), Style::new().fg(Color::White)),
+                Span::raw(" ".repeat(right_pad)),
+                Span::styled(speed_str.to_string(), Style::new().fg(ACCENT).bold()),
+                Span::raw(" "),
+            ])
+        }
+        _ => {
+            // No track or fetching: label + status message
+            let label_len = label.chars().count();
+            let status = "No track selected".to_string();
+            let status_len = status.chars().count();
+            let pad = width.saturating_sub(1 + label_len + 1 + status_len);
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(label.to_string(), Style::new().fg(GOLD).bold()),
+                Span::raw(" "),
+                Span::styled(status, Style::new().fg(TEXT_DIM)),
+                Span::raw(" ".repeat(pad)),
+            ])
+        }
+    }
 }
 
 fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {

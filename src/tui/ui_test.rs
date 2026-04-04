@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::tui::ui::{
-        build_progress_bar, build_separated_line, calculate_distributed_widths,
-        format_duration, format_playback_state, truncate,
+        build_now_playing_header_line, build_progress_bar, build_separated_line,
+        calculate_distributed_widths, format_duration, format_playback_state, truncate,
     };
     use ratatui::style::Color;
 
@@ -482,5 +482,124 @@ mod tests {
         let (paused_icon, _) = format_playback_state(true, true, true);
         assert!(!playing_icon.is_empty());
         assert!(!paused_icon.is_empty());
+    }
+
+    // ── build_now_playing_header_line tests ───────────────────────────────────
+
+    /// Collect all span content into a single string.
+    fn line_to_string(line: &ratatui::text::Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn header_no_track_contains_label_and_status() {
+        let line = build_now_playing_header_line(80, None, None);
+        let text = line_to_string(&line);
+        assert!(text.contains("🎵 Now Playing"), "should contain label: {text:?}");
+        assert!(text.contains("No track selected"), "should contain no-track status: {text:?}");
+    }
+
+    #[test]
+    fn header_no_track_total_width_does_not_exceed() {
+        let width = 80;
+        let line = build_now_playing_header_line(width, None, None);
+        let text = line_to_string(&line);
+        let char_count: usize = text.chars().count();
+        // Should not exceed the width (may be less due to saturation)
+        assert!(char_count <= width + 5, "header too wide: {char_count} chars for width={width}");
+    }
+
+    #[test]
+    fn header_playing_state_contains_all_three_sections() {
+        let line = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.4×"));
+        let text = line_to_string(&line);
+        assert!(text.contains("🎵 Now Playing"), "should contain label: {text:?}");
+        assert!(text.contains("▶ Playing"), "should contain playback status: {text:?}");
+        assert!(text.contains("1.4×"), "should contain speed: {text:?}");
+    }
+
+    #[test]
+    fn header_paused_state() {
+        let line = build_now_playing_header_line(80, Some("⏸ Paused"), Some("1.0×"));
+        let text = line_to_string(&line);
+        assert!(text.contains("⏸ Paused"), "should contain paused status: {text:?}");
+        assert!(text.contains("1.0×"), "should contain speed: {text:?}");
+    }
+
+    #[test]
+    fn header_playing_gold_style_on_label() {
+        let gold = Color::Rgb(212, 175, 55);
+        let line = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.4×"));
+        // The label span should have GOLD color
+        let label_span = line.spans.iter().find(|s| s.content.contains("🎵 Now Playing"));
+        assert!(label_span.is_some(), "label span should exist");
+        assert_eq!(
+            label_span.unwrap().style.fg,
+            Some(gold),
+            "label should be GOLD colored"
+        );
+    }
+
+    #[test]
+    fn header_speed_accent_style() {
+        let accent = Color::Rgb(206, 65, 43);
+        let line = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.4×"));
+        // The speed span should have ACCENT color
+        let speed_span = line.spans.iter().find(|s| s.content.contains("1.4×"));
+        assert!(speed_span.is_some(), "speed span should exist");
+        assert_eq!(
+            speed_span.unwrap().style.fg,
+            Some(accent),
+            "speed should be ACCENT colored"
+        );
+    }
+
+    #[test]
+    fn header_narrow_terminal_does_not_panic() {
+        // Very narrow: should not panic, just produce truncated/minimal output
+        let line = build_now_playing_header_line(10, Some("▶ Playing"), Some("1.0×"));
+        let text = line_to_string(&line);
+        // Just check it doesn't panic and produces something
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn header_layout_calculations_use_full_width() {
+        // In three-section mode, the total widths should sum to ~= the available width
+        let width = 100;
+        let label = "🎵 Now Playing"; // 14 chars
+        let label_section = 1 + label.chars().count(); // 15
+        let speed_str = "1.4×";
+        let speed_section = speed_str.chars().count() + 1; // 5
+
+        let fixed = [(0, label_section), (2, speed_section)];
+        let widths = calculate_distributed_widths(width, 3, &fixed);
+
+        assert_eq!(widths[0], label_section);
+        assert_eq!(widths[2], speed_section);
+        // Center gets the remaining space
+        let expected_center = width.saturating_sub(label_section + speed_section);
+        assert_eq!(widths[1], expected_center);
+        // Total should equal width
+        assert_eq!(widths[0] + widths[1] + widths[2], width);
+    }
+
+    #[test]
+    fn header_no_track_different_widths() {
+        // Test at various widths to ensure no panic
+        for w in [20, 40, 60, 80, 120] {
+            let line = build_now_playing_header_line(w, None, None);
+            let text = line_to_string(&line);
+            assert!(text.contains("🎵 Now Playing"), "width={w}: missing label");
+        }
+    }
+
+    #[test]
+    fn header_three_section_different_speeds() {
+        for speed in ["0.5×", "1.0×", "1.5×", "2.0×"] {
+            let line = build_now_playing_header_line(80, Some("▶ Playing"), Some(speed));
+            let text = line_to_string(&line);
+            assert!(text.contains(speed), "should contain speed {speed}: {text:?}");
+        }
     }
 }

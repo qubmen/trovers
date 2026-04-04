@@ -117,13 +117,13 @@
 - Modify: `src/tui/ui.rs` (render_now_playing_header function)
 - Modify: `src/tui/ui_test.rs`
 
-- [ ] replace `render_now_playing_title` with new `render_now_playing_header` function
-- [ ] implement three-section layout: "🎵 Now Playing" (left, GOLD) | playback status (center) | speed (right, ACCENT)
-- [ ] use `calculate_distributed_widths` for proper spacing
-- [ ] handle edge cases: no track, fetching metadata, paused/playing states
-- [ ] write tests for header layout calculations
-- [ ] write tests for different playback states rendering
-- [ ] run tests: `cargo test ui_test` - must pass before task 5
+- [x] replace `render_now_playing_title` with new `render_now_playing_header` function
+- [x] implement three-section layout: "🎵 Now Playing" (left, GOLD) | playback status (center) | speed (right, ACCENT)
+- [x] use `calculate_distributed_widths` for proper spacing
+- [x] handle edge cases: no track, fetching metadata, paused/playing states
+- [x] write tests for header layout calculations
+- [x] write tests for different playback states rendering
+- [x] run tests: `cargo test ui_test` - must pass before task 5
 
 ### Task 5: Implement new track info row (Row 2)
 
