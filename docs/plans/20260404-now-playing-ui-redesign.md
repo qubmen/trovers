@@ -77,12 +77,12 @@
 - Create: `src/tui/ui_test.rs`
 - Modify: `src/tui/mod.rs` (add test module)
 
-- [ ] create `src/tui/ui_test.rs` with test module structure
-- [ ] write tests for existing `format_duration` function (various duration formats)
-- [ ] write tests for existing `truncate` function (edge cases: empty string, exact length, overflow)
-- [ ] write tests for existing `build_progress_bar` function (ratios, widths, fill patterns)
-- [ ] add test module declaration to `src/tui/mod.rs`
-- [ ] run tests: `cargo test ui_test` - must pass before task 2
+- [x] create `src/tui/ui_test.rs` with test module structure
+- [x] write tests for existing `format_duration` function (various duration formats)
+- [x] write tests for existing `truncate` function (edge cases: empty string, exact length, overflow)
+- [x] write tests for existing `build_progress_bar` function (ratios, widths, fill patterns)
+- [x] add test module declaration to `src/tui/mod.rs`
+- [x] run tests: `cargo test ui_test` - must pass before task 2
 
 ### Task 2: Fix build_progress_bar helper function
 
