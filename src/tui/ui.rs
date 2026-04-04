@@ -357,8 +357,8 @@ fn render_now_playing(frame: &mut Frame, app: &App, area: Rect) {
     .split(inner);
 
     render_now_playing_header(frame, app, rows[0]);
-    render_playback_bar(frame, app, rows[1]);
-    render_cache_and_eq(frame, app, rows[2]);
+    render_track_info_row(frame, app, rows[1]);
+    render_playback_bar(frame, app, rows[2]);
 }
 
 pub(crate) fn render_now_playing_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -449,6 +449,62 @@ pub(crate) fn build_now_playing_header_line<'a>(
             ])
         }
     }
+}
+
+fn render_track_info_row(frame: &mut Frame, app: &App, area: Rect) {
+    let width = area.width as usize;
+
+    let current_idx = app
+        .playlist
+        .current_track
+        .as_deref()
+        .and_then(|id| app.playlist.tracks.iter().position(|t| t.video_id == id));
+
+    let Some(track) = current_idx.and_then(|i| app.playlist.tracks.get(i)) else {
+        // No track: render empty row
+        frame.render_widget(Paragraph::new(Line::raw("")), area);
+        return;
+    };
+
+    let title = track.user_title.as_deref().unwrap_or(&track.title);
+    let artist = track.user_artist.as_deref().unwrap_or(&track.artist);
+    let source = &track.source;
+
+    let line = build_track_info_line(width, title, artist, source);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Build the track info line for row 2 of the now-playing area.
+/// Displays: TITLE (bold white) • Artist (dim) • source (dim, truncated)
+/// Uses `build_separated_line` with truncation priority: title > artist > source.
+pub(crate) fn build_track_info_line<'a>(
+    width: usize,
+    title: &str,
+    artist: &str,
+    source: &str,
+) -> Line<'a> {
+    // Use 1-char left margin, so effective text width is width - 1 (for leading space)
+    let text_width = width.saturating_sub(1);
+
+    let segments = [
+        (title, true),
+        (artist, false),
+        (source, false),
+    ];
+
+    let parts = build_separated_line(&segments, text_width);
+
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    for (text, is_primary) in parts {
+        let style = if is_primary {
+            Style::new().fg(Color::White).bold()
+        } else {
+            Style::new().fg(TEXT_DIM)
+        };
+        spans.push(Span::styled(text, style));
+    }
+
+    Line::from(spans)
 }
 
 fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {

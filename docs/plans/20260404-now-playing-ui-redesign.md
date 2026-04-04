@@ -132,14 +132,14 @@
 - Modify: `src/tui/ui.rs` (render_now_playing function)
 - Modify: `src/tui/ui_test.rs`
 
-- [ ] create `render_track_info_row` function for clean track metadata display
-- [ ] implement bullet-separated layout: TITLE (bold) • Artist (dim) • source (dim, truncated)
-- [ ] use `build_separated_line` with proper truncation priority
-- [ ] handle user title/artist overrides consistently
-- [ ] update `render_now_playing` to call new function for row 1
-- [ ] write tests for track info formatting and truncation
-- [ ] write tests for user override handling
-- [ ] run tests: `cargo test ui_test` - must pass before task 6
+- [x] create `render_track_info_row` function for clean track metadata display
+- [x] implement bullet-separated layout: TITLE (bold) • Artist (dim) • source (dim, truncated)
+- [x] use `build_separated_line` with proper truncation priority
+- [x] handle user title/artist overrides consistently
+- [x] update `render_now_playing` to call new function for row 1
+- [x] write tests for track info formatting and truncation
+- [x] write tests for user override handling
+- [x] run tests: `cargo test ui_test` - must pass before task 6
 
 ### Task 6: Redesign progress/controls row (Row 3)
 

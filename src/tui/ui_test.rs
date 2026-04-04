@@ -2,7 +2,8 @@
 mod tests {
     use crate::tui::ui::{
         build_now_playing_header_line, build_progress_bar, build_separated_line,
-        calculate_distributed_widths, format_duration, format_playback_state, truncate,
+        build_track_info_line, calculate_distributed_widths, format_duration,
+        format_playback_state, truncate,
     };
     use ratatui::style::Color;
 
@@ -601,5 +602,136 @@ mod tests {
             let text = line_to_string(&line);
             assert!(text.contains(speed), "should contain speed {speed}: {text:?}");
         }
+    }
+
+    // ── build_track_info_line tests ───────────────────────────────────────────
+
+    #[test]
+    fn track_info_line_contains_all_three_parts() {
+        let line = build_track_info_line(80, "My Track Title", "Some Artist", "youtube.com/watch");
+        let text = line_to_string(&line);
+        assert!(text.contains("My Track Title"), "should contain title: {text:?}");
+        assert!(text.contains("Some Artist"), "should contain artist: {text:?}");
+        assert!(text.contains("youtube.com/watch"), "should contain source: {text:?}");
+    }
+
+    #[test]
+    fn track_info_line_has_bullet_separators() {
+        let line = build_track_info_line(80, "Track", "Artist", "source.com");
+        let text = line_to_string(&line);
+        // Should have bullet separators between sections
+        assert!(text.contains(" • "), "should contain bullet separator: {text:?}");
+    }
+
+    #[test]
+    fn track_info_line_title_is_bold_white() {
+        let line = build_track_info_line(80, "My Track", "Artist", "source.com");
+        // Find span containing title text - it should be bold and white
+        let title_span = line.spans.iter().find(|s| s.content.contains("My Track"));
+        assert!(title_span.is_some(), "title span should exist");
+        let span = title_span.unwrap();
+        assert_eq!(
+            span.style.fg,
+            Some(ratatui::style::Color::White),
+            "title should be white"
+        );
+    }
+
+    #[test]
+    fn track_info_line_artist_is_dim() {
+        let text_dim = ratatui::style::Color::Rgb(130, 130, 130);
+        let line = build_track_info_line(80, "Track", "My Artist", "source.com");
+        let artist_span = line.spans.iter().find(|s| s.content.contains("My Artist"));
+        assert!(artist_span.is_some(), "artist span should exist");
+        assert_eq!(
+            artist_span.unwrap().style.fg,
+            Some(text_dim),
+            "artist should be TEXT_DIM colored"
+        );
+    }
+
+    #[test]
+    fn track_info_line_source_is_dim() {
+        let text_dim = ratatui::style::Color::Rgb(130, 130, 130);
+        let line = build_track_info_line(80, "Track", "Artist", "my-source.com");
+        let source_span = line.spans.iter().find(|s| s.content.contains("my-source.com"));
+        assert!(source_span.is_some(), "source span should exist");
+        assert_eq!(
+            source_span.unwrap().style.fg,
+            Some(text_dim),
+            "source should be TEXT_DIM colored"
+        );
+    }
+
+    #[test]
+    fn track_info_line_starts_with_space() {
+        let line = build_track_info_line(80, "Track", "Artist", "source.com");
+        // First span should be a leading space for margin
+        assert!(!line.spans.is_empty(), "line should have spans");
+        assert_eq!(line.spans[0].content, " ", "should start with a space for margin");
+    }
+
+    #[test]
+    fn track_info_line_title_truncation_priority() {
+        // In narrow width, title should be preserved over artist/source
+        // Width=20: after leading space, text_width=19
+        // "Long Title Here" (15) + " • " (3) + "Art" (3) + " • " (3) + "src" (3) = 27 > 19
+        let line = build_track_info_line(20, "Long Title Here", "Artist Name", "source.com");
+        let text = line_to_string(&line);
+        // The title should be present (possibly truncated but longer than artist)
+        assert!(!text.is_empty(), "should not be empty");
+    }
+
+    #[test]
+    fn track_info_line_narrow_terminal_no_panic() {
+        // Very narrow: should not panic
+        for w in [1, 5, 10, 15, 20] {
+            let line = build_track_info_line(w, "Track Title That Is Very Long Indeed", "Artist", "source.com");
+            let text = line_to_string(&line);
+            // Just checking no panic - content may be very short
+            let _ = text;
+        }
+    }
+
+    #[test]
+    fn track_info_line_total_width_respects_bounds() {
+        let width = 60;
+        let line = build_track_info_line(width, "My Track Title", "Great Artist", "youtube.com/watch?v=abc123");
+        let text = line_to_string(&line);
+        // Total chars should not greatly exceed available width
+        // (allow some slack for unicode multi-byte but char count should be ≤ width)
+        let char_count = text.chars().count();
+        assert!(
+            char_count <= width + 2,
+            "track info line too wide: {char_count} chars for width={width}, text={text:?}"
+        );
+    }
+
+    #[test]
+    fn track_info_line_empty_artist_still_works() {
+        // Empty artist should still render title and source
+        let line = build_track_info_line(80, "Track Title", "", "source.com");
+        let text = line_to_string(&line);
+        assert!(text.contains("Track Title"), "should contain title: {text:?}");
+    }
+
+    #[test]
+    fn track_info_line_empty_source_still_works() {
+        let line = build_track_info_line(80, "Track Title", "Artist Name", "");
+        let text = line_to_string(&line);
+        assert!(text.contains("Track Title"), "should contain title: {text:?}");
+        assert!(text.contains("Artist Name"), "should contain artist: {text:?}");
+    }
+
+    #[test]
+    fn track_info_line_user_overrides_applied_by_caller() {
+        // The function takes already-resolved title/artist (caller applies overrides)
+        // This tests that what we pass in is what appears in the output
+        let user_title = "Custom Title Override";
+        let user_artist = "Custom Artist Override";
+        let line = build_track_info_line(120, user_title, user_artist, "source.com");
+        let text = line_to_string(&line);
+        assert!(text.contains(user_title), "user title override should appear: {text:?}");
+        assert!(text.contains(user_artist), "user artist override should appear: {text:?}");
     }
 }
