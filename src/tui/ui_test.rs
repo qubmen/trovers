@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::tui::ui::{
-        build_now_playing_header_line, build_progress_bar, build_separated_line,
-        build_track_info_line, calculate_distributed_widths, format_duration,
-        format_playback_state, truncate,
+        build_now_playing_header_line, build_playback_bar_line, build_progress_bar,
+        build_separated_line, build_track_info_line, calculate_distributed_widths,
+        format_duration, format_playback_state, truncate, CacheState,
     };
     use ratatui::style::Color;
 
@@ -733,5 +733,150 @@ mod tests {
         let text = line_to_string(&line);
         assert!(text.contains(user_title), "user title override should appear: {text:?}");
         assert!(text.contains(user_artist), "user artist override should appear: {text:?}");
+    }
+
+    // ── build_playback_bar_line tests ─────────────────────────────────────────
+
+    #[test]
+    fn playback_bar_cached_contains_pos_and_dur() {
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
+        let text = line_to_string(&line);
+        assert!(text.contains("00:03"), "should contain position: {text:?}");
+        assert!(text.contains("55:34"), "should contain duration: {text:?}");
+    }
+
+    #[test]
+    fn playback_bar_cached_contains_volume() {
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
+        let text = line_to_string(&line);
+        assert!(text.contains("♪ 85%"), "should contain volume: {text:?}");
+    }
+
+    #[test]
+    fn playback_bar_cached_shows_cache_indicator() {
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
+        let text = line_to_string(&line);
+        assert!(text.contains("◈ Cached"), "should contain cached indicator: {text:?}");
+    }
+
+    #[test]
+    fn playback_bar_streaming_shows_stream_indicator() {
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Streaming);
+        let text = line_to_string(&line);
+        assert!(text.contains("◌ Stream"), "should contain streaming indicator: {text:?}");
+    }
+
+    #[test]
+    fn playback_bar_downloading_shows_caching_indicator() {
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Downloading(0.45));
+        let text = line_to_string(&line);
+        assert!(text.contains("⟳ caching"), "should contain caching indicator: {text:?}");
+    }
+
+    #[test]
+    fn playback_bar_downloading_shows_percentage() {
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Downloading(0.45));
+        let text = line_to_string(&line);
+        assert!(text.contains("45%"), "should contain download percentage: {text:?}");
+    }
+
+    #[test]
+    fn playback_bar_downloading_shows_position_and_duration() {
+        let line = build_playback_bar_line(80, "01:23", 0.3, "04:56", "♪ 70%", CacheState::Downloading(0.6));
+        let text = line_to_string(&line);
+        assert!(text.contains("01:23"), "should contain position in download mode: {text:?}");
+        assert!(text.contains("04:56"), "should contain duration in download mode: {text:?}");
+    }
+
+    #[test]
+    fn playback_bar_no_panic_on_zero_width() {
+        // Should not panic with very small widths
+        for w in [0, 1, 5, 10] {
+            let _line = build_playback_bar_line(w, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
+        }
+    }
+
+    #[test]
+    fn playback_bar_no_panic_on_narrow_terminal() {
+        for w in [20, 30, 40] {
+            let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Cached);
+            let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Streaming);
+            let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Downloading(0.3));
+        }
+    }
+
+    #[test]
+    fn playback_bar_cached_separator_present() {
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
+        let text = line_to_string(&line);
+        // Should have a separator between volume and cache status
+        assert!(text.contains(" │ "), "should contain separator: {text:?}");
+    }
+
+    #[test]
+    fn playback_bar_cached_color_sea_green_on_cache_span() {
+        let sea_green = Color::Rgb(32, 178, 136);
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
+        let cache_span = line.spans.iter().find(|s| s.content.contains("◈ Cached"));
+        assert!(cache_span.is_some(), "cached span should exist");
+        assert_eq!(
+            cache_span.unwrap().style.fg,
+            Some(sea_green),
+            "cached indicator should be SEA_GREEN"
+        );
+    }
+
+    #[test]
+    fn playback_bar_streaming_color_dim_on_cache_span() {
+        let text_dim = Color::Rgb(130, 130, 130);
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Streaming);
+        let stream_span = line.spans.iter().find(|s| s.content.contains("◌ Stream"));
+        assert!(stream_span.is_some(), "streaming span should exist");
+        assert_eq!(
+            stream_span.unwrap().style.fg,
+            Some(text_dim),
+            "streaming indicator should be TEXT_DIM"
+        );
+    }
+
+    #[test]
+    fn playback_bar_downloading_0_percent() {
+        // dl_ratio = 0.0 → "0%"
+        let line = build_playback_bar_line(80, "00:00", 0.0, "10:00", "♪ 80%", CacheState::Downloading(0.0));
+        let text = line_to_string(&line);
+        assert!(text.contains("0%"), "should show 0% when download just started: {text:?}");
+    }
+
+    #[test]
+    fn playback_bar_downloading_100_percent() {
+        // dl_ratio = 1.0 → "100%"
+        let line = build_playback_bar_line(80, "05:00", 0.5, "10:00", "♪ 80%", CacheState::Downloading(1.0));
+        let text = line_to_string(&line);
+        assert!(text.contains("100%"), "should show 100% when download complete: {text:?}");
+    }
+
+    #[test]
+    fn cache_state_equality() {
+        assert_eq!(CacheState::Cached, CacheState::Cached);
+        assert_eq!(CacheState::Streaming, CacheState::Streaming);
+        assert_ne!(CacheState::Cached, CacheState::Streaming);
+    }
+
+    #[test]
+    fn playback_bar_starts_with_space() {
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
+        assert!(!line.spans.is_empty(), "should have spans");
+        assert_eq!(line.spans[0].content, " ", "should start with leading space");
+    }
+
+    #[test]
+    fn playback_bar_ratio_full_no_panic() {
+        // ratio=1.0 should fill entire progress bar without panic
+        let _line = build_playback_bar_line(80, "55:34", 1.0, "55:34", "♪ 80%", CacheState::Cached);
+    }
+
+    #[test]
+    fn playback_bar_ratio_zero_no_panic() {
+        let _line = build_playback_bar_line(80, "00:00", 0.0, "55:34", "♪ 80%", CacheState::Cached);
     }
 }

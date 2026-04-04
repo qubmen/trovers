@@ -521,8 +521,14 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
     let dur_str = format_duration(track.duration);
     let vol_str = format!("♪ {}%", app.config.default_volume);
 
-    let labels_width = 1 + pos_str.len() + 1 + 1 + dur_str.len() + 3 + vol_str.len() + 1;
-    let bar_width = (area.width as usize).saturating_sub(labels_width);
+    let cache_state = if app.downloading.contains(&track.video_id) {
+        CacheState::Downloading(app.download_progress as f64 / 100.0)
+    } else {
+        match track.cache_status {
+            CacheStatus::Cached => CacheState::Cached,
+            CacheStatus::Streaming => CacheState::Streaming,
+        }
+    };
 
     let ratio = if track.duration > 0 {
         (app.position / track.duration as f64).clamp(0.0, 1.0)
@@ -530,23 +536,144 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
         0.0
     };
 
+    let line = build_playback_bar_line(
+        area.width as usize,
+        &pos_str,
+        ratio,
+        &dur_str,
+        &vol_str,
+        cache_state,
+    );
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Cache status for playback bar display.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CacheState {
+    /// Track is fully cached locally.
+    Cached,
+    /// Track is streaming (not cached).
+    Streaming,
+    /// Track is currently downloading; ratio is 0.0–1.0.
+    Downloading(f64),
+}
+
+/// Build the integrated playback bar line for row 3 of the now-playing area.
+/// Layout: ` pos_str [progress bar] dur_str  |  vol_str  |  cache_status `
+pub(crate) fn build_playback_bar_line<'a>(
+    width: usize,
+    pos_str: &str,
+    ratio: f64,
+    dur_str: &str,
+    vol_str: &str,
+    cache_state: CacheState,
+) -> Line<'a> {
+    // Build the cache status string
+    let cache_str = match &cache_state {
+        CacheState::Cached => "◈ Cached".to_string(),
+        CacheState::Streaming => "◌ Stream".to_string(),
+        CacheState::Downloading(_) => "⟳ Caching".to_string(),
+    };
+
+    // In downloading state, we replace the volume section with download progress bar
+    if let CacheState::Downloading(dl_ratio) = cache_state {
+        return build_downloading_bar_line(width, pos_str, ratio, dur_str, dl_ratio);
+    }
+
+    // Fixed label widths: " pos " + " dur  |  vol  |  cache "
+    // " " (1) + pos + " " (1) = pos section prefix/suffix
+    // " " (1) + dur + "  " (2) = dur section
+    // vol_str + "  " (2) = vol section
+    // "│ " (2) + cache_str + " " (1) = cache section
+    let sep = " │ ";
+    let sep_len = sep.chars().count();
+    let pos_len = pos_str.chars().count();
+    let dur_len = dur_str.chars().count();
+    let vol_len = vol_str.chars().count();
+    let cache_len = cache_str.chars().count();
+
+    // Right side: "  " + vol + sep + cache + " "
+    let right_fixed = 2 + vol_len + sep_len + cache_len + 1;
+    // Left fixed: " " + pos + " " + bar + " " + dur
+    let left_fixed = 1 + pos_len + 1 + 1 + dur_len;
+    let bar_width = width.saturating_sub(left_fixed + right_fixed).max(1);
+
     let bar = build_progress_bar(bar_width, ratio, '━', '─', '◉', SEA_GREEN, BORDER_IDLE);
 
-    let mut spans = vec![
+    let cache_color = match &cache_state {
+        CacheState::Cached => SEA_GREEN,
+        CacheState::Streaming => TEXT_DIM,
+        CacheState::Downloading(_) => GOLD,
+    };
+
+    let mut spans: Vec<Span<'static>> = vec![
         Span::raw(" "),
-        Span::styled(pos_str, Style::new().fg(TEXT_DIM)),
+        Span::styled(pos_str.to_string(), Style::new().fg(TEXT_DIM)),
         Span::raw(" "),
     ];
     spans.extend(bar);
     spans.extend([
         Span::raw(" "),
-        Span::styled(dur_str, Style::new().fg(TEXT_DIM)),
-        Span::raw("   "),
-        Span::styled(vol_str, Style::new().fg(TEXT_DIM)),
+        Span::styled(dur_str.to_string(), Style::new().fg(TEXT_DIM)),
+        Span::raw("  "),
+        Span::styled(vol_str.to_string(), Style::new().fg(TEXT_DIM)),
+        Span::styled(sep.to_string(), Style::new().fg(BORDER_IDLE)),
+        Span::styled(cache_str, Style::new().fg(cache_color)),
         Span::raw(" "),
     ]);
-    let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line), area);
+
+    Line::from(spans)
+}
+
+/// Build the playback bar line when track is downloading.
+/// Replaces the volume section with a download progress bar.
+fn build_downloading_bar_line<'a>(
+    width: usize,
+    pos_str: &str,
+    play_ratio: f64,
+    dur_str: &str,
+    dl_ratio: f64,
+) -> Line<'a> {
+    let pct_str = format!("{:.0}%", (dl_ratio * 100.0).clamp(0.0, 100.0));
+    let dl_label = "⟳ caching ";
+    let dl_label_len = dl_label.chars().count();
+    let pct_len = pct_str.chars().count();
+
+    let pos_len = pos_str.chars().count();
+    let dur_len = dur_str.chars().count();
+
+    // Fixed: " " + pos + " " + playbar + " " + dur + "  " + dl_label + dlbar + " " + pct + " "
+    let right_fixed = 2 + dl_label_len + 1 + pct_len + 1;
+    let left_fixed = 1 + pos_len + 1 + 1 + dur_len;
+    let total_bar_budget = width.saturating_sub(left_fixed + right_fixed).max(2);
+
+    // Split bar budget: 2/3 for playback, 1/3 for download
+    let play_bar_width = (total_bar_budget * 2 / 3).max(1);
+    let dl_bar_width = total_bar_budget.saturating_sub(play_bar_width).max(1);
+
+    let play_bar = build_progress_bar(play_bar_width, play_ratio, '━', '─', '◉', SEA_GREEN, BORDER_IDLE);
+    let dl_bar = build_progress_bar(dl_bar_width, dl_ratio, '▓', '░', '\0', GOLD, TEXT_DIM);
+
+    let mut spans: Vec<Span<'static>> = vec![
+        Span::raw(" "),
+        Span::styled(pos_str.to_string(), Style::new().fg(TEXT_DIM)),
+        Span::raw(" "),
+    ];
+    spans.extend(play_bar);
+    spans.extend([
+        Span::raw(" "),
+        Span::styled(dur_str.to_string(), Style::new().fg(TEXT_DIM)),
+        Span::raw("  "),
+        Span::styled(dl_label.to_string(), Style::new().fg(GOLD)),
+    ]);
+    spans.extend(dl_bar);
+    spans.extend([
+        Span::raw(" "),
+        Span::styled(pct_str, Style::new().fg(GOLD)),
+        Span::raw(" "),
+    ]);
+
+    Line::from(spans)
 }
 
 fn render_cache_and_eq(frame: &mut Frame, app: &App, area: Rect) {

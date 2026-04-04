@@ -147,14 +147,14 @@
 - Modify: `src/tui/ui.rs` (render_playback_bar function)
 - Modify: `src/tui/ui_test.rs`
 
-- [ ] redesign `render_playback_bar` to integrate time, progress, volume, and cache status
-- [ ] implement section layout: `time progress time | volume | cache` 
-- [ ] use improved `build_progress_bar` with proper colors
-- [ ] integrate cache status directly instead of separate row
-- [ ] handle downloading state with inline progress display
-- [ ] write tests for integrated layout calculations
-- [ ] write tests for cache status integration
-- [ ] run tests: `cargo test ui_test` - must pass before task 7
+- [x] redesign `render_playback_bar` to integrate time, progress, volume, and cache status
+- [x] implement section layout: `time progress time | volume | cache` 
+- [x] use improved `build_progress_bar` with proper colors
+- [x] integrate cache status directly instead of separate row
+- [x] handle downloading state with inline progress display
+- [x] write tests for integrated layout calculations
+- [x] write tests for cache status integration
+- [x] run tests: `cargo test ui_test` - must pass before task 7
 
 ### Task 7: Remove old cache row and update main render function
 
