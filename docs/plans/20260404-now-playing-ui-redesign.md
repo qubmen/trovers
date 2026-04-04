@@ -187,14 +187,14 @@
 **Files:**
 - Modify: `src/tui/ui_test.rs`
 
-- [ ] verify all requirements from Overview are implemented
-- [ ] test edge cases: very narrow terminal, no tracks, long titles
-- [ ] test all playback states: stopped, playing, paused, downloading
-- [ ] verify color scheme consistency with pirate theme
-- [ ] verify layout calculations work at minimum terminal dimensions
-- [ ] run full test suite: `cargo test`
-- [ ] manual testing: verify visual layout in terminal at different sizes
-- [ ] run tests: `cargo test ui_test` - must pass before task 10
+- [x] verify all requirements from Overview are implemented
+- [x] test edge cases: very narrow terminal, no tracks, long titles
+- [x] test all playback states: stopped, playing, paused, downloading
+- [x] verify color scheme consistency with pirate theme
+- [x] verify layout calculations work at minimum terminal dimensions
+- [x] run full test suite: `cargo test`
+- [x] manual testing: verify visual layout in terminal at different sizes (skipped - not automatable)
+- [x] run tests: `cargo test ui_test` - must pass before task 10
 
 ### Task 10: [Final] Update documentation
 

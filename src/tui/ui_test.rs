@@ -1081,4 +1081,415 @@ mod tests {
         assert_ne!(settings_focused, tracks_focused, "different panel titles should differ");
         assert_ne!(settings_idle, tracks_idle, "different panel titles should differ");
     }
+
+    // ── Task 9: Acceptance criteria and edge case verification ────────────────
+
+    // --- Requirement verification: Overview requirements ---
+
+    #[test]
+    fn requirement_header_centric_layout_has_now_playing_label() {
+        // "Header-centric layout: Row 1 becomes a proper header with 🎵 Now Playing label"
+        let playing = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.4×"));
+        let paused = build_now_playing_header_line(80, Some("⏸ Paused"), Some("1.0×"));
+        let no_track = build_now_playing_header_line(80, None, None);
+
+        for (name, line) in [("playing", &playing), ("paused", &paused), ("no_track", &no_track)] {
+            let text = line_to_string(line);
+            assert!(text.contains("🎵 Now Playing"),
+                "header must always show label in state {name}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn requirement_header_has_playback_status_center_and_speed_right() {
+        // "Row 1: 🎵 Now Playing (GOLD) | ▶️ Playing (white) | 1.4x (ACCENT)"
+        let gold = Color::Rgb(212, 175, 55);
+        let accent = Color::Rgb(206, 65, 43);
+
+        let line = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.4×"));
+        let text = line_to_string(&line);
+
+        assert!(text.contains("🎵 Now Playing"), "label present");
+        assert!(text.contains("▶ Playing"), "status present");
+        assert!(text.contains("1.4×"), "speed present");
+
+        let label_span = line.spans.iter().find(|s| s.content.contains("🎵 Now Playing"));
+        let speed_span = line.spans.iter().find(|s| s.content.contains("1.4×"));
+
+        assert_eq!(label_span.unwrap().style.fg, Some(gold), "label must be GOLD");
+        assert_eq!(speed_span.unwrap().style.fg, Some(accent), "speed must be ACCENT");
+    }
+
+    #[test]
+    fn requirement_track_info_row_has_title_artist_source() {
+        // "Row 2: TRACK TITLE (bold white) • Artist (TEXT_DIM) • source (TEXT_DIM, truncated)"
+        let white = Color::White;
+        let text_dim = Color::Rgb(130, 130, 130);
+
+        let line = build_track_info_line(80, "My Track Title", "Great Artist", "youtube.com/watch");
+        let text = line_to_string(&line);
+
+        assert!(text.contains("My Track Title"), "title present");
+        assert!(text.contains("Great Artist"), "artist present");
+        assert!(text.contains("youtube.com/watch"), "source present");
+        assert!(text.contains(" • "), "bullet separators present");
+
+        let title_span = line.spans.iter().find(|s| s.content.contains("My Track Title"));
+        let artist_span = line.spans.iter().find(|s| s.content.contains("Great Artist"));
+        let source_span = line.spans.iter().find(|s| s.content.contains("youtube.com/watch"));
+
+        assert_eq!(title_span.unwrap().style.fg, Some(white), "title must be white");
+        assert_eq!(artist_span.unwrap().style.fg, Some(text_dim), "artist must be TEXT_DIM");
+        assert_eq!(source_span.unwrap().style.fg, Some(text_dim), "source must be TEXT_DIM");
+    }
+
+    #[test]
+    fn requirement_playback_bar_has_time_progress_volume_cache() {
+        // "Row 3: 0:03 ████████████████──── 830:34 | ♪ 85% | ◈ Cached"
+        let line = build_playback_bar_line(80, "00:03", 0.1, "830:34", "♪ 85%", CacheState::Cached);
+        let text = line_to_string(&line);
+
+        assert!(text.contains("00:03"), "position present");
+        assert!(text.contains("830:34"), "duration present");
+        assert!(text.contains("♪ 85%"), "volume present");
+        assert!(text.contains("◈ Cached"), "cache status present");
+        assert!(text.contains(" │ "), "section separator present");
+    }
+
+    #[test]
+    fn requirement_pirate_theme_colors() {
+        // Verify the pirate theme color palette is used consistently
+        // ACCENT: Rgb(206,65,43) – red-orange
+        // GOLD: Rgb(212,175,55) – yellow
+        // SEA_GREEN: Rgb(32,178,136) – teal
+        // TEXT_DIM: Rgb(130,130,130) – gray
+        let accent = Color::Rgb(206, 65, 43);
+        let gold = Color::Rgb(212, 175, 55);
+        let sea_green = Color::Rgb(32, 178, 136);
+        let text_dim = Color::Rgb(130, 130, 130);
+
+        // Header: label=GOLD, speed=ACCENT
+        let header = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.4×"));
+        let label_span = header.spans.iter().find(|s| s.content.contains("🎵 Now Playing")).unwrap();
+        let speed_span = header.spans.iter().find(|s| s.content.contains("1.4×")).unwrap();
+        assert_eq!(label_span.style.fg, Some(gold), "header label must be GOLD");
+        assert_eq!(speed_span.style.fg, Some(accent), "header speed must be ACCENT");
+
+        // Track info: artist=TEXT_DIM
+        let track = build_track_info_line(80, "Title", "Artist", "source.com");
+        let artist_span = track.spans.iter().find(|s| s.content.contains("Artist")).unwrap();
+        assert_eq!(artist_span.style.fg, Some(text_dim), "artist must be TEXT_DIM");
+
+        // Playback bar: cached indicator=SEA_GREEN
+        let bar = build_playback_bar_line(80, "00:00", 0.0, "01:00", "♪ 80%", CacheState::Cached);
+        let cache_span = bar.spans.iter().find(|s| s.content.contains("◈ Cached")).unwrap();
+        assert_eq!(cache_span.style.fg, Some(sea_green), "cached indicator must be SEA_GREEN");
+
+        // Progress bar: fill color=SEA_GREEN, empty color=BORDER_IDLE
+        let border_idle = Color::Rgb(70, 70, 70);
+        let bar_spans = build_progress_bar(20, 0.5, '━', '─', '◉', sea_green, border_idle);
+        let fill_spans: Vec<_> = bar_spans.iter().filter(|s| s.content.contains('━')).collect();
+        let empty_spans: Vec<_> = bar_spans.iter().filter(|s| s.content.contains('─')).collect();
+        for s in &fill_spans { assert_eq!(s.style.fg, Some(sea_green), "fill must be SEA_GREEN"); }
+        for s in &empty_spans { assert_eq!(s.style.fg, Some(border_idle), "empty must be BORDER_IDLE"); }
+    }
+
+    // --- Edge case: very narrow terminal ---
+
+    #[test]
+    fn edge_case_minimum_terminal_width_80() {
+        // Verify correct behavior at minimum recommended width of 80 chars
+        let w = 80usize;
+        let header = build_now_playing_header_line(w, Some("▶ Playing"), Some("1.0×"));
+        let track = build_track_info_line(w, "Track Title", "Artist", "source.com");
+        let bar = build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Cached);
+
+        // At 80 chars, all three main sections should fit
+        assert!(line_to_string(&header).contains("🎵 Now Playing"));
+        assert!(line_to_string(&track).contains("Track Title"));
+        assert!(line_to_string(&bar).contains("◈ Cached"));
+    }
+
+    #[test]
+    fn edge_case_minimum_terminal_width_40_no_panic() {
+        // At 40 chars (below recommended), should not panic but content may be limited
+        let w = 40usize;
+        let _h = build_now_playing_header_line(w, Some("▶ Playing"), Some("1.0×"));
+        let _t = build_track_info_line(w, "A Very Long Track Title Indeed", "Long Artist Name", "very-long-source-url.com/watch?v=abc");
+        let _b = build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Cached);
+    }
+
+    #[test]
+    fn edge_case_very_narrow_terminal_width_20_no_panic() {
+        // At 20 chars (very narrow), should not panic
+        for w in [1, 5, 10, 15, 20] {
+            let _h = build_now_playing_header_line(w, Some("▶ Playing"), Some("1.0×"));
+            let _t = build_track_info_line(w, "Track Title", "Artist Name", "source.com");
+            let _b_cached = build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Cached);
+            let _b_stream = build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Streaming);
+            let _b_dl = build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Downloading(0.5));
+        }
+    }
+
+    #[test]
+    fn edge_case_minimum_terminal_width_layout_calculations() {
+        // Verify layout calculations don't underflow or panic at narrow widths
+        for w in [20, 30, 40, 60, 80] {
+            let widths = calculate_distributed_widths(w, 3, &[(0, 15), (2, 5)]);
+            // Sum should equal total_width
+            assert_eq!(widths.iter().sum::<usize>(), w,
+                "widths should sum to total for w={w}: {widths:?}");
+        }
+    }
+
+    // --- Edge case: no tracks ---
+
+    #[test]
+    fn edge_case_no_track_header_shows_no_track_selected() {
+        let line = build_now_playing_header_line(80, None, None);
+        let text = line_to_string(&line);
+        assert!(text.contains("No track selected"), "no-track state: {text:?}");
+    }
+
+    #[test]
+    fn edge_case_no_track_header_still_has_label() {
+        // Even with no track, the 🎵 Now Playing label must be present
+        let line = build_now_playing_header_line(80, None, None);
+        assert!(line_to_string(&line).contains("🎵 Now Playing"));
+    }
+
+    #[test]
+    fn edge_case_no_track_does_not_show_speed() {
+        // Without a track there's no speed to show
+        let line = build_now_playing_header_line(80, None, None);
+        let text = line_to_string(&line);
+        // In no-track mode, no speed "×" suffix should appear
+        assert!(!text.contains('×'), "no track should not show speed: {text:?}");
+    }
+
+    // --- Edge case: long titles ---
+
+    #[test]
+    fn edge_case_very_long_title_truncated_with_ellipsis() {
+        let long_title = "A".repeat(200);
+        let line = build_track_info_line(80, &long_title, "Artist", "source.com");
+        let text = line_to_string(&line);
+        // Content should fit within width (leading space + content)
+        let char_count = text.chars().count();
+        assert!(char_count <= 82, "long title must be truncated: {char_count} chars");
+        // Truncation should use ellipsis
+        assert!(text.contains('…'), "truncated text should end with ellipsis: {text:?}");
+    }
+
+    #[test]
+    fn edge_case_very_long_artist_truncated() {
+        let long_artist = "B".repeat(200);
+        let line = build_track_info_line(80, "Short Title", &long_artist, "source.com");
+        let text = line_to_string(&line);
+        let char_count = text.chars().count();
+        assert!(char_count <= 82, "long artist must be truncated: {char_count} chars");
+    }
+
+    #[test]
+    fn edge_case_very_long_source_truncated() {
+        let long_source = "https://example.com/".repeat(20);
+        let line = build_track_info_line(80, "Title", "Artist", &long_source);
+        let text = line_to_string(&line);
+        let char_count = text.chars().count();
+        assert!(char_count <= 82, "long source must be truncated: {char_count} chars");
+    }
+
+    #[test]
+    fn edge_case_long_title_preserves_priority_over_artist_and_source() {
+        // Title has highest priority - even in tight space, title should appear
+        let line = build_track_info_line(30, "My Important Track Title", "Artist", "src.com");
+        let text = line_to_string(&line);
+        // "My Important Track Title" (24) doesn't fit in 29 chars with separators,
+        // but its beginning should be there since it has priority
+        assert!(text.starts_with(" M") || text.contains("My "),
+            "title should have truncation priority: {text:?}");
+    }
+
+    // --- All playback states: stopped/no-track, playing, paused, downloading ---
+
+    #[test]
+    fn playback_state_stopped_no_track_display() {
+        // Stopped/no track state
+        let (icon, text) = format_playback_state(false, false, false);
+        assert_eq!(icon, "", "stopped has no icon");
+        assert_eq!(text, "No track", "stopped shows No track");
+
+        // Header with no track
+        let line = build_now_playing_header_line(80, None, None);
+        let header_text = line_to_string(&line);
+        assert!(header_text.contains("No track selected"), "no-track header text");
+    }
+
+    #[test]
+    fn playback_state_loading_display() {
+        // Loading state (track selected but player not ready)
+        let (icon, text) = format_playback_state(false, false, true);
+        assert_eq!(icon, "⏳", "loading has hourglass icon");
+        assert_eq!(text, "Loading…", "loading shows Loading text");
+    }
+
+    #[test]
+    fn playback_state_playing_display() {
+        let (icon, text) = format_playback_state(true, false, true);
+        assert_eq!(icon, "▶", "playing has play icon");
+        assert_eq!(text, "Playing", "playing shows Playing text");
+
+        let center = format!("{} {}", icon, text);
+        let line = build_now_playing_header_line(80, Some(&center), Some("1.5×"));
+        let header_text = line_to_string(&line);
+        assert!(header_text.contains("▶ Playing"), "header shows playing state");
+    }
+
+    #[test]
+    fn playback_state_paused_display() {
+        let (icon, text) = format_playback_state(true, true, true);
+        assert_eq!(icon, "⏸", "paused has pause icon");
+        assert_eq!(text, "Paused", "paused shows Paused text");
+
+        let center = format!("{} {}", icon, text);
+        let line = build_now_playing_header_line(80, Some(&center), Some("1.0×"));
+        let header_text = line_to_string(&line);
+        assert!(header_text.contains("⏸ Paused"), "header shows paused state");
+    }
+
+    #[test]
+    fn playback_state_downloading_display() {
+        // Downloading state shows caching indicator with percentage
+        let line_25 = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Downloading(0.25));
+        let line_75 = build_playback_bar_line(80, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Downloading(0.75));
+
+        let text_25 = line_to_string(&line_25);
+        let text_75 = line_to_string(&line_75);
+
+        assert!(text_25.contains("⟳ caching"), "downloading: caching label at 25%: {text_25:?}");
+        assert!(text_25.contains("25%"), "downloading: percentage 25%: {text_25:?}");
+        assert!(text_75.contains("⟳ caching"), "downloading: caching label at 75%: {text_75:?}");
+        assert!(text_75.contains("75%"), "downloading: percentage 75%: {text_75:?}");
+    }
+
+    #[test]
+    fn playback_state_all_cache_states_covered() {
+        // All three cache states must be visually distinct and clearly indicated
+        let cached = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Cached);
+        let streaming = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Streaming);
+        let downloading = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Downloading(0.5));
+
+        let ct = line_to_string(&cached);
+        let st = line_to_string(&streaming);
+        let dt = line_to_string(&downloading);
+
+        assert!(ct.contains("◈ Cached"), "Cached state");
+        assert!(st.contains("◌ Stream"), "Streaming state");
+        assert!(dt.contains("⟳ caching"), "Downloading state");
+
+        // States must be distinct from each other
+        assert_ne!(ct, st, "cached ≠ streaming");
+        assert_ne!(ct, dt, "cached ≠ downloading");
+        assert_ne!(st, dt, "streaming ≠ downloading");
+    }
+
+    // --- Layout calculations at minimum terminal dimensions ---
+
+    #[test]
+    fn layout_progress_bar_minimum_width_one() {
+        // Progress bar with width=1 should produce exactly 1 character
+        let spans = build_progress_bar(1, 0.0, '━', '─', '◉', Color::Green, Color::Gray);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.chars().count(), 1, "width=1 progress bar");
+    }
+
+    #[test]
+    fn layout_distributed_widths_minimum_width() {
+        // At minimum terminal width, widths should not panic and should not overflow
+        let w = 10usize;
+        // Three sections with fixed sizes that together might exceed w
+        let widths = calculate_distributed_widths(w, 3, &[(1, 5), (2, 3)]);
+        assert_eq!(widths[1], 5, "fixed section 1");
+        assert_eq!(widths[2], 3, "fixed section 2");
+        assert_eq!(widths[0], w.saturating_sub(5 + 3), "flexible section saturates");
+    }
+
+    #[test]
+    fn layout_header_width_80_all_sections_present() {
+        // At exactly 80 chars, the header should display all three sections
+        let w = 80usize;
+        let line = build_now_playing_header_line(w, Some("▶ Playing"), Some("1.4×"));
+        let text = line_to_string(&line);
+        assert!(text.contains("🎵 Now Playing"), "label at w=80");
+        assert!(text.contains("▶ Playing"), "status at w=80");
+        assert!(text.contains("1.4×"), "speed at w=80");
+    }
+
+    #[test]
+    fn layout_track_info_width_bounds_respected() {
+        // At various widths, track info line should not exceed width + margin
+        for w in [40, 60, 80, 100, 120] {
+            let line = build_track_info_line(w, "Song Title That Is Somewhat Long", "Artist Name Here", "source.com/path");
+            let char_count = line_to_string(&line).chars().count();
+            assert!(char_count <= w + 2,
+                "track info at w={w}: {char_count} chars > {}", w + 2);
+        }
+    }
+
+    #[test]
+    fn layout_format_duration_edge_cases() {
+        // Test boundary values for duration formatting
+        assert_eq!(format_duration(0), "00:00", "zero duration");
+        assert_eq!(format_duration(59), "00:59", "59 seconds");
+        assert_eq!(format_duration(3599), "59:59", "59m59s");
+        assert_eq!(format_duration(3600), "01:00:00", "exactly 1 hour");
+        assert_eq!(format_duration(u64::MAX / 3600 * 3600), // large hours value
+            format!("{:02}:00:00", u64::MAX / 3600), "large duration");
+    }
+
+    #[test]
+    fn layout_truncate_respects_unicode_char_boundaries() {
+        // Unicode characters should count as one char each
+        let emoji = "🎵🎶🎼🎹🎸"; // 5 emoji
+        let result = truncate(emoji, 3);
+        assert_eq!(result.chars().count(), 3, "truncated emoji count");
+        assert!(result.ends_with('…'), "truncated with ellipsis");
+    }
+
+    // --- Verify no old render_cache_and_eq function (removed in task 7) ---
+
+    #[test]
+    fn cache_status_integrated_into_row3_not_separate_row() {
+        // Cache status is part of the playback bar (row 3), not a fourth separate row.
+        // Verify by checking the playback bar contains cache info directly.
+        for state in [CacheState::Cached, CacheState::Streaming, CacheState::Downloading(0.3)] {
+            let line = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", state.clone());
+            let text = line_to_string(&line);
+            let has_cache_info = text.contains("◈ Cached")
+                || text.contains("◌ Stream")
+                || text.contains("⟳ caching");
+            assert!(has_cache_info, "row 3 must contain cache info for state {state:?}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn all_three_row_functions_exist_and_produce_output() {
+        // Verify the three key builder functions exist and produce non-empty lines
+        let header = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.0×"));
+        let track = build_track_info_line(80, "Title", "Artist", "source");
+        let bar = build_playback_bar_line(80, "00:00", 0.0, "01:00", "♪ 80%", CacheState::Cached);
+
+        assert!(!header.spans.is_empty(), "header should produce spans");
+        assert!(!track.spans.is_empty(), "track info should produce spans");
+        assert!(!bar.spans.is_empty(), "playback bar should produce spans");
+    }
+
+    // manual test (skipped - not automatable)
+    // Visual layout verification in terminal at different sizes requires human inspection.
+    // Items to manually verify when running the app:
+    //   - 80x24 minimum: all three rows visible
+    //   - 120x30 recommended: full track info visible without truncation
+    //   - Pirate theme colors visible in dark terminal
+    //   - Progress bar updates smoothly during playback
+    //   - Cache status updates correctly when downloading
 }
