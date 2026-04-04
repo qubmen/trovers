@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::ui::{format_duration, truncate};
+    use crate::tui::ui::{build_progress_bar, format_duration, truncate};
+    use ratatui::style::Color;
 
     // ── format_duration tests ─────────────────────────────────────────────
 
@@ -108,87 +109,176 @@ mod tests {
     }
 
     // ── build_progress_bar tests ──────────────────────────────────────────
-    // Note: build_progress_bar is private, so we test it via the public API
-    // by checking the behavior through observable properties (string content).
-    // We re-implement the logic here for direct unit testing.
 
-    fn make_bar(width: usize, ratio: f64, fill: char, empty: char, thumb: char) -> String {
-        if width == 0 {
-            return String::new();
-        }
-        let filled = ((ratio * width as f64) as usize).min(width);
-        let mut bar = String::with_capacity(width + 1);
+    /// Collect all characters from a Vec<Span> into a single String.
+    fn spans_to_string(spans: &[ratatui::text::Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
 
-        if thumb != '\0' && filled < width {
-            let pre = filled.saturating_sub(1);
-            bar.extend(std::iter::repeat(fill).take(pre));
-            bar.push(thumb);
-            bar.extend(std::iter::repeat(empty).take(width - pre - 1));
-        } else {
-            bar.extend(std::iter::repeat(fill).take(filled));
-            bar.extend(std::iter::repeat(empty).take(width - filled));
-        }
-
-        bar
+    /// Count characters matching predicate across all spans.
+    fn spans_char_count(spans: &[ratatui::text::Span], ch: char) -> usize {
+        spans_to_string(spans).chars().filter(|&c| c == ch).count()
     }
 
     #[test]
     fn progress_bar_zero_width() {
-        let bar = make_bar(0, 0.5, '━', '─', '◉');
-        assert_eq!(bar, "");
+        let spans = build_progress_bar(0, 0.5, '━', '─', '◉', Color::Green, Color::Gray);
+        assert!(spans.is_empty());
     }
 
     #[test]
-    fn progress_bar_zero_ratio() {
-        let bar = make_bar(10, 0.0, '━', '─', '◉');
-        // At ratio=0.0, filled=0, thumb at position 0 (pre=0, saturating_sub)
-        // pre = 0.saturating_sub(1) = 0, push thumb, then 9 empty chars
-        assert_eq!(bar.chars().count(), 10);
-        assert!(bar.starts_with('◉'));
-        assert_eq!(bar.chars().filter(|&c| c == '─').count(), 9);
+    fn progress_bar_zero_ratio_with_thumb() {
+        // ratio=0.0 → filled=0, pre=0, thumb at start, then 9 empty chars
+        let spans = build_progress_bar(10, 0.0, '━', '─', '◉', Color::Green, Color::Gray);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 10);
+        assert!(s.starts_with('◉'));
+        assert_eq!(spans_char_count(&spans, '─'), 9);
     }
 
     #[test]
-    fn progress_bar_full_ratio() {
-        let bar = make_bar(10, 1.0, '━', '─', '◉');
-        // filled = 10 = width, so no thumb case applies (filled < width is false)
-        assert_eq!(bar.chars().count(), 10);
-        assert_eq!(bar.chars().filter(|&c| c == '━').count(), 10);
-        assert_eq!(bar.chars().filter(|&c| c == '─').count(), 0);
+    fn progress_bar_full_ratio_with_thumb() {
+        // filled = 10 = width, no thumb case (filled < width is false)
+        let spans = build_progress_bar(10, 1.0, '━', '─', '◉', Color::Green, Color::Gray);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 10);
+        assert_eq!(spans_char_count(&spans, '━'), 10);
+        assert_eq!(spans_char_count(&spans, '─'), 0);
     }
 
     #[test]
-    fn progress_bar_half_ratio() {
-        let bar = make_bar(10, 0.5, '━', '─', '◉');
-        // filled = 5, pre = 4, so 4 filled + thumb + 5 empty = 10
-        assert_eq!(bar.chars().count(), 10);
-        assert_eq!(bar.chars().filter(|&c| c == '━').count(), 4);
-        assert_eq!(bar.chars().filter(|&c| c == '◉').count(), 1);
-        assert_eq!(bar.chars().filter(|&c| c == '─').count(), 5);
+    fn progress_bar_half_ratio_with_thumb() {
+        // filled = 5, pre = 4 → 4 fill + thumb + 5 empty = 10
+        let spans = build_progress_bar(10, 0.5, '━', '─', '◉', Color::Green, Color::Gray);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 10);
+        assert_eq!(spans_char_count(&spans, '━'), 4);
+        assert_eq!(spans_char_count(&spans, '◉'), 1);
+        assert_eq!(spans_char_count(&spans, '─'), 5);
     }
 
     #[test]
     fn progress_bar_no_thumb() {
         // thumb = '\0' means no thumb character
-        let bar = make_bar(10, 0.4, '▓', '░', '\0');
-        // filled = 4, no thumb
-        assert_eq!(bar.chars().count(), 10);
-        assert_eq!(bar.chars().filter(|&c| c == '▓').count(), 4);
-        assert_eq!(bar.chars().filter(|&c| c == '░').count(), 6);
+        let spans = build_progress_bar(10, 0.4, '▓', '░', '\0', Color::Yellow, Color::DarkGray);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 10);
+        assert_eq!(spans_char_count(&spans, '▓'), 4);
+        assert_eq!(spans_char_count(&spans, '░'), 6);
     }
 
     #[test]
-    fn progress_bar_width_one() {
-        let bar = make_bar(1, 0.5, '━', '─', '◉');
-        // filled=0, pre=0.saturating_sub(1)=0, push thumb, then 0 empty = "◉"
-        assert_eq!(bar.chars().count(), 1);
+    fn progress_bar_width_one_with_thumb() {
+        // filled=0, pre=0, push thumb, then 0 empty → single char
+        let spans = build_progress_bar(1, 0.5, '━', '─', '◉', Color::Green, Color::Gray);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 1);
     }
 
     #[test]
     fn progress_bar_ratio_clamped_at_one() {
-        let bar = make_bar(5, 1.5, '━', '─', '◉');
-        // ratio clamped via min(width): filled = min(7, 5) = 5, no thumb
-        assert_eq!(bar.chars().count(), 5);
-        assert_eq!(bar.chars().filter(|&c| c == '━').count(), 5);
+        // ratio > 1.0 clamped: filled = min(7, 5) = 5, no thumb
+        let spans = build_progress_bar(5, 1.5, '━', '─', '◉', Color::Green, Color::Gray);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 5);
+        assert_eq!(spans_char_count(&spans, '━'), 5);
+    }
+
+    #[test]
+    fn progress_bar_filled_spans_use_fill_color() {
+        // filled section must use fill_color
+        let fill_color = Color::Rgb(32, 178, 136); // SEA_GREEN
+        let empty_color = Color::Rgb(70, 70, 70);   // BORDER_IDLE
+        let spans = build_progress_bar(10, 0.5, '━', '─', '◉', fill_color, empty_color);
+
+        // The fill and thumb spans should use fill_color
+        // The empty span should use empty_color
+        let fill_spans: Vec<_> = spans
+            .iter()
+            .filter(|s| s.content.contains('━') || s.content.contains('◉'))
+            .collect();
+        let empty_spans: Vec<_> = spans
+            .iter()
+            .filter(|s| s.content.contains('─'))
+            .collect();
+
+        for s in &fill_spans {
+            assert_eq!(s.style.fg, Some(fill_color), "fill/thumb span should have fill_color");
+        }
+        for s in &empty_spans {
+            assert_eq!(s.style.fg, Some(empty_color), "empty span should have empty_color");
+        }
+    }
+
+    #[test]
+    fn progress_bar_no_thumb_colors() {
+        // No-thumb mode: filled uses fill_color, empty uses empty_color
+        let fill_color = Color::Rgb(212, 175, 55);  // GOLD
+        let empty_color = Color::Rgb(130, 130, 130); // TEXT_DIM
+        let spans = build_progress_bar(10, 0.4, '▓', '░', '\0', fill_color, empty_color);
+
+        let fill_spans: Vec<_> = spans.iter().filter(|s| s.content.contains('▓')).collect();
+        let empty_spans: Vec<_> = spans.iter().filter(|s| s.content.contains('░')).collect();
+
+        for s in &fill_spans {
+            assert_eq!(s.style.fg, Some(fill_color), "fill span should have fill_color");
+        }
+        for s in &empty_spans {
+            assert_eq!(s.style.fg, Some(empty_color), "empty span should have empty_color");
+        }
+    }
+
+    #[test]
+    fn progress_bar_zero_ratio_no_thumb() {
+        // No thumb, ratio=0: all empty with empty_color
+        let fill_color = Color::Green;
+        let empty_color = Color::Gray;
+        let spans = build_progress_bar(8, 0.0, '▓', '░', '\0', fill_color, empty_color);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 8);
+        assert_eq!(spans_char_count(&spans, '░'), 8);
+        assert_eq!(spans_char_count(&spans, '▓'), 0);
+
+        // All spans should use empty_color
+        for span in &spans {
+            assert_eq!(span.style.fg, Some(empty_color));
+        }
+    }
+
+    #[test]
+    fn progress_bar_full_ratio_no_thumb() {
+        // No thumb, ratio=1: all filled with fill_color
+        let fill_color = Color::Green;
+        let empty_color = Color::Gray;
+        let spans = build_progress_bar(8, 1.0, '▓', '░', '\0', fill_color, empty_color);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 8);
+        assert_eq!(spans_char_count(&spans, '▓'), 8);
+        assert_eq!(spans_char_count(&spans, '░'), 0);
+
+        for span in &spans {
+            assert_eq!(span.style.fg, Some(fill_color));
+        }
+    }
+
+    #[test]
+    fn progress_bar_thumb_at_start_edge_case() {
+        // ratio=0.0, width=5: filled=0, pre=0, thumb at pos 0, then 4 empty
+        let spans = build_progress_bar(5, 0.0, '━', '─', '◉', Color::Green, Color::Gray);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 5);
+        assert!(s.starts_with('◉'));
+        assert_eq!(spans_char_count(&spans, '─'), 4);
+    }
+
+    #[test]
+    fn progress_bar_thumb_at_end_edge_case() {
+        // ratio close to 1.0, width=5: filled=4, pre=3 → 3 fill + thumb + 1 empty
+        let spans = build_progress_bar(5, 0.8, '━', '─', '◉', Color::Green, Color::Gray);
+        let s = spans_to_string(&spans);
+        assert_eq!(s.chars().count(), 5);
+        assert_eq!(spans_char_count(&spans, '━'), 3);
+        assert_eq!(spans_char_count(&spans, '◉'), 1);
+        assert_eq!(spans_char_count(&spans, '─'), 1);
     }
 }

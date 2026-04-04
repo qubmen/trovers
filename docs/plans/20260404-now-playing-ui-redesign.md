@@ -90,12 +90,12 @@
 - Modify: `src/tui/ui.rs` (build_progress_bar function)
 - Modify: `src/tui/ui_test.rs`
 
-- [ ] modify `build_progress_bar` to properly use `empty_color` parameter instead of applying `fill_color` to entire span
-- [ ] create separate spans for filled and empty sections with correct colors
-- [ ] improve thumb positioning logic to handle edge cases better
-- [ ] write tests for new color behavior (filled vs empty sections)
-- [ ] write tests for thumb positioning edge cases
-- [ ] run tests: `cargo test ui_test` - must pass before task 3
+- [x] modify `build_progress_bar` to properly use `empty_color` parameter instead of applying `fill_color` to entire span
+- [x] create separate spans for filled and empty sections with correct colors
+- [x] improve thumb positioning logic to handle edge cases better
+- [x] write tests for new color behavior (filled vs empty sections)
+- [x] write tests for thumb positioning edge cases
+- [x] run tests: `cargo test ui_test` - must pass before task 3
 
 ### Task 3: Create layout calculation utilities
 
