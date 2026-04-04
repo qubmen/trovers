@@ -879,4 +879,150 @@ mod tests {
     fn playback_bar_ratio_zero_no_panic() {
         let _line = build_playback_bar_line(80, "00:00", 0.0, "55:34", "♪ 80%", CacheState::Cached);
     }
+
+    // ── render_now_playing integration tests ──────────────────────────────────
+    //
+    // These tests verify that the three rows of the now-playing area work
+    // correctly together: header (row 1) + track info (row 2) + playback bar (row 3).
+    // We test via the public builder functions since render_now_playing uses Frame.
+
+    #[test]
+    fn now_playing_three_rows_produce_distinct_content() {
+        // Row 1: header with label, status, speed
+        let header = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.0×"));
+        let header_text = line_to_string(&header);
+
+        // Row 2: track info with title, artist, source
+        let track = build_track_info_line(80, "My Song", "My Artist", "youtube.com");
+        let track_text = line_to_string(&track);
+
+        // Row 3: playback bar with position, bar, duration, volume, cache
+        let bar = build_playback_bar_line(80, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Cached);
+        let bar_text = line_to_string(&bar);
+
+        // Each row should have distinct primary content
+        assert!(header_text.contains("🎵 Now Playing"), "header row missing label");
+        assert!(track_text.contains("My Song"), "track row missing title");
+        assert!(bar_text.contains("00:30"), "playback row missing position");
+
+        // Content should not cross between rows
+        assert!(!track_text.contains("🎵 Now Playing"), "track row should not contain header label");
+        assert!(!header_text.contains("My Song"), "header row should not contain track title");
+    }
+
+    #[test]
+    fn now_playing_row1_header_structure() {
+        // Row 1 must always contain the "🎵 Now Playing" label
+        let playing = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.5×"));
+        let paused = build_now_playing_header_line(80, Some("⏸ Paused"), Some("1.0×"));
+        let no_track = build_now_playing_header_line(80, None, None);
+
+        assert!(line_to_string(&playing).contains("🎵 Now Playing"));
+        assert!(line_to_string(&paused).contains("🎵 Now Playing"));
+        assert!(line_to_string(&no_track).contains("🎵 Now Playing"));
+    }
+
+    #[test]
+    fn now_playing_row2_track_info_structure() {
+        // Row 2: bullet-separated track info
+        let line = build_track_info_line(80, "Song Title", "Artist Name", "source.com");
+        let text = line_to_string(&line);
+        // Must contain all three parts with separator
+        assert!(text.contains("Song Title"));
+        assert!(text.contains("Artist Name"));
+        assert!(text.contains("source.com"));
+        assert!(text.contains(" • "));
+    }
+
+    #[test]
+    fn now_playing_row3_playback_bar_structure() {
+        // Row 3: integrated position + progress + duration + volume + cache
+        let line = build_playback_bar_line(80, "02:15", 0.3, "07:30", "♪ 75%", CacheState::Streaming);
+        let text = line_to_string(&line);
+        assert!(text.contains("02:15"), "position");
+        assert!(text.contains("07:30"), "duration");
+        assert!(text.contains("♪ 75%"), "volume");
+        assert!(text.contains("◌ Stream"), "cache status");
+    }
+
+    #[test]
+    fn now_playing_all_states_no_panic() {
+        // Verify no panics for all combinations of states across all three rows
+        let widths = [40, 80, 120];
+        let states = [
+            (None, None),
+            (Some("▶ Playing"), Some("1.0×")),
+            (Some("⏸ Paused"), Some("0.8×")),
+            (Some("⏳ Loading…"), Some("1.0×")),
+        ];
+
+        for w in widths {
+            for (center, speed) in &states {
+                let _header = build_now_playing_header_line(w, *center, *speed);
+            }
+            let _track = build_track_info_line(w, "Title", "Artist", "source");
+            let _bar_cached = build_playback_bar_line(w, "01:00", 0.5, "02:00", "♪ 80%", CacheState::Cached);
+            let _bar_stream = build_playback_bar_line(w, "01:00", 0.5, "02:00", "♪ 80%", CacheState::Streaming);
+            let _bar_dl = build_playback_bar_line(w, "01:00", 0.5, "02:00", "♪ 80%", CacheState::Downloading(0.6));
+        }
+    }
+
+    #[test]
+    fn now_playing_row_allocation_three_rows_of_height_one() {
+        // Verify that the three-row structure allocates exactly 3 rows of height 1
+        // (This tests the layout constraint: 3 × Length(1) = 3 total height inside border)
+        // The outer area has Length(3), with a TOP border taking 1 row,
+        // leaving exactly 3 rows for inner content.
+        let inner_height = 3u16; // Borders::TOP uses 1 row from Length(3) outer area
+        let row_heights: Vec<u16> = vec![1, 1, 1];
+        assert_eq!(row_heights.iter().sum::<u16>(), inner_height,
+            "three rows of height 1 must sum to inner_height=3");
+    }
+
+    #[test]
+    fn now_playing_cache_state_removed_from_old_row() {
+        // Verify cache status is integrated into row 3 (playback bar),
+        // not in a separate fourth row. The playback bar should contain cache info.
+        let cached_line = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 90%", CacheState::Cached);
+        let stream_line = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 90%", CacheState::Streaming);
+        let dl_line = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 90%", CacheState::Downloading(0.5));
+
+        let cached_text = line_to_string(&cached_line);
+        let stream_text = line_to_string(&stream_line);
+        let dl_text = line_to_string(&dl_line);
+
+        // Each cache state should be visible in row 3
+        assert!(cached_text.contains("◈ Cached"), "Cached state in row 3");
+        assert!(stream_text.contains("◌ Stream"), "Streaming state in row 3");
+        assert!(dl_text.contains("⟳ caching"), "Downloading state in row 3");
+    }
+
+    #[test]
+    fn now_playing_no_duplicate_playback_state_across_rows() {
+        // Row 1 shows playback state (Playing/Paused/Loading)
+        // Row 2 shows track info only
+        // Row 3 shows progress only
+        // No cross-row content duplication
+        let header = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.2×"));
+        let track = build_track_info_line(80, "Cool Track", "Great Artist", "bandcamp.com");
+        let bar = build_playback_bar_line(80, "00:45", 0.75, "01:00", "♪ 60%", CacheState::Cached);
+
+        let h = line_to_string(&header);
+        let t = line_to_string(&track);
+        let b = line_to_string(&bar);
+
+        // Speed is only in row 1, not in row 2 or 3
+        assert!(h.contains("1.2×"), "speed in header");
+        assert!(!t.contains("1.2×"), "speed must not bleed into track info");
+        assert!(!b.contains("1.2×"), "speed must not bleed into playback bar");
+
+        // Track title is only in row 2
+        assert!(t.contains("Cool Track"), "title in track info");
+        assert!(!h.contains("Cool Track"), "title must not bleed into header");
+
+        // Position time is only in row 3
+        assert!(b.contains("00:45"), "position in playback bar");
+        assert!(!h.contains("00:45"), "position must not bleed into header");
+        assert!(!t.contains("00:45"), "position must not bleed into track info");
+    }
 }

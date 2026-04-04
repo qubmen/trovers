@@ -162,12 +162,12 @@
 - Modify: `src/tui/ui.rs` (render_now_playing, remove render_cache_and_eq)
 - Modify: `src/tui/ui_test.rs`
 
-- [ ] remove `render_cache_and_eq` function (functionality moved to row 3)
-- [ ] update `render_now_playing` to use new 3-row structure
-- [ ] ensure proper row allocation and spacing
-- [ ] clean up unused variables and calculations
-- [ ] write tests for overall render_now_playing integration
-- [ ] run tests: `cargo test ui_test` - must pass before task 8
+- [x] remove `render_cache_and_eq` function (functionality moved to row 3)
+- [x] update `render_now_playing` to use new 3-row structure
+- [x] ensure proper row allocation and spacing
+- [x] clean up unused variables and calculations
+- [x] write tests for overall render_now_playing integration
+- [x] run tests: `cargo test ui_test` - must pass before task 8
 
 ### Task 8: Apply UI consistency improvements
 

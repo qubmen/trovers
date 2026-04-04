@@ -676,47 +676,6 @@ fn build_downloading_bar_line<'a>(
     Line::from(spans)
 }
 
-fn render_cache_and_eq(frame: &mut Frame, app: &App, area: Rect) {
-    let status_str = if app.player.is_some() {
-        if app.is_paused { "⏸" } else { "♪" }
-    } else {
-        ""
-    };
-
-    let cache_part = if app.is_downloading() {
-        let labels_width = 9 + 4 + 1;
-        let bar_width = (area.width as usize)
-            .saturating_sub(labels_width + status_str.len() + 2)
-            .max(1);
-        let ratio = (app.download_progress / 100.0).clamp(0.0, 1.0) as f64;
-        let bar = build_progress_bar(bar_width, ratio, '▓', '░', '\0', GOLD, TEXT_DIM);
-
-        let pct_str = if app.download_progress > 0.0 {
-            format!(" {:.0}%", app.download_progress)
-        } else {
-            " …".to_string()
-        };
-        let mut cache_spans = vec![Span::styled(" caching ", Style::new().fg(GOLD))];
-        cache_spans.extend(bar);
-        cache_spans.push(Span::styled(pct_str, Style::new().fg(GOLD)));
-        cache_spans
-    } else {
-        vec![Span::raw("")]
-    };
-
-    let cache_len: usize = cache_part.iter().map(|s| s.content.len()).sum();
-    let pad = (area.width as usize)
-        .saturating_sub(cache_len + status_str.len() + 1)
-        .max(0);
-
-    let mut spans = cache_part;
-    spans.push(Span::raw(" ".repeat(pad)));
-    spans.push(Span::styled(status_str, Style::new().fg(SEA_GREEN)));
-    spans.push(Span::raw(" "));
-
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
 // ── Footer ────────────────────────────────────────────────────────────────
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
