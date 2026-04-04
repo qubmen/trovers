@@ -20,6 +20,23 @@ const SEA_GREEN: Color = Color::Rgb(32, 178, 136);
 const GOLD: Color = Color::Rgb(212, 175, 55);
 const TEXT_DIM: Color = Color::Rgb(130, 130, 130);
 const BORDER_IDLE: Color = Color::Rgb(70, 70, 70);
+/// Color for non-interactive / disabled sidebar items.
+const ITEM_DISABLED: Color = Color::Rgb(90, 90, 90);
+
+// ── Panel block builder ───────────────────────────────────────────────────
+
+/// Build a rounded-border panel block with consistent title and focus-aware border color.
+/// `title` should include surrounding spaces (e.g. `" My Panel "`).
+/// `is_focused` controls whether the border uses ACCENT or BORDER_IDLE.
+pub(crate) fn make_panel_block(title: &str, is_focused: bool) -> Block<'static> {
+    let border_color = if is_focused { ACCENT } else { BORDER_IDLE };
+    Block::default()
+        .title(title.to_string())
+        .title_style(Style::new().fg(Color::White).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(border_color))
+}
 
 // ── Entry point ───────────────────────────────────────────────────────────
 
@@ -84,7 +101,6 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let border_color = if app.focus == Focus::Sidebar { ACCENT } else { BORDER_IDLE };
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -130,8 +146,8 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     Line::styled(format!("   ▼ {count} more…"), Style::new().fg(TEXT_DIM))
                 }
                 SidebarItem::Separator => Line::raw(""),
-                SidebarItem::Music => Line::styled(" ♪ Music", Style::new().fg(TEXT_DIM)),
-                SidebarItem::Video => Line::styled(" ▶ Video", Style::new().fg(TEXT_DIM)),
+                SidebarItem::Music => Line::styled(" ♪ Music", Style::new().fg(ITEM_DISABLED)),
+                SidebarItem::Video => Line::styled(" ▶ Video", Style::new().fg(ITEM_DISABLED)),
                 SidebarItem::Plunder => {
                     let style = if is_selected {
                         Style::new().fg(Color::White).bg(ACCENT_DIM)
@@ -171,14 +187,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
         format!(" {}  [ {}–{} / {} ] ", app.playlist.name, first, last, total)
     };
 
-    let border_color = if app.focus == Focus::TrackList { ACCENT } else { BORDER_IDLE };
-
-    let block = Block::default()
-        .title(title)
-        .title_style(Style::new().fg(Color::White).bold())
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(border_color));
+    let block = make_panel_block(&title, app.focus == Focus::TrackList);
 
     let inner = block.inner(area);
     let table_area = Rect { width: inner.width.saturating_sub(1), ..inner };
@@ -274,12 +283,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
 // ── Settings panel ────────────────────────────────────────────────────────
 
 fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .title(" ⚙ Settings ")
-        .title_style(Style::new().fg(Color::White).bold())
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT));
+    let block = make_panel_block(" ⚙ Settings ", app.focus == Focus::Settings);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

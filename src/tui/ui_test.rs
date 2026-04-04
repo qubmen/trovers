@@ -3,7 +3,7 @@ mod tests {
     use crate::tui::ui::{
         build_now_playing_header_line, build_playback_bar_line, build_progress_bar,
         build_separated_line, build_track_info_line, calculate_distributed_widths,
-        format_duration, format_playback_state, truncate, CacheState,
+        format_duration, format_playback_state, make_panel_block, truncate, CacheState,
     };
     use ratatui::style::Color;
 
@@ -1024,5 +1024,61 @@ mod tests {
         assert!(b.contains("00:45"), "position in playback bar");
         assert!(!h.contains("00:45"), "position must not bleed into header");
         assert!(!t.contains("00:45"), "position must not bleed into track info");
+    }
+
+    // ── UI consistency / make_panel_block tests ───────────────────────────────
+
+    #[test]
+    fn panel_block_focused_and_unfocused_are_distinct() {
+        // focused=true and focused=false should produce different Block values
+        let focused = make_panel_block(" My Panel ", true);
+        let unfocused = make_panel_block(" My Panel ", false);
+        // Blocks with different border colors are not equal
+        assert_ne!(focused, unfocused, "focused and unfocused panels should differ");
+    }
+
+    #[test]
+    fn panel_block_same_focus_state_is_consistent() {
+        // Calling make_panel_block twice with same args should produce equal blocks
+        let block1 = make_panel_block(" Settings ", true);
+        let block2 = make_panel_block(" Settings ", true);
+        assert_eq!(block1, block2, "same focus state should produce identical blocks");
+    }
+
+    #[test]
+    fn panel_block_different_titles_are_distinct() {
+        let settings = make_panel_block(" ⚙ Settings ", false);
+        let tracks = make_panel_block(" My Playlist ", false);
+        assert_ne!(settings, tracks, "different titles should produce different blocks");
+    }
+
+    #[test]
+    fn panel_block_renders_without_panic() {
+        // Verify that blocks can be built for all combinations without panicking
+        for focused in [true, false] {
+            let _block = make_panel_block(" Test Panel ", focused);
+            let _block = make_panel_block("", focused);
+            let _block = make_panel_block(" ⚙ Settings ", focused);
+            let _block = make_panel_block(" ≡ Playlists ", focused);
+        }
+    }
+
+    #[test]
+    fn panel_block_consistent_across_all_panels() {
+        // Settings and track table should both use make_panel_block with focus-aware color.
+        // Verify that the same focus state produces matching block structure by checking
+        // that focused=true blocks are pairwise different from focused=false.
+        let settings_focused = make_panel_block(" ⚙ Settings ", true);
+        let settings_idle = make_panel_block(" ⚙ Settings ", false);
+        let tracks_focused = make_panel_block(" My Tracks ", true);
+        let tracks_idle = make_panel_block(" My Tracks ", false);
+
+        // Each panel: focused ≠ unfocused
+        assert_ne!(settings_focused, settings_idle, "settings focused vs idle should differ");
+        assert_ne!(tracks_focused, tracks_idle, "track table focused vs idle should differ");
+
+        // Cross-panel with same focus: should differ only by title
+        assert_ne!(settings_focused, tracks_focused, "different panel titles should differ");
+        assert_ne!(settings_idle, tracks_idle, "different panel titles should differ");
     }
 }

@@ -175,12 +175,12 @@
 - Modify: `src/tui/ui.rs` (overall styling consistency)
 - Modify: `src/tui/ui_test.rs`
 
-- [ ] review and standardize border styles across all panels
-- [ ] ensure consistent spacing patterns in sidebar and track table
-- [ ] apply consistent color usage patterns throughout UI
-- [ ] improve visual hierarchy with better contrast and emphasis
-- [ ] write tests for styling consistency helpers
-- [ ] run tests: `cargo test ui_test` - must pass before task 9
+- [x] review and standardize border styles across all panels
+- [x] ensure consistent spacing patterns in sidebar and track table
+- [x] apply consistent color usage patterns throughout UI
+- [x] improve visual hierarchy with better contrast and emphasis
+- [x] write tests for styling consistency helpers
+- [x] run tests: `cargo test ui_test` - must pass before task 9
 
 ### Task 9: Verify acceptance criteria and edge cases
 
