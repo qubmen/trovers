@@ -103,13 +103,13 @@
 - Modify: `src/tui/ui.rs` (add new helper functions)
 - Modify: `src/tui/ui_test.rs`
 
-- [ ] create `calculate_distributed_widths` function to handle proper spacing calculations
-- [ ] create `build_separated_line` function for clean bullet-separated text layout
-- [ ] create `format_playback_state` function to standardize status text
-- [ ] write tests for `calculate_distributed_widths` (various terminal widths)
-- [ ] write tests for `build_separated_line` (truncation priorities, separators)
-- [ ] write tests for `format_playback_state` (different player states)
-- [ ] run tests: `cargo test ui_test` - must pass before task 4
+- [x] create `calculate_distributed_widths` function to handle proper spacing calculations
+- [x] create `build_separated_line` function for clean bullet-separated text layout
+- [x] create `format_playback_state` function to standardize status text
+- [x] write tests for `calculate_distributed_widths` (various terminal widths)
+- [x] write tests for `build_separated_line` (truncation priorities, separators)
+- [x] write tests for `format_playback_state` (different player states)
+- [x] run tests: `cargo test ui_test` - must pass before task 4
 
 ### Task 4: Implement new header row (Row 1)
 

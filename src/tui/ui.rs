@@ -621,6 +621,126 @@ pub(crate) fn build_progress_bar(
 }
 
 
+/// Distribute `total_width` across N sections with optional fixed-width items.
+/// Returns a Vec of widths for each section.
+/// `fixed_widths` contains (index, width) pairs for sections with known widths.
+/// Remaining width is distributed to the first flexible section (index not in fixed_widths).
+pub(crate) fn calculate_distributed_widths(
+    total_width: usize,
+    section_count: usize,
+    fixed_widths: &[(usize, usize)],
+) -> Vec<usize> {
+    if section_count == 0 {
+        return vec![];
+    }
+    let mut widths = vec![0usize; section_count];
+    let mut used: usize = 0;
+
+    for &(idx, w) in fixed_widths {
+        if idx < section_count {
+            widths[idx] = w;
+            used = used.saturating_add(w);
+        }
+    }
+
+    let remaining = total_width.saturating_sub(used);
+    // Give remaining width to the first flexible (not fixed) section
+    let fixed_indices: std::collections::HashSet<usize> = fixed_widths.iter().map(|&(i, _)| i).collect();
+    if let Some(flex_idx) = (0..section_count).find(|i| !fixed_indices.contains(i)) {
+        widths[flex_idx] = remaining;
+    }
+
+    widths
+}
+
+/// Build a line of bullet-separated text segments, applying truncation priority.
+/// `segments` is a list of (text, is_bold) pairs.
+/// `max_width` is the total character budget.
+/// Segments with lower index have higher truncation priority (kept longer).
+/// Returns a Vec of (text, is_primary) pairs where is_primary = true means bold/primary style.
+pub(crate) fn build_separated_line(
+    segments: &[(&str, bool)],
+    max_width: usize,
+) -> Vec<(String, bool)> {
+    if segments.is_empty() || max_width == 0 {
+        return vec![];
+    }
+
+    let sep = " • ";
+    let sep_len = sep.chars().count();
+
+    // Calculate total separators width
+    let total_sep = if segments.len() > 1 {
+        (segments.len() - 1) * sep_len
+    } else {
+        0
+    };
+
+    let text_budget = max_width.saturating_sub(total_sep);
+
+    // Give primary (first) segment priority: it gets up to its full length,
+    // then distribute remaining to subsequent segments proportionally
+    let mut result: Vec<(String, bool)> = Vec::with_capacity(segments.len() * 2 - 1);
+
+    // First pass: calculate natural lengths
+    let natural_lens: Vec<usize> = segments.iter().map(|(t, _)| t.chars().count()).collect();
+    let total_natural: usize = natural_lens.iter().sum();
+
+    if total_natural <= text_budget {
+        // Everything fits
+        for (i, (text, is_bold)) in segments.iter().enumerate() {
+            if i > 0 {
+                result.push((sep.to_string(), false));
+            }
+            result.push((text.to_string(), *is_bold));
+        }
+    } else {
+        // Need to truncate: primary segment (index 0) gets priority
+        // It keeps its full text if possible, others get remaining
+        let primary_len = natural_lens[0].min(text_budget);
+        let secondary_budget = text_budget.saturating_sub(primary_len);
+
+        // Distribute secondary budget evenly among remaining segments
+        let secondary_count = segments.len().saturating_sub(1);
+        let per_secondary = if secondary_count > 0 {
+            secondary_budget / secondary_count
+        } else {
+            0
+        };
+
+        for (i, (text, is_bold)) in segments.iter().enumerate() {
+            if i > 0 {
+                result.push((sep.to_string(), false));
+            }
+            let budget = if i == 0 { primary_len } else { per_secondary };
+            let truncated = truncate(text, budget);
+            result.push((truncated, *is_bold));
+        }
+    }
+
+    result
+}
+
+/// Format playback state into a display string.
+/// Returns (status_icon, status_text) based on player/paused state.
+pub(crate) fn format_playback_state(
+    has_player: bool,
+    is_paused: bool,
+    has_track: bool,
+) -> (&'static str, &'static str) {
+    if !has_track {
+        return ("", "No track");
+    }
+    if !has_player {
+        return ("⏳", "Loading…");
+    }
+    if is_paused {
+        ("⏸", "Paused")
+    } else {
+        ("▶", "Playing")
+    }
+}
+
 pub fn format_duration(secs: u64) -> String {
     let h = secs / 3600;
     let m = (secs % 3600) / 60;

@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::ui::{build_progress_bar, format_duration, truncate};
+    use crate::tui::ui::{
+        build_progress_bar, build_separated_line, calculate_distributed_widths,
+        format_duration, format_playback_state, truncate,
+    };
     use ratatui::style::Color;
 
     // ── format_duration tests ─────────────────────────────────────────────
@@ -280,5 +283,204 @@ mod tests {
         assert_eq!(spans_char_count(&spans, '━'), 3);
         assert_eq!(spans_char_count(&spans, '◉'), 1);
         assert_eq!(spans_char_count(&spans, '─'), 1);
+    }
+
+    // ── calculate_distributed_widths tests ───────────────────────────────────
+
+    #[test]
+    fn distributed_widths_empty_sections() {
+        let result = calculate_distributed_widths(80, 0, &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn distributed_widths_single_flexible_section() {
+        // No fixed widths: single section gets all the width
+        let result = calculate_distributed_widths(80, 1, &[]);
+        assert_eq!(result, vec![80]);
+    }
+
+    #[test]
+    fn distributed_widths_all_flexible_first_gets_remainder() {
+        // 3 sections, no fixed: first gets all, others get 0
+        let result = calculate_distributed_widths(80, 3, &[]);
+        assert_eq!(result[0], 80);
+        assert_eq!(result[1], 0);
+        assert_eq!(result[2], 0);
+    }
+
+    #[test]
+    fn distributed_widths_with_fixed_sections() {
+        // 3 sections: section 1 fixed=10, section 2 fixed=8 → section 0 gets 80-18=62
+        let result = calculate_distributed_widths(80, 3, &[(1, 10), (2, 8)]);
+        assert_eq!(result[0], 62); // flexible
+        assert_eq!(result[1], 10); // fixed
+        assert_eq!(result[2], 8);  // fixed
+    }
+
+    #[test]
+    fn distributed_widths_first_section_fixed_flex_goes_to_second() {
+        // section 0 fixed=20, section 1 is flexible → gets 80-20=60
+        let result = calculate_distributed_widths(80, 2, &[(0, 20)]);
+        assert_eq!(result[0], 20); // fixed
+        assert_eq!(result[1], 60); // flexible
+    }
+
+    #[test]
+    fn distributed_widths_overflow_saturates_at_zero() {
+        // Fixed widths exceed total → flexible section gets 0
+        let result = calculate_distributed_widths(10, 3, &[(1, 8), (2, 6)]);
+        assert_eq!(result[0], 0); // flexible, saturated
+        assert_eq!(result[1], 8);
+        assert_eq!(result[2], 6);
+    }
+
+    #[test]
+    fn distributed_widths_exact_fit() {
+        // Fixed widths exactly equal total → flexible gets 0
+        let result = calculate_distributed_widths(20, 3, &[(1, 10), (2, 10)]);
+        assert_eq!(result[0], 0);
+        assert_eq!(result[1], 10);
+        assert_eq!(result[2], 10);
+    }
+
+    #[test]
+    fn distributed_widths_narrow_terminal() {
+        // Typical narrow terminal width scenario
+        let result = calculate_distributed_widths(40, 3, &[(1, 10), (2, 6)]);
+        assert_eq!(result[0], 24); // 40 - 10 - 6
+        assert_eq!(result[1], 10);
+        assert_eq!(result[2], 6);
+    }
+
+    // ── build_separated_line tests ────────────────────────────────────────────
+
+    #[test]
+    fn separated_line_empty_segments() {
+        let result = build_separated_line(&[], 80);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn separated_line_zero_width() {
+        let result = build_separated_line(&[("hello", true)], 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn separated_line_single_segment_fits() {
+        let result = build_separated_line(&[("hello", true)], 80);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "hello");
+        assert!(result[0].1);
+    }
+
+    #[test]
+    fn separated_line_two_segments_fit() {
+        // "hello • world" = 13 chars
+        let result = build_separated_line(&[("hello", true), ("world", false)], 80);
+        assert_eq!(result.len(), 3); // hello + sep + world
+        assert_eq!(result[0].0, "hello");
+        assert_eq!(result[1].0, " • ");
+        assert!(!result[1].1); // separator is not bold
+        assert_eq!(result[2].0, "world");
+        assert!(!result[2].1);
+    }
+
+    #[test]
+    fn separated_line_three_segments_fit() {
+        // "Track • Artist • source.com" all fit in 80
+        let result = build_separated_line(
+            &[("Track", true), ("Artist", false), ("source.com", false)],
+            80,
+        );
+        assert_eq!(result.len(), 5); // track + sep + artist + sep + source
+        assert_eq!(result[0].0, "Track");
+        assert_eq!(result[2].0, "Artist");
+        assert_eq!(result[4].0, "source.com");
+    }
+
+    #[test]
+    fn separated_line_primary_has_priority_on_truncation() {
+        // Very narrow: primary segment should be truncated less than secondary
+        // "Hello World" (11) + " • " (3) + "Artist Name" (11) = 25
+        // Force truncation with max_width=15: text_budget=15-3=12
+        // primary gets min(11,12)=11, secondary gets 12-11=1
+        let result = build_separated_line(
+            &[("Hello World", true), ("Artist Name", false)],
+            15,
+        );
+        // Result: "Hello World" + sep + 1-char truncated artist
+        let texts: Vec<&str> = result.iter().map(|r| r.0.as_str()).collect();
+        assert!(texts.contains(&"Hello World"), "primary should be preserved: {:?}", texts);
+    }
+
+    #[test]
+    fn separated_line_truncation_applied() {
+        // Single segment that needs truncation
+        let result = build_separated_line(&[("Hello World", true)], 8);
+        assert_eq!(result.len(), 1);
+        let text = &result[0].0;
+        assert_eq!(text.chars().count(), 8);
+        assert!(text.ends_with('…'));
+    }
+
+    #[test]
+    fn separated_line_bold_flags_preserved() {
+        let result = build_separated_line(
+            &[("Track", true), ("Artist", false), ("Source", false)],
+            80,
+        );
+        // indices: 0=Track(bold), 1=sep, 2=Artist(not bold), 3=sep, 4=Source(not bold)
+        assert!(result[0].1, "first segment should be bold");
+        assert!(!result[1].1, "separator should not be bold");
+        assert!(!result[2].1, "second segment should not be bold");
+    }
+
+    // ── format_playback_state tests ───────────────────────────────────────────
+
+    #[test]
+    fn playback_state_no_track() {
+        let (icon, text) = format_playback_state(false, false, false);
+        assert_eq!(icon, "");
+        assert_eq!(text, "No track");
+    }
+
+    #[test]
+    fn playback_state_no_player_but_has_track() {
+        // Track selected but player not ready yet (loading)
+        let (icon, text) = format_playback_state(false, false, true);
+        assert_eq!(icon, "⏳");
+        assert_eq!(text, "Loading…");
+    }
+
+    #[test]
+    fn playback_state_playing() {
+        let (icon, text) = format_playback_state(true, false, true);
+        assert_eq!(icon, "▶");
+        assert_eq!(text, "Playing");
+    }
+
+    #[test]
+    fn playback_state_paused() {
+        let (icon, text) = format_playback_state(true, true, true);
+        assert_eq!(icon, "⏸");
+        assert_eq!(text, "Paused");
+    }
+
+    #[test]
+    fn playback_state_no_track_takes_priority() {
+        // Even if has_player=true and is_paused=true, no track means "No track"
+        let (icon, text) = format_playback_state(true, true, false);
+        assert_eq!(icon, "");
+        assert_eq!(text, "No track");
+    }
+
+    #[test]
+    fn playback_state_icons_are_nonempty_when_active() {
+        let (playing_icon, _) = format_playback_state(true, false, true);
+        let (paused_icon, _) = format_playback_state(true, true, true);
+        assert!(!playing_icon.is_empty());
+        assert!(!paused_icon.is_empty());
     }
 }
