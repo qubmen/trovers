@@ -242,20 +242,22 @@ Built with **ratatui**. Full-screen, keyboard-driven, no mouse support.
 
 ### Color palette
 
-| Constant      | Hex       | Role                                        |
-|---------------|-----------|---------------------------------------------|
-| `ACCENT`      | `#CE412B` | Rust Orange — focused borders, selection bg |
-| `SEA_GREEN`   | `#20B288` | Playback progress bar, currently-playing row |
-| `GOLD`        | `#D4AF37` | Caching progress bar                        |
-| `TEXT_DIM`    | `#828282` | Secondary text, disabled items              |
-| `BORDER_IDLE` | `#464646` | Unfocused panel borders                     |
+| Constant        | Hex       | Role                                                     |
+|-----------------|-----------|----------------------------------------------------------|
+| `ACCENT`        | `#CE412B` | Rust Orange — focused borders, selection bg              |
+| `ACCENT_DIM`    | `#642015` | Dimmed ACCENT — selection background in track table rows |
+| `SEA_GREEN`     | `#20B288` | Playback progress bar, currently-playing row             |
+| `GOLD`          | `#D4AF37` | 🎵 Now Playing header label, caching progress bar        |
+| `TEXT_DIM`      | `#828282` | Secondary text, disabled items                           |
+| `BORDER_IDLE`   | `#464646` | Unfocused panel borders                                  |
+| `ITEM_DISABLED` | `#5A5A5A` | Non-interactive sidebar items (Music / Video labels)     |
 
 ### Screen layout (vertical)
 
 ```
 Constraint::Length(1)   header bar
 Constraint::Min(0)      main area  (sidebar 22 cols | track table fill)
-Constraint::Length(3)   now playing block
+Constraint::Length(4)   now playing block
 Constraint::Length(1)   footer hint line
 ```
 
@@ -481,7 +483,7 @@ to update the caching progress bar on Now Playing line 3.
 
 **Key types:**
 ```rust
-pub enum Focus     { Sidebar, TrackList }
+pub enum Focus     { Sidebar, TrackList, Settings }
 pub enum InputMode { Normal, UrlInput, NewPlaylist, ConfirmDelete, SearchInput }
 pub enum SidebarItem {
     PlaylistsHeader,
@@ -498,22 +500,18 @@ pub enum SidebarItem {
 **App struct** holds: playlist + config + optional player, watch channels,
 `focus`, `input_mode`, `input_buf`, `selected` (track cursor), `track_offset`
 (scroll), `track_list_height` (set each frame), `filtered_indices` (search),
-`sidebar_selected`, `playlists_expanded`, `available_playlists`, `eq_bars [u8;7]`,
-`eq_tick`, `position`, `download_progress`, `is_paused`.
+`sidebar_selected`, `playlists_expanded`, `available_playlists`,
+`position`, `download_progress`, `is_paused`.
 
 **Event loop:**
 ```
 loop:
-  sync_channels()         ← read watch receivers, advance eq animation
+  sync_channels()         ← read watch receivers
   terminal.draw(render)   ← render full frame
   event::poll(100ms)      ← non-blocking
   handle_key(event)       ← dispatch by focus + mode
   clamp_scroll()          ← keep selected in visible window
 ```
-
-**Equalizer animation:** `eq_tick` incremented each sync. Every 3rd tick
-(when player is Some), each bar height is updated via a simple LCG:
-`v = (tick + i*37).wrapping_mul(113).wrapping_add(11) % 7 + 1`.
 
 ### tui/ui.rs — rendering
 

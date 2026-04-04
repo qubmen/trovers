@@ -770,7 +770,7 @@ mod tests {
     fn playback_bar_downloading_shows_caching_indicator() {
         let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Downloading(0.45));
         let text = line_to_string(&line);
-        assert!(text.contains("⟳ caching"), "should contain caching indicator: {text:?}");
+        assert!(text.contains("⟳ Caching"), "should contain caching indicator: {text:?}");
     }
 
     #[test]
@@ -969,14 +969,26 @@ mod tests {
 
     #[test]
     fn now_playing_row_allocation_three_rows_of_height_one() {
-        // Verify that the three-row structure allocates exactly 3 rows of height 1
-        // (This tests the layout constraint: 3 × Length(1) = 3 total height inside border)
-        // The outer area has Length(3), with a TOP border taking 1 row,
-        // leaving exactly 3 rows for inner content.
-        let inner_height = 3u16; // Borders::TOP uses 1 row from Length(3) outer area
-        let row_heights: Vec<u16> = vec![1, 1, 1];
-        assert_eq!(row_heights.iter().sum::<u16>(), inner_height,
-            "three rows of height 1 must sum to inner_height=3");
+        // Verify that the three-row structure fits inside the outer area.
+        // The outer area has Constraint::Length(4). Borders::TOP consumes 1 row,
+        // leaving inner_height = 3 for the 3 × Length(1) content rows.
+        // We validate this with actual ratatui layout math.
+        use ratatui::layout::{Constraint, Layout, Rect};
+        let outer = Rect::new(0, 0, 80, 4); // Length(4) outer area
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::TOP);
+        let inner = block.inner(outer);
+        assert_eq!(inner.height, 3, "Borders::TOP on a 4-row area leaves 3 rows for content");
+
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+        assert_eq!(rows[0].height, 1, "header row height");
+        assert_eq!(rows[1].height, 1, "track info row height");
+        assert_eq!(rows[2].height, 1, "playback bar row height — must be 1, not 0");
     }
 
     #[test]
@@ -994,7 +1006,7 @@ mod tests {
         // Each cache state should be visible in row 3
         assert!(cached_text.contains("◈ Cached"), "Cached state in row 3");
         assert!(stream_text.contains("◌ Stream"), "Streaming state in row 3");
-        assert!(dl_text.contains("⟳ caching"), "Downloading state in row 3");
+        assert!(dl_text.contains("⟳ Caching"), "Downloading state in row 3");
     }
 
     #[test]
@@ -1233,13 +1245,27 @@ mod tests {
 
     #[test]
     fn edge_case_minimum_terminal_width_layout_calculations() {
-        // Verify layout calculations don't underflow or panic at narrow widths
+        // Verify layout calculations don't underflow or panic at narrow widths.
+        // fixed_widths: section 0 = 15, section 2 = 5 (sum = 20). Section 1 is flexible.
+        // The correct invariant: fixed sections retain their widths; the flexible section
+        // gets max(0, total_width - sum_of_fixed). Sum == total_width only when no overflow.
         for w in [20, 30, 40, 60, 80] {
             let widths = calculate_distributed_widths(w, 3, &[(0, 15), (2, 5)]);
-            // Sum should equal total_width
-            assert_eq!(widths.iter().sum::<usize>(), w,
-                "widths should sum to total for w={w}: {widths:?}");
+            assert_eq!(widths.len(), 3, "should have 3 sections for w={w}");
+            assert_eq!(widths[0], 15, "fixed section 0 should be 15 for w={w}");
+            assert_eq!(widths[2], 5, "fixed section 2 should be 5 for w={w}");
+            // flexible section gets the remaining space (non-negative)
+            let expected_flex = w.saturating_sub(20);
+            assert_eq!(widths[1], expected_flex,
+                "flexible section should be max(0, w-20) for w={w}: {widths:?}");
         }
+        // Overflow case: when fixed widths exceed total_width, flexible section is 0
+        // and sum > total_width (fixed sections retain their sizes)
+        let overflow = calculate_distributed_widths(10, 3, &[(0, 15), (2, 5)]);
+        assert_eq!(overflow[0], 15, "fixed section 0 unchanged in overflow");
+        assert_eq!(overflow[2], 5, "fixed section 2 unchanged in overflow");
+        assert_eq!(overflow[1], 0, "flexible section is 0 in overflow");
+        assert!(overflow.iter().sum::<usize>() > 10, "sum exceeds total_width in overflow case");
     }
 
     // --- Edge case: no tracks ---
@@ -1366,9 +1392,9 @@ mod tests {
         let text_25 = line_to_string(&line_25);
         let text_75 = line_to_string(&line_75);
 
-        assert!(text_25.contains("⟳ caching"), "downloading: caching label at 25%: {text_25:?}");
+        assert!(text_25.contains("⟳ Caching"), "downloading: caching label at 25%: {text_25:?}");
         assert!(text_25.contains("25%"), "downloading: percentage 25%: {text_25:?}");
-        assert!(text_75.contains("⟳ caching"), "downloading: caching label at 75%: {text_75:?}");
+        assert!(text_75.contains("⟳ Caching"), "downloading: caching label at 75%: {text_75:?}");
         assert!(text_75.contains("75%"), "downloading: percentage 75%: {text_75:?}");
     }
 
@@ -1385,7 +1411,7 @@ mod tests {
 
         assert!(ct.contains("◈ Cached"), "Cached state");
         assert!(st.contains("◌ Stream"), "Streaming state");
-        assert!(dt.contains("⟳ caching"), "Downloading state");
+        assert!(dt.contains("⟳ Caching"), "Downloading state");
 
         // States must be distinct from each other
         assert_ne!(ct, st, "cached ≠ streaming");
@@ -1467,7 +1493,7 @@ mod tests {
             let text = line_to_string(&line);
             let has_cache_info = text.contains("◈ Cached")
                 || text.contains("◌ Stream")
-                || text.contains("⟳ caching");
+                || text.contains("⟳ Caching");
             assert!(has_cache_info, "row 3 must contain cache info for state {state:?}: {text:?}");
         }
     }

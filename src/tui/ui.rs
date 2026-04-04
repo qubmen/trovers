@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let rows = Layout::vertical([
         Constraint::Length(1), // header
         Constraint::Min(0),    // main (sidebar + tracks/settings)
-        Constraint::Length(3), // now playing
+        Constraint::Length(4), // now playing
         Constraint::Length(1), // footer
     ])
     .split(area);
@@ -70,7 +70,7 @@ fn render_header(frame: &mut Frame, _app: &App, area: Rect) {
     let clock = chrono::Local::now().format("%H:%M:%S").to_string();
     let width = area.width as usize;
     let left = " ☠ trovers v0.1";
-    let padding = width.saturating_sub(left.len() + clock.len() + 1);
+    let padding = width.saturating_sub(left.chars().count() + clock.chars().count() + 1);
 
     let line = Line::from(vec![
         Span::styled(left, Style::new().fg(ACCENT).bold()),
@@ -100,11 +100,7 @@ fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
 // ── Sidebar ───────────────────────────────────────────────────────────────
 
 fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
-    let border_color = if app.focus == Focus::Sidebar { ACCENT } else { BORDER_IDLE };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(border_color));
+    let block = make_panel_block("", app.focus == Focus::Sidebar);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -365,15 +361,8 @@ fn render_now_playing(frame: &mut Frame, app: &App, area: Rect) {
     render_playback_bar(frame, app, rows[2]);
 }
 
-pub(crate) fn render_now_playing_header(frame: &mut Frame, app: &App, area: Rect) {
+fn render_now_playing_header(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
-
-    // Show "fetching…" while metadata is in flight
-    if app.pending_fetches > 0 && app.playlist.current_track.is_none() {
-        let line = build_now_playing_header_line(width, None, None);
-        frame.render_widget(Paragraph::new(line), area);
-        return;
-    }
 
     let current_idx = app
         .playlist
@@ -572,17 +561,17 @@ pub(crate) fn build_playback_bar_line<'a>(
     vol_str: &str,
     cache_state: CacheState,
 ) -> Line<'a> {
-    // Build the cache status string
-    let cache_str = match &cache_state {
-        CacheState::Cached => "◈ Cached".to_string(),
-        CacheState::Streaming => "◌ Stream".to_string(),
-        CacheState::Downloading(_) => "⟳ Caching".to_string(),
-    };
-
-    // In downloading state, we replace the volume section with download progress bar
+    // In downloading state, delegate entirely to the downloading-specific layout
     if let CacheState::Downloading(dl_ratio) = cache_state {
         return build_downloading_bar_line(width, pos_str, ratio, dur_str, dl_ratio);
     }
+
+    // At this point cache_state is Cached or Streaming
+    let (cache_str, cache_color) = match &cache_state {
+        CacheState::Cached => ("◈ Cached", SEA_GREEN),
+        CacheState::Streaming => ("◌ Stream", TEXT_DIM),
+        CacheState::Downloading(_) => unreachable!("Downloading handled above"),
+    };
 
     // Fixed label widths: " pos " + " dur  |  vol  |  cache "
     // " " (1) + pos + " " (1) = pos section prefix/suffix
@@ -604,12 +593,6 @@ pub(crate) fn build_playback_bar_line<'a>(
 
     let bar = build_progress_bar(bar_width, ratio, '━', '─', '◉', SEA_GREEN, BORDER_IDLE);
 
-    let cache_color = match &cache_state {
-        CacheState::Cached => SEA_GREEN,
-        CacheState::Streaming => TEXT_DIM,
-        CacheState::Downloading(_) => GOLD,
-    };
-
     let mut spans: Vec<Span<'static>> = vec![
         Span::raw(" "),
         Span::styled(pos_str.to_string(), Style::new().fg(TEXT_DIM)),
@@ -622,7 +605,7 @@ pub(crate) fn build_playback_bar_line<'a>(
         Span::raw("  "),
         Span::styled(vol_str.to_string(), Style::new().fg(TEXT_DIM)),
         Span::styled(sep.to_string(), Style::new().fg(BORDER_IDLE)),
-        Span::styled(cache_str, Style::new().fg(cache_color)),
+        Span::styled(cache_str.to_string(), Style::new().fg(cache_color)),
         Span::raw(" "),
     ]);
 
@@ -639,7 +622,7 @@ fn build_downloading_bar_line<'a>(
     dl_ratio: f64,
 ) -> Line<'a> {
     let pct_str = format!("{:.0}%", (dl_ratio * 100.0).clamp(0.0, 100.0));
-    let dl_label = "⟳ caching ";
+    let dl_label = "⟳ Caching ";
     let dl_label_len = dl_label.chars().count();
     let pct_len = pct_str.chars().count();
 
@@ -825,8 +808,7 @@ pub(crate) fn calculate_distributed_widths(
 
     let remaining = total_width.saturating_sub(used);
     // Give remaining width to the first flexible (not fixed) section
-    let fixed_indices: std::collections::HashSet<usize> = fixed_widths.iter().map(|&(i, _)| i).collect();
-    if let Some(flex_idx) = (0..section_count).find(|i| !fixed_indices.contains(i)) {
+    if let Some(flex_idx) = (0..section_count).find(|i| !fixed_widths.iter().any(|&(fi, _)| fi == *i)) {
         widths[flex_idx] = remaining;
     }
 
@@ -869,10 +851,12 @@ pub(crate) fn build_separated_line(
     if total_natural <= text_budget {
         // Everything fits
         for (i, (text, is_bold)) in segments.iter().enumerate() {
-            if i > 0 {
+            if i > 0 && !text.is_empty() && !result.is_empty() {
                 result.push((sep.to_string(), false));
             }
-            result.push((text.to_string(), *is_bold));
+            if !text.is_empty() {
+                result.push((text.to_string(), *is_bold));
+            }
         }
     } else {
         // Need to truncate: primary segment (index 0) gets priority
@@ -889,12 +873,14 @@ pub(crate) fn build_separated_line(
         };
 
         for (i, (text, is_bold)) in segments.iter().enumerate() {
-            if i > 0 {
-                result.push((sep.to_string(), false));
-            }
             let budget = if i == 0 { primary_len } else { per_secondary };
             let truncated = truncate(text, budget);
-            result.push((truncated, *is_bold));
+            if !truncated.is_empty() {
+                if !result.is_empty() {
+                    result.push((sep.to_string(), false));
+                }
+                result.push((truncated, *is_bold));
+            }
         }
     }
 
