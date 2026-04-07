@@ -12,7 +12,7 @@ use crate::ytdlp::{self, TrackMeta};
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -146,6 +146,8 @@ pub struct App {
 
     // Tracks being downloaded
     pub downloading: HashSet<String>,
+    // Maps video_id → target playlist path for tracks downloading into a non-active playlist
+    pub download_targets: HashMap<String, PathBuf>,
     // In-flight metadata fetches
     pub pending_fetches: usize,
 
@@ -194,6 +196,7 @@ impl App {
             download_progress: 0.0,
             is_paused: false,
             downloading: HashSet::new(),
+            download_targets: HashMap::new(),
             pending_fetches: 0,
             context_menu_selected: 0,
             target_playlist_for_url: None,
@@ -332,7 +335,7 @@ impl App {
 
     }
 
-    fn handle_task_msg(&mut self, msg: TaskMsg) {
+    pub(crate) fn handle_task_msg(&mut self, msg: TaskMsg) {
         match msg {
             TaskMsg::MetaReady { url, meta, target_path } => {
                 self.pending_fetches = self.pending_fetches.saturating_sub(1);
@@ -377,6 +380,9 @@ impl App {
                         }
                     }
                     self.downloading.insert(video_id.clone());
+                    // Remember that this download belongs to the non-active playlist so
+                    // DownloadDone can update the correct file on disk.
+                    self.download_targets.insert(video_id.clone(), p.to_path_buf());
                 } else {
                     // Default: add to the active playlist
                     self.playlist.tracks.push(track);
@@ -414,7 +420,32 @@ impl App {
             TaskMsg::DownloadDone { video_id, file } => {
                 info!(video_id = %video_id, path = %file.display(), "download complete");
                 self.downloading.remove(&video_id);
+                let _ = self.download_tx.send(0.0);
 
+                // Check whether this download was for a non-active playlist.
+                if let Some(target_path) = self.download_targets.remove(&video_id) {
+                    // Update the track in the target playlist file on disk.
+                    match Playlist::load(&target_path) {
+                        Ok(mut target_pl) => {
+                            if let Some(track) =
+                                target_pl.tracks.iter_mut().find(|t| t.video_id == video_id)
+                            {
+                                track.cache_status = CacheStatus::Cached;
+                                track.file = Some(file);
+                            }
+                            if let Err(e) = target_pl.save(&target_path) {
+                                error!(err = %e, "failed to save target playlist after download done");
+                            }
+                        }
+                        Err(e) => {
+                            error!(err = %e, path = %target_path.display(),
+                                "failed to load target playlist after download done");
+                        }
+                    }
+                    return;
+                }
+
+                // Active-playlist path: update in-memory state and save.
                 let idx = self.playlist.tracks.iter().position(|t| t.video_id == video_id);
 
                 if let Some(track) =
@@ -423,7 +454,6 @@ impl App {
                     track.cache_status = CacheStatus::Cached;
                     track.file = Some(file);
                 }
-                let _ = self.download_tx.send(0.0);
                 self.save_playlist();
 
                 // If this track is currently streaming, switch mpv to the local file
@@ -718,6 +748,9 @@ impl App {
         self.playlist
             .save(&self.playlist_path)
             .with_context(|| "failed to save source playlist after move")?;
+
+        // Clear any active search filter: the index set is now stale after the removal.
+        self.filtered_indices.clear();
 
         // Clamp the selection cursor so it stays in bounds
         let new_count = self.visible_track_count();

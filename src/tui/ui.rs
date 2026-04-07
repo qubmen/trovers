@@ -790,14 +790,8 @@ pub(crate) fn url_input_target_display(app: &App) -> String {
 
 // ── Track context menu ────────────────────────────────────────────────────
 
-/// Returns the list of context menu items (playlist names to move to) for the given app state.
-/// This is a pure function useful for testing.
-pub(crate) fn context_menu_items(app: &App) -> Vec<String> {
-    app.available_playlist_names()
-}
-
 fn render_track_context_menu(frame: &mut Frame, app: &App, area: Rect) {
-    let items = context_menu_items(app);
+    let items = app.available_playlist_names();
 
     let item_count = items.len();
     // Height: 2 (border) + 1 (header line) + max(1, item_count) rows

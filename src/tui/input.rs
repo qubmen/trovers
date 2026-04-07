@@ -627,13 +627,23 @@ async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> 
                         if app.sidebar_selected >= new_items.len() {
                             app.sidebar_selected = new_items.len().saturating_sub(1);
                         }
-                        // Ensure selection lands on a selectable item
-                        let selectable = new_items
+                        // Ensure selection lands on a selectable item.
+                        // Prefer the nearest item at-or-before the cursor; if none exists,
+                        // fall forward to the first selectable item after the cursor.
+                        let at_or_before = new_items
                             .iter()
                             .enumerate()
+                            .rev()
                             .find(|(i, item)| *i <= app.sidebar_selected && item.is_selectable());
-                        if selectable.is_none() {
-                            app.sidebar_selected = 0;
+                        if let Some((i, _)) = at_or_before {
+                            app.sidebar_selected = i;
+                        } else {
+                            // Nothing selectable before cursor — find the first one after.
+                            let after = new_items
+                                .iter()
+                                .enumerate()
+                                .find(|(i, item)| *i > app.sidebar_selected && item.is_selectable());
+                            app.sidebar_selected = after.map(|(i, _)| i).unwrap_or(0);
                         }
                     }
                     Err(e) => {

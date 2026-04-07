@@ -3,7 +3,7 @@ mod tests {
     use crate::tui::ui::{
         build_now_playing_header_line, build_playback_bar_line, build_progress_bar,
         build_separated_line, build_track_info_line, calculate_distributed_widths,
-        context_menu_items, format_duration, format_playback_state, make_panel_block, truncate,
+        format_duration, format_playback_state, make_panel_block, truncate,
         url_input_target_display, CacheState,
     };
     use ratatui::style::Color;
@@ -1553,7 +1553,7 @@ mod tests {
     fn context_menu_items_empty_when_no_other_playlists() {
         // Active playlist is "Jazz", no other playlists registered
         let app = make_app_with_playlists("Jazz", &["Jazz"]);
-        let items = context_menu_items(&app);
+        let items = app.available_playlist_names();
         assert!(items.is_empty(), "should be empty when only active playlist exists: {items:?}");
     }
 
@@ -1561,7 +1561,7 @@ mod tests {
     fn context_menu_items_excludes_active_playlist() {
         // Three playlists; active is "Jazz" — should return the other two
         let app = make_app_with_playlists("Jazz", &["Jazz", "Rock", "Classical"]);
-        let items = context_menu_items(&app);
+        let items = app.available_playlist_names();
         assert!(!items.contains(&"Jazz".to_string()), "active playlist must be excluded");
         assert!(items.contains(&"Rock".to_string()), "Rock should be in items");
         assert!(items.contains(&"Classical".to_string()), "Classical should be in items");
@@ -1571,7 +1571,7 @@ mod tests {
     #[test]
     fn context_menu_items_single_other_playlist() {
         let app = make_app_with_playlists("Main", &["Main", "Other"]);
-        let items = context_menu_items(&app);
+        let items = app.available_playlist_names();
         assert_eq!(items, vec!["Other".to_string()]);
     }
 
@@ -1579,7 +1579,7 @@ mod tests {
     fn context_menu_items_no_playlists_at_all() {
         // available_playlists is empty
         let app = make_app_with_playlists("Main", &[]);
-        let items = context_menu_items(&app);
+        let items = app.available_playlist_names();
         assert!(items.is_empty(), "should be empty with no available_playlists");
     }
 
@@ -1587,7 +1587,7 @@ mod tests {
     fn context_menu_items_many_playlists() {
         let names = &["A", "B", "C", "D", "E", "Active"];
         let app = make_app_with_playlists("Active", names);
-        let items = context_menu_items(&app);
+        let items = app.available_playlist_names();
         assert_eq!(items.len(), 5, "should exclude 1 active from 6 total");
         assert!(!items.contains(&"Active".to_string()), "Active must be excluded");
         for n in &["A", "B", "C", "D", "E"] {
@@ -1596,12 +1596,14 @@ mod tests {
     }
 
     #[test]
-    fn available_playlist_names_matches_context_menu_items() {
-        // available_playlist_names on App should produce the same result as context_menu_items
+    fn available_playlist_names_excludes_active_and_is_sorted() {
+        // available_playlist_names must exclude the active playlist and preserve sorted order
         let app = make_app_with_playlists("Jazz", &["Jazz", "Rock", "Classical"]);
-        let via_method = app.available_playlist_names();
-        let via_fn = context_menu_items(&app);
-        assert_eq!(via_method, via_fn, "both approaches should produce identical results");
+        let names = app.available_playlist_names();
+        assert!(!names.contains(&"Jazz".to_string()), "active playlist must be excluded");
+        assert!(names.contains(&"Rock".to_string()), "Rock should be included");
+        assert!(names.contains(&"Classical".to_string()), "Classical should be included");
+        assert_eq!(names.len(), 2, "exactly two non-active playlists");
     }
 
     #[test]
@@ -1835,24 +1837,44 @@ mod tests {
 
     #[test]
     fn move_track_stops_playback_when_moving_current_track() {
-        let mut app = make_app_with_tracks_and_targets(
-            "Source",
-            &[("vid1", "Track One")],
-            &["Rock"],
-        );
-        // Mark vid1 as current track (no actual player)
+        // Use a real temp directory so the move actually succeeds and we can
+        // verify the in-memory state changes (player cleared, paused reset, etc.).
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let source_path = dir.path().join("Source.toml");
+        let rock_path = dir.path().join("Rock.toml");
+
+        let mut source_pl = make_playlist("Source");
+        source_pl.add_track(make_track("vid1", "Track One"));
+        source_pl.save(&source_path).expect("save source");
+
+        let rock_pl = make_playlist("Rock");
+        rock_pl.save(&rock_path).expect("save rock");
+
+        let config = crate::config::Config::default();
+        let available = vec![
+            ("Source".to_string(), source_path.clone()),
+            ("Rock".to_string(), rock_path.clone()),
+        ];
+        let mut app = crate::tui::App::new(source_pl, config, available, source_path.clone());
+
+        // Simulate a playing track
         app.playlist.current_track = Some("vid1".to_string());
         app.is_paused = true;
         app.position = 42.0;
+        // player stays None (no real mpv), but the in-memory flags must be cleared
 
-        // The file doesn't exist on disk so this will fail at the save step,
-        // but the in-memory state should be correct up to that point.
-        // We can only test the in-memory part here without a real filesystem.
-        // Since target_path ("/fake/Rock.toml") won't exist, it will try Playlist::create
-        // which will also fail because the fake playlists_dir doesn't exist.
-        // This is expected - the test verifies error propagation, not success.
         let result = app.move_track_to_playlist("Rock");
-        assert!(result.is_err(), "should fail due to missing fake file system");
+        assert!(result.is_ok(), "move should succeed: {:?}", result.err());
+
+        // Critical invariants: player cleared, current_track cleared, is_paused reset
+        assert!(app.player.is_none(), "player must be None after moving current track");
+        assert!(app.playlist.current_track.is_none(), "current_track must be cleared");
+        assert!(!app.is_paused, "is_paused must be reset to false");
+        assert_eq!(app.position, 0.0, "position must be reset");
+
+        // Source playlist must no longer contain vid1
+        assert!(app.playlist.tracks.is_empty(), "source playlist should be empty after move");
     }
 
     #[test]
@@ -2764,5 +2786,88 @@ tracks = []
             loaded.tracks[0].file.is_none(),
             "file field should be cleared when file is missing"
         );
+    }
+
+    // ── DownloadDone with non-active playlist ─────────────────────────────────
+
+    #[test]
+    fn download_done_updates_non_active_playlist_on_disk() {
+        use crate::tui::{App, TaskMsg};
+        use crate::playlist::{CacheStatus, Playlist};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Source (active) playlist — vid1 will be added to "Rock", not here
+        let source_path = dir.path().join("Source.toml");
+        let source_pl = make_playlist("Source");
+        source_pl.save(&source_path).expect("save source");
+
+        // Target (Rock) playlist — contains vid1 in Streaming state
+        let rock_path = dir.path().join("Rock.toml");
+        let mut rock_pl = make_playlist("Rock");
+        rock_pl.add_track(make_track("vid1", "Track One"));
+        rock_pl.save(&rock_path).expect("save rock");
+
+        let config = crate::config::Config::default();
+        let available = vec![
+            ("Source".to_string(), source_path.clone()),
+            ("Rock".to_string(), rock_path.clone()),
+        ];
+        let mut app = App::new(source_pl, config, available, source_path.clone());
+
+        // Simulate that vid1 was submitted for downloading into the Rock playlist
+        app.downloading.insert("vid1".to_string());
+        app.download_targets.insert("vid1".to_string(), rock_path.clone());
+
+        // Fire the DownloadDone message
+        let fake_file = dir.path().join("vid1.m4a");
+        std::fs::write(&fake_file, b"audio data").expect("write fake audio");
+        app.handle_task_msg(TaskMsg::DownloadDone {
+            video_id: "vid1".to_string(),
+            file: fake_file.clone(),
+        });
+
+        // download_targets entry must be removed
+        assert!(!app.download_targets.contains_key("vid1"), "download_targets should be cleared");
+
+        // The active (Source) playlist must NOT be mutated
+        assert!(app.playlist.tracks.is_empty(), "source playlist must not be modified");
+
+        // The Rock playlist on disk must have cache_status = Cached and file set
+        let rock_reloaded = Playlist::load(&rock_path).expect("reload rock");
+        let track = rock_reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(track.cache_status, CacheStatus::Cached, "cache_status must be Cached");
+        assert_eq!(track.file.as_deref(), Some(fake_file.as_path()), "file path must be set");
+    }
+
+    #[test]
+    fn download_done_for_active_playlist_updates_in_memory_state() {
+        use crate::tui::{App, TaskMsg};
+        use crate::playlist::CacheStatus;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let source_path = dir.path().join("Source.toml");
+        let mut source_pl = make_playlist("Source");
+        source_pl.add_track(make_track("vid1", "Track One"));
+        source_pl.save(&source_path).expect("save source");
+
+        let config = crate::config::Config::default();
+        let available = vec![("Source".to_string(), source_path.clone())];
+        let mut app = App::new(source_pl, config, available, source_path.clone());
+
+        app.downloading.insert("vid1".to_string());
+        // No entry in download_targets → active playlist path
+
+        let fake_file = dir.path().join("vid1.m4a");
+        std::fs::write(&fake_file, b"audio data").expect("write fake audio");
+        app.handle_task_msg(TaskMsg::DownloadDone {
+            video_id: "vid1".to_string(),
+            file: fake_file.clone(),
+        });
+
+        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(track.cache_status, CacheStatus::Cached, "in-memory cache_status must be Cached");
+        assert_eq!(track.file.as_deref(), Some(fake_file.as_path()), "in-memory file must be set");
     }
 }

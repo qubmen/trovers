@@ -534,7 +534,10 @@ pub enum SidebarItem {
 `sidebar_selected`, `playlists_expanded`, `available_playlists`,
 `position`, `download_progress`, `is_paused`,
 `context_menu_selected` (selected index in track move context menu),
-`target_playlist_for_url` (playlist name selected during URL input via Tab).
+`target_playlist_for_url` (playlist name selected during URL input via Tab),
+`download_targets: HashMap<String, PathBuf>` (maps video_id → target playlist path
+for tracks downloading into a non-active playlist; consulted by `DownloadDone` handler
+to update the correct file on disk).
 
 **Event loop:**
 ```
@@ -614,6 +617,11 @@ When building multi-section rows in the now-playing area:
 - `/` enters `SearchInput` mode; typing calls `App::update_search()` which
   updates `filtered_indices` live
 - `Ctrl+D/U`: half-page jump using `app.track_list_height`
+- `validate_playlist_name(name, existing, current_name) -> Result<(), String>` —
+  `pub(crate)` helper used cross-module (imported in `ui.rs`). Rejects empty names,
+  whitespace-only names, names containing `/`, `\`, or `:`, the special names `.` and
+  `..`, and duplicates already in `existing`. When `current_name` is `Some(n)`, `n`
+  is excluded from the duplicate check (rename-in-place is allowed).
 
 ### Concurrency model
 - Main thread: ratatui event loop (non-blocking via `event::poll` with 100ms timeout)
