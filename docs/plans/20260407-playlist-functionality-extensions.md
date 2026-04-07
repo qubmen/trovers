@@ -139,16 +139,16 @@
 - Modify: `src/tui/input.rs`
 - Modify: `src/playlist.rs`
 
-- [ ] Add `PlaylistRename` and `PlaylistDelete` variants to `InputMode`
-- [ ] Add 'r' key handler for rename when focused on sidebar playlist
-- [ ] Add 'd' key handler for delete with confirmation when focused on sidebar playlist
-- [ ] Add `Playlist::rename()` method with atomic file operations
-- [ ] Add `Playlist::delete()` method with file cleanup
-- [ ] Implement playlist rename popup using existing input overlay pattern
-- [ ] Add validation for playlist names (no duplicates, valid filenames)
-- [ ] Write tests for `Playlist::rename()` and `delete()` methods
-- [ ] Write tests for sidebar playlist management key handling
-- [ ] Run tests - must pass before task 5
+- [x] Add `PlaylistRename` and `PlaylistDelete` variants to `InputMode`
+- [x] Add 'r' key handler for rename when focused on sidebar playlist
+- [x] Add 'd' key handler for delete with confirmation when focused on sidebar playlist
+- [x] Add `Playlist::rename()` method with atomic file operations
+- [x] Add `Playlist::delete()` method with file cleanup
+- [x] Implement playlist rename popup using existing input overlay pattern
+- [x] Add validation for playlist names (no duplicates, valid filenames)
+- [x] Write tests for `Playlist::rename()` and `delete()` methods
+- [x] Write tests for sidebar playlist management key handling
+- [x] Run tests - must pass before task 5
 
 ### Task 5: Add playlist selection during URL input
 

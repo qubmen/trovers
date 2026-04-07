@@ -1,4 +1,5 @@
 use super::{effective_speed, App, Focus, InputMode, SidebarItem, SettingsItem, SETTINGS_ITEMS};
+use crate::tui::input::validate_playlist_name;
 use crate::config::AudioQuality;
 use crate::playlist::CacheStatus;
 use ratatui::{
@@ -62,6 +63,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         InputMode::TrackContextMenu => {
             render_track_context_menu(frame, app, area);
+        }
+        InputMode::PlaylistRename => {
+            render_playlist_rename_overlay(frame, app, area);
+        }
+        InputMode::PlaylistDelete => {
+            render_playlist_delete_overlay(frame, app, area);
         }
         _ => {}
     }
@@ -685,8 +692,14 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         (InputMode::TrackContextMenu, _) => {
             " [↑↓] nav  ·  [enter] move track  ·  [esc] cancel"
         }
+        (InputMode::PlaylistRename, _) => {
+            " Enter new name and press [enter]  ·  [esc] cancel"
+        }
+        (InputMode::PlaylistDelete, _) => {
+            " Delete playlist?  ·  [y/enter] confirm  ·  [n/esc] cancel"
+        }
         (InputMode::Normal, Focus::Sidebar) => {
-            " [↑↓] nav  ·  [enter] select  ·  [tab] → tracks  ·  [q] quit"
+            " [↑↓] nav  ·  [enter] select  ·  [r] rename  ·  [d] delete  ·  [tab] → tracks  ·  [q] quit"
         }
         (InputMode::Normal, Focus::TrackList) => {
             " [↑↓/jk] nav  ·  [enter] play  ·  [spc] play/pause  ·  [←→] seek  ·  [[]]] speed  ·  [a] add  ·  [m] move  ·  [/] search  ·  [N] playlist  ·  [q] quit"
@@ -808,6 +821,108 @@ fn render_track_context_menu(frame: &mut Frame, app: &App, area: Rect) {
             rows[i + 1],
         );
     }
+}
+
+// ── Playlist rename overlay ───────────────────────────────────────────────
+
+fn render_playlist_rename_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let width = area.width.min(52).max(30);
+    let height = 3u16;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    // Determine current name from sidebar selection so we allow keeping it during rename
+    let current_name: Option<String> = {
+        let items = app.sidebar_items();
+        match items.get(app.sidebar_selected) {
+            Some(SidebarItem::Playlist { name, .. }) => Some(name.clone()),
+            _ => None,
+        }
+    };
+
+    // Show validation hint when name is invalid
+    let is_valid = validate_playlist_name(
+        app.input_buf.trim(),
+        &app.available_playlists,
+        current_name.as_deref(),
+    )
+    .is_ok();
+
+    let border_color = if is_valid { ACCENT } else { GOLD };
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(format!("Name: {}_", app.input_buf))
+            .block(
+                Block::default()
+                    .title(" Rename Playlist ")
+                    .title_style(Style::new().fg(ACCENT).bold())
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(border_color)),
+            )
+            .style(Style::new().fg(Color::White)),
+        popup,
+    );
+}
+
+// ── Playlist delete overlay ───────────────────────────────────────────────
+
+/// Returns the name of the playlist currently targeted for delete, if any.
+pub(crate) fn playlist_delete_target<'a>(app: &'a App) -> Option<&'a str> {
+    let items = app.sidebar_items();
+    // We need a stable reference – match on the sidebar items vec
+    // Note: sidebar_items() returns owned Strings so we need to look up in available_playlists
+    match items.get(app.sidebar_selected) {
+        Some(SidebarItem::Playlist { name, .. }) => {
+            // Return ref to the name stored in available_playlists for lifetime safety
+            app.available_playlists
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(n, _)| n.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn render_playlist_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let target = {
+        let items = app.sidebar_items();
+        match items.get(app.sidebar_selected) {
+            Some(SidebarItem::Playlist { name, .. }) => name.clone(),
+            _ => return,
+        }
+    };
+
+    let is_active = app.playlist.name == target;
+
+    let msg = if is_active {
+        format!("Cannot delete active playlist '{}'", truncate(&target, 20))
+    } else {
+        format!("Delete '{}'?  [y] yes  [n] no", truncate(&target, 24))
+    };
+
+    let width = area.width.min(56).max(34);
+    let height = 3u16;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(format!(" {msg}"))
+            .block(
+                Block::default()
+                    .title(" Delete Playlist ")
+                    .title_style(Style::new().fg(ACCENT).bold())
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(ACCENT)),
+            )
+            .style(Style::new().fg(Color::White)),
+        popup,
+    );
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

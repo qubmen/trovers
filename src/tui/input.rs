@@ -15,7 +15,12 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
     if key.code == KeyCode::Tab
         && !matches!(
             app.input_mode,
-            InputMode::UrlInput | InputMode::NewPlaylist | InputMode::SearchInput | InputMode::TrackContextMenu
+            InputMode::UrlInput
+                | InputMode::NewPlaylist
+                | InputMode::SearchInput
+                | InputMode::TrackContextMenu
+                | InputMode::PlaylistRename
+                | InputMode::PlaylistDelete
         )
     {
         app.focus = match app.focus {
@@ -36,6 +41,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
         InputMode::SearchInput => handle_search(app, key),
         InputMode::ConfirmDelete => handle_confirm_delete(app, key),
         InputMode::TrackContextMenu => handle_track_context_menu(app, key),
+        InputMode::PlaylistRename => handle_playlist_rename(app, key).await,
+        InputMode::PlaylistDelete => handle_playlist_delete(app, key).await,
     }
 }
 
@@ -82,6 +89,23 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Rename selected playlist (sidebar must be on a Playlist item)
+        KeyCode::Char('r') => {
+            let items = app.sidebar_items();
+            if let Some(SidebarItem::Playlist { name, .. }) = items.get(app.sidebar_selected) {
+                app.input_buf = name.clone();
+                app.input_mode = InputMode::PlaylistRename;
+            }
+        }
+
+        // Delete selected playlist (sidebar must be on a Playlist item)
+        KeyCode::Char('d') => {
+            let items = app.sidebar_items();
+            if matches!(items.get(app.sidebar_selected), Some(SidebarItem::Playlist { .. })) {
+                app.input_mode = InputMode::PlaylistDelete;
             }
         }
 
@@ -486,6 +510,150 @@ fn handle_track_context_menu(app: &mut App, key: KeyEvent) -> Result<Action> {
         _ => {}
     }
     Ok(Action::Continue)
+}
+
+// ── Playlist rename ───────────────────────────────────────────────────────
+
+async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let new_name = app.input_buf.trim().to_string();
+            app.input_buf.clear();
+            app.input_mode = InputMode::Normal;
+
+            if new_name.is_empty() {
+                return Ok(Action::Continue);
+            }
+
+            // Find which playlist is selected in the sidebar
+            let items = app.sidebar_items();
+            let selected_item = items.get(app.sidebar_selected).cloned();
+            if let Some(SidebarItem::Playlist { name: old_name, path: old_path }) = selected_item {
+                // Validate: no duplicate name
+                if let Err(msg) = validate_playlist_name(&new_name, &app.available_playlists, Some(&old_name)) {
+                    tracing::warn!(msg = %msg, "invalid playlist name");
+                    return Ok(Action::Continue);
+                }
+
+                let mut playlist = match Playlist::load(&old_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(err = %e, "failed to load playlist for rename");
+                        return Ok(Action::Continue);
+                    }
+                };
+
+                match playlist.rename(&new_name, &old_path) {
+                    Ok(new_path) => {
+                        // Update available_playlists entry
+                        for entry in &mut app.available_playlists {
+                            if entry.0 == old_name {
+                                entry.0 = new_name.clone();
+                                entry.1 = new_path.clone();
+                                break;
+                            }
+                        }
+                        app.available_playlists.sort_by(|a, b| a.0.cmp(&b.0));
+
+                        // If we just renamed the active playlist, update playlist_path too
+                        if app.playlist.name == old_name {
+                            app.playlist.name = new_name.clone();
+                            app.playlist_path = new_path;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(err = %e, "failed to rename playlist");
+                    }
+                }
+            }
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.input_buf.clear();
+        }
+        _ => type_char(app, key),
+    }
+    Ok(Action::Continue)
+}
+
+// ── Playlist delete ───────────────────────────────────────────────────────
+
+async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            app.input_mode = InputMode::Normal;
+
+            let items = app.sidebar_items();
+            let selected_item = items.get(app.sidebar_selected).cloned();
+            if let Some(SidebarItem::Playlist { name, path }) = selected_item {
+                // Don't allow deleting the active playlist
+                if app.playlist.name == name {
+                    tracing::warn!("cannot delete the currently active playlist");
+                    return Ok(Action::Continue);
+                }
+
+                match Playlist::delete(&path) {
+                    Ok(()) => {
+                        app.available_playlists.retain(|(n, _)| n != &name);
+                        // Move sidebar selection up if needed
+                        let new_items = app.sidebar_items();
+                        if app.sidebar_selected >= new_items.len() {
+                            app.sidebar_selected = new_items.len().saturating_sub(1);
+                        }
+                        // Ensure selection lands on a selectable item
+                        let selectable = new_items
+                            .iter()
+                            .enumerate()
+                            .find(|(i, item)| *i <= app.sidebar_selected && item.is_selectable());
+                        if selectable.is_none() {
+                            app.sidebar_selected = 0;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(err = %e, "failed to delete playlist");
+                    }
+                }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(Action::Continue)
+}
+
+// ── Playlist name validation ──────────────────────────────────────────────
+
+/// Validate a playlist name.
+/// Returns `Ok(())` if valid, `Err(message)` describing the problem.
+/// `existing` is the list of current playlist (name, path) pairs.
+/// `exclude` is an optional name to skip during duplicate check (used for rename).
+pub(crate) fn validate_playlist_name(
+    name: &str,
+    existing: &[(String, std::path::PathBuf)],
+    exclude: Option<&str>,
+) -> std::result::Result<(), String> {
+    if name.is_empty() {
+        return Err("playlist name cannot be empty".to_string());
+    }
+    // Reject names with filesystem-unfriendly characters
+    let invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
+    if name.chars().any(|c| invalid_chars.contains(&c)) {
+        return Err(format!("playlist name contains invalid character"));
+    }
+    // Reject names that are purely whitespace or dots
+    if name.trim().is_empty() || name == "." || name == ".." {
+        return Err("playlist name is not valid".to_string());
+    }
+    // Check for duplicate
+    let is_duplicate = existing
+        .iter()
+        .any(|(n, _)| n == name && exclude.map_or(true, |ex| n != ex));
+    if is_duplicate {
+        return Err(format!("a playlist named '{name}' already exists"));
+    }
+    Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

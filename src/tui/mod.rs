@@ -37,6 +37,8 @@ pub enum InputMode {
     ConfirmDelete,
     SearchInput,
     TrackContextMenu,
+    PlaylistRename,
+    PlaylistDelete,
 }
 
 // ── SidebarItem ───────────────────────────────────────────────────────────

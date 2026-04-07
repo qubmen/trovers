@@ -2061,4 +2061,246 @@ mod tests {
             "available_playlists should be unchanged after switch"
         );
     }
+
+    // ── Task 4: Playlist management in sidebar ────────────────────────────────
+
+    // --- Playlist::rename tests ---
+
+    #[test]
+    fn playlist_rename_updates_name_and_creates_new_file() {
+        let pl = make_playlist("OldName");
+        let (dir, old_path) = write_temp_playlist(&pl);
+        let new_path = dir.path().join("NewName.toml");
+
+        let mut pl2 = crate::playlist::Playlist::load(&old_path).expect("load");
+        let result = pl2.rename("NewName", &old_path);
+
+        assert!(result.is_ok(), "rename should succeed: {result:?}");
+        assert!(new_path.exists(), "new file should exist");
+        assert!(!old_path.exists(), "old file should be removed");
+        assert_eq!(pl2.name, "NewName", "playlist name should be updated");
+    }
+
+    #[test]
+    fn playlist_rename_new_file_has_correct_content() {
+        let mut pl = make_playlist("Original");
+        pl.tracks.push(make_track("vid1", "Some Track"));
+        let (dir, old_path) = write_temp_playlist(&pl);
+
+        pl.rename("Renamed", &old_path).expect("rename");
+
+        let new_path = dir.path().join("Renamed.toml");
+        let loaded = crate::playlist::Playlist::load(&new_path).expect("load renamed");
+        assert_eq!(loaded.name, "Renamed");
+        assert_eq!(loaded.tracks.len(), 1);
+        assert_eq!(loaded.tracks[0].video_id, "vid1");
+    }
+
+    #[test]
+    fn playlist_rename_to_same_name_is_noop() {
+        let pl = make_playlist("SameName");
+        let (_dir, path) = write_temp_playlist(&pl);
+
+        let mut pl2 = crate::playlist::Playlist::load(&path).expect("load");
+        let result = pl2.rename("SameName", &path);
+
+        // Renaming to the same name should succeed and file should still exist
+        assert!(result.is_ok(), "rename to same name should not fail: {result:?}");
+        assert!(path.exists(), "file should still exist after rename to same name");
+    }
+
+    #[test]
+    fn playlist_delete_removes_file() {
+        let pl = make_playlist("ToDelete");
+        let (_dir, path) = write_temp_playlist(&pl);
+
+        assert!(path.exists(), "file should exist before delete");
+
+        let result = crate::playlist::Playlist::delete(&path);
+
+        assert!(result.is_ok(), "delete should succeed: {result:?}");
+        assert!(!path.exists(), "file should be removed after delete");
+    }
+
+    #[test]
+    fn playlist_delete_missing_file_returns_error() {
+        let path = std::path::Path::new("/tmp/does_not_exist_trovers_task4_test.toml");
+        let result = crate::playlist::Playlist::delete(path);
+        assert!(result.is_err(), "deleting non-existent file should return error");
+    }
+
+    // --- validate_playlist_name tests ---
+
+    #[test]
+    fn validate_playlist_name_accepts_valid_name() {
+        use crate::tui::input::validate_playlist_name;
+        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let result = validate_playlist_name("My Playlist", &existing, None);
+        assert!(result.is_ok(), "valid name should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn validate_playlist_name_rejects_empty() {
+        use crate::tui::input::validate_playlist_name;
+        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let result = validate_playlist_name("", &existing, None);
+        assert!(result.is_err(), "empty name should be rejected");
+    }
+
+    #[test]
+    fn validate_playlist_name_rejects_slash() {
+        use crate::tui::input::validate_playlist_name;
+        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let result = validate_playlist_name("bad/name", &existing, None);
+        assert!(result.is_err(), "name with slash should be rejected");
+    }
+
+    #[test]
+    fn validate_playlist_name_rejects_backslash() {
+        use crate::tui::input::validate_playlist_name;
+        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let result = validate_playlist_name("bad\\name", &existing, None);
+        assert!(result.is_err(), "name with backslash should be rejected");
+    }
+
+    #[test]
+    fn validate_playlist_name_rejects_colon() {
+        use crate::tui::input::validate_playlist_name;
+        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let result = validate_playlist_name("bad:name", &existing, None);
+        assert!(result.is_err(), "name with colon should be rejected");
+    }
+
+    #[test]
+    fn validate_playlist_name_rejects_whitespace_only() {
+        use crate::tui::input::validate_playlist_name;
+        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let result = validate_playlist_name("   ", &existing, None);
+        assert!(result.is_err(), "whitespace-only name should be rejected");
+    }
+
+    #[test]
+    fn validate_playlist_name_rejects_dot() {
+        use crate::tui::input::validate_playlist_name;
+        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        assert!(validate_playlist_name(".", &existing, None).is_err(), ". is invalid");
+        assert!(validate_playlist_name("..", &existing, None).is_err(), ".. is invalid");
+    }
+
+    #[test]
+    fn validate_playlist_name_rejects_duplicate() {
+        use crate::tui::input::validate_playlist_name;
+        let existing = vec![
+            ("Rock".to_string(), std::path::PathBuf::from("/fake/Rock.toml")),
+        ];
+        let result = validate_playlist_name("Rock", &existing, None);
+        assert!(result.is_err(), "duplicate name should be rejected: {result:?}");
+    }
+
+    #[test]
+    fn validate_playlist_name_allows_current_name_during_rename() {
+        use crate::tui::input::validate_playlist_name;
+        // During rename, the current name is excluded from duplicate check
+        let existing = vec![
+            ("Rock".to_string(), std::path::PathBuf::from("/fake/Rock.toml")),
+        ];
+        let result = validate_playlist_name("Rock", &existing, Some("Rock"));
+        assert!(result.is_ok(), "current name should be allowed during rename: {result:?}");
+    }
+
+    #[test]
+    fn validate_playlist_name_rejects_other_duplicate_during_rename() {
+        use crate::tui::input::validate_playlist_name;
+        let existing = vec![
+            ("Rock".to_string(), std::path::PathBuf::from("/fake/Rock.toml")),
+            ("Jazz".to_string(), std::path::PathBuf::from("/fake/Jazz.toml")),
+        ];
+        // Renaming "Rock" to "Jazz" (which already exists) should be rejected
+        let result = validate_playlist_name("Jazz", &existing, Some("Rock"));
+        assert!(result.is_err(), "renaming to existing name should be rejected");
+    }
+
+    // --- InputMode variants tests ---
+
+    #[test]
+    fn playlist_rename_mode_exists_in_input_mode_enum() {
+        use crate::tui::InputMode;
+        let mode = InputMode::PlaylistRename;
+        assert_eq!(mode, InputMode::PlaylistRename);
+        assert_ne!(mode, InputMode::Normal);
+        assert_ne!(mode, InputMode::PlaylistDelete);
+    }
+
+    #[test]
+    fn playlist_delete_mode_exists_in_input_mode_enum() {
+        use crate::tui::InputMode;
+        let mode = InputMode::PlaylistDelete;
+        assert_eq!(mode, InputMode::PlaylistDelete);
+        assert_ne!(mode, InputMode::Normal);
+        assert_ne!(mode, InputMode::PlaylistRename);
+    }
+
+    // --- Sidebar 'r' and 'd' key behaviour (state logic tests) ---
+
+    #[test]
+    fn sidebar_rename_mode_entered_when_on_playlist_item() {
+        use crate::tui::InputMode;
+        let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        // sidebar_items: [PlaylistsHeader(0), Playlist Jazz(1), Playlist Rock(2), ...]
+        // sidebar_selected=1 → Jazz playlist item; simulate what handle_sidebar 'r' does
+        app.sidebar_selected = 1; // PlaylistsHeader at 0, Jazz at 1
+        let items = app.sidebar_items();
+        if let Some(crate::tui::SidebarItem::Playlist { name, .. }) = items.get(app.sidebar_selected) {
+            app.input_buf = name.clone();
+            app.input_mode = InputMode::PlaylistRename;
+        }
+        assert_eq!(app.input_mode, InputMode::PlaylistRename, "should enter PlaylistRename");
+        assert_eq!(app.input_buf, "Jazz", "input_buf should be pre-filled with playlist name");
+    }
+
+    #[test]
+    fn sidebar_rename_mode_not_entered_when_on_header() {
+        use crate::tui::InputMode;
+        let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        app.sidebar_selected = 0; // PlaylistsHeader
+        let items = app.sidebar_items();
+        // Simulate 'r' key — only enter rename if Playlist item
+        if let Some(crate::tui::SidebarItem::Playlist { name, .. }) = items.get(app.sidebar_selected) {
+            app.input_buf = name.clone();
+            app.input_mode = InputMode::PlaylistRename;
+        }
+        assert_eq!(app.input_mode, InputMode::Normal, "should not enter rename on header");
+    }
+
+    #[test]
+    fn sidebar_delete_mode_entered_when_on_playlist_item() {
+        use crate::tui::InputMode;
+        let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        app.sidebar_selected = 1;
+        let items = app.sidebar_items();
+        if matches!(items.get(app.sidebar_selected), Some(crate::tui::SidebarItem::Playlist { .. })) {
+            app.input_mode = InputMode::PlaylistDelete;
+        }
+        assert_eq!(app.input_mode, InputMode::PlaylistDelete, "should enter PlaylistDelete");
+    }
+
+    // --- playlist_delete_target helper ---
+
+    #[test]
+    fn playlist_delete_target_returns_name_for_playlist_item() {
+        use crate::tui::ui::playlist_delete_target;
+        let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        app.sidebar_selected = 1; // Jazz playlist item
+        let target = playlist_delete_target(&app);
+        assert_eq!(target, Some("Jazz"), "should return the selected playlist name");
+    }
+
+    #[test]
+    fn playlist_delete_target_returns_none_for_header() {
+        use crate::tui::ui::playlist_delete_target;
+        let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        app.sidebar_selected = 0; // PlaylistsHeader
+        let target = playlist_delete_target(&app);
+        assert!(target.is_none(), "should return None for non-playlist item");
+    }
 }

@@ -117,6 +117,34 @@ impl Playlist {
         self.tracks.push(track);
     }
 
+    /// Rename this playlist to `new_name` by updating the name field,
+    /// saving to a new path, and removing the old file.
+    ///
+    /// Returns the new path on success. The caller is responsible for
+    /// updating any references to the old path.
+    pub fn rename(&mut self, new_name: &str, old_path: &Path) -> Result<PathBuf> {
+        let new_path = old_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(format!("{new_name}.toml"));
+
+        self.name = new_name.to_string();
+        // Save to new path first (atomic)
+        self.save(&new_path)?;
+        // Remove old file
+        if old_path != new_path {
+            std::fs::remove_file(old_path)
+                .with_context(|| format!("failed to remove old playlist file at {}", old_path.display()))?;
+        }
+        Ok(new_path)
+    }
+
+    /// Delete this playlist by removing its file from disk.
+    pub fn delete(path: &Path) -> Result<()> {
+        std::fs::remove_file(path)
+            .with_context(|| format!("failed to delete playlist at {}", path.display()))
+    }
+
     /// Remove a track by video_id and return it.
     /// Returns `None` if no track with the given video_id exists.
     pub fn remove_track_by_video_id(&mut self, video_id: &str) -> Option<Track> {
