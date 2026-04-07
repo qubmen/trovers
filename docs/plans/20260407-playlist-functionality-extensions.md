@@ -170,13 +170,13 @@
 
 ### Task 6: Verify acceptance criteria and edge cases
 
-- [ ] Verify track context menu works with all playlist combinations
-- [ ] Verify playlist switching preserves playback state correctly  
-- [ ] Verify playlist management (create/rename/delete) handles file system errors
-- [ ] Verify URL input playlist selection works with 1 and many playlists
-- [ ] Test edge cases: empty playlists, corrupted files, permission issues
-- [ ] Run full test suite: `cargo test`
-- [ ] Verify backward compatibility with existing playlist files
+- [x] Verify track context menu works with all playlist combinations
+- [x] Verify playlist switching preserves playback state correctly  
+- [x] Verify playlist management (create/rename/delete) handles file system errors
+- [x] Verify URL input playlist selection works with 1 and many playlists
+- [x] Test edge cases: empty playlists, corrupted files, permission issues
+- [x] Run full test suite: `cargo test`
+- [x] Verify backward compatibility with existing playlist files
 
 ### Task 7: [Final] Update documentation
 

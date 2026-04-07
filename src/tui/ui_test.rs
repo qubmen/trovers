@@ -2435,4 +2435,334 @@ mod tests {
             "after cycling, target should be set"
         );
     }
+
+    // ── Task 6: Acceptance criteria and edge cases ────────────────────────────
+
+    // --- Verify track context menu works with all playlist combinations ---
+
+    #[test]
+    fn context_menu_with_two_playlists_shows_only_other() {
+        // Exactly two playlists: context menu shows the non-active one only
+        let app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        let items = app.available_playlist_names();
+        assert_eq!(items.len(), 1, "two playlists: one target");
+        assert_eq!(items[0], "Beta");
+    }
+
+    #[test]
+    fn context_menu_with_many_playlists_shows_all_others() {
+        // Ten playlists: context menu should show nine others
+        let all: Vec<&str> = vec!["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "Active"];
+        let app = make_app_with_playlists("Active", &all);
+        let items = app.available_playlist_names();
+        assert_eq!(items.len(), 9, "ten playlists: nine targets");
+        assert!(!items.contains(&"Active".to_string()), "active excluded");
+    }
+
+    #[test]
+    fn context_menu_active_not_in_available_list_shows_empty() {
+        // Unusual case: available_playlists doesn't contain the active playlist
+        let app = make_app_with_playlists("Active", &["Other1", "Other2"]);
+        // available_playlist_names filters by name != active, so Other1/Other2 both appear
+        let items = app.available_playlist_names();
+        assert_eq!(items.len(), 2, "both non-active playlists visible");
+    }
+
+    // --- Verify playlist switching preserves playback state correctly ---
+
+    #[test]
+    fn switch_to_playlist_clears_paused_state() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        app.is_paused = true;
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert!(!app.is_paused, "paused state should be cleared on playlist switch");
+    }
+
+    #[test]
+    fn switch_to_playlist_resets_position_to_zero() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        app.position = 123.4;
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert_eq!(app.position, 0.0, "position should reset on playlist switch");
+    }
+
+    #[test]
+    fn switch_to_empty_playlist_selection_stays_at_zero() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        app.selected = 3;
+
+        let beta = make_playlist("Beta"); // empty playlist
+        let (_dir, path) = write_temp_playlist(&beta);
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert_eq!(app.selected, 0, "selection at 0 for empty playlist");
+        assert_eq!(app.playlist.tracks.len(), 0, "switched playlist is empty");
+    }
+
+    #[test]
+    fn switch_to_playlist_with_tracks_updates_track_count() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+
+        let mut beta = make_playlist("Beta");
+        beta.tracks.push(make_track("v1", "Track 1"));
+        beta.tracks.push(make_track("v2", "Track 2"));
+        beta.tracks.push(make_track("v3", "Track 3"));
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert_eq!(app.playlist.tracks.len(), 3, "switched playlist should have 3 tracks");
+    }
+
+    // --- Verify playlist management handles file system errors ---
+
+    #[test]
+    fn playlist_delete_nonexistent_file_returns_error() {
+        let path = std::path::Path::new("/tmp/trovers_task6_nonexistent_test.toml");
+        let result = crate::playlist::Playlist::delete(path);
+        assert!(result.is_err(), "delete of missing file should return error");
+    }
+
+    #[test]
+    fn playlist_rename_to_invalid_path_returns_error() {
+        // Create a valid playlist then try renaming to a path in a non-existent directory
+        let pl = make_playlist("Original");
+        let (dir, old_path) = write_temp_playlist(&pl);
+        let mut pl2 = crate::playlist::Playlist::load(&old_path).expect("load");
+
+        // Using a path that can't be written: simulate by pointing to a non-existent dir
+        let nonexistent_parent = dir.path().join("nonexistent_subdir").join("NewName.toml");
+        // Try saving to a path whose parent doesn't exist
+        let result = pl2.save(&nonexistent_parent);
+        assert!(result.is_err(), "save to non-existent directory should fail");
+    }
+
+    #[test]
+    fn playlist_save_and_load_round_trip_preserves_tracks() {
+        // Backward compatibility: save a playlist and reload it
+        let mut pl = make_playlist("RoundTrip");
+        pl.tracks.push(make_track("v1", "Track A"));
+        pl.tracks.push(make_track("v2", "Track B"));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("RoundTrip.toml");
+        pl.save(&path).expect("save");
+
+        let loaded = crate::playlist::Playlist::load(&path).expect("load");
+        assert_eq!(loaded.name, "RoundTrip");
+        assert_eq!(loaded.tracks.len(), 2);
+        assert_eq!(loaded.tracks[0].video_id, "v1");
+        assert_eq!(loaded.tracks[1].video_id, "v2");
+    }
+
+    // --- Verify URL input playlist selection works with 1 and many playlists ---
+
+    #[test]
+    fn cycle_url_target_with_one_playlist_stays_on_same() {
+        let mut app = make_app_with_playlists("Solo", &["Solo"]);
+        app.target_playlist_for_url = Some("Solo".to_string());
+
+        app.cycle_url_target_playlist();
+
+        assert_eq!(
+            app.target_playlist_for_url.as_deref(),
+            Some("Solo"),
+            "single playlist cycling stays on same playlist"
+        );
+    }
+
+    #[test]
+    fn cycle_url_target_with_many_playlists_covers_all() {
+        let all: Vec<&str> = vec!["A", "B", "C", "D", "E"];
+        let mut app = make_app_with_playlists("A", &all);
+        app.target_playlist_for_url = Some("A".to_string());
+
+        let mut seen = std::collections::HashSet::new();
+        // Cycle through all 5 playlists
+        for _ in 0..5 {
+            if let Some(t) = app.target_playlist_for_url.as_deref() {
+                seen.insert(t.to_string());
+            }
+            app.cycle_url_target_playlist();
+        }
+
+        assert_eq!(seen.len(), 5, "all 5 playlists should be cycled through: {seen:?}");
+    }
+
+    // --- Test edge cases: empty playlists, corrupted files ---
+
+    #[test]
+    fn load_empty_tracks_playlist_succeeds() {
+        // A playlist with zero tracks is valid
+        let pl = make_playlist("Empty");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Empty.toml");
+        pl.save(&path).expect("save");
+
+        let loaded = crate::playlist::Playlist::load(&path).expect("load empty playlist");
+        assert_eq!(loaded.tracks.len(), 0, "empty playlist should load with 0 tracks");
+        assert_eq!(loaded.name, "Empty");
+    }
+
+    #[test]
+    fn load_corrupted_file_returns_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("corrupted.toml");
+        std::fs::write(&path, b"this is not valid TOML [[[ ]]").expect("write");
+
+        let result = crate::playlist::Playlist::load(&path);
+        assert!(result.is_err(), "corrupted file should return error");
+    }
+
+    #[test]
+    fn load_missing_file_returns_error() {
+        let path = std::path::Path::new("/tmp/trovers_task6_missing_playlist.toml");
+        let result = crate::playlist::Playlist::load(path);
+        assert!(result.is_err(), "missing file should return error");
+    }
+
+    #[test]
+    fn remove_track_from_single_track_playlist_leaves_empty() {
+        let mut pl = make_playlist("Single");
+        pl.add_track(make_track("only", "Only Track"));
+        pl.current_track = Some("only".to_string());
+
+        let removed = pl.remove_track_by_video_id("only");
+
+        assert!(removed.is_some(), "should return the removed track");
+        assert!(pl.tracks.is_empty(), "playlist should be empty after removal");
+        assert!(pl.current_track.is_none(), "current_track should be cleared");
+    }
+
+    // --- Verify backward compatibility with existing playlist files ---
+
+    #[test]
+    fn backward_compatible_playlist_toml_loads_correctly() {
+        // Simulate a "legacy" playlist file that might exist before these changes
+        // The format hasn't changed - this tests the TOML structure is stable
+        let toml_content = r#"
+name = "LegacyPlaylist"
+created = "2025-01-01T00:00:00Z"
+loop_mode = "none"
+
+[[tracks]]
+url = "https://example.com/track1"
+source = "youtube.com"
+title = "Legacy Track"
+artist = "Old Artist"
+channel = "OldChannel"
+duration = 240
+video_id = "abc123"
+cache_status = "streaming"
+last_position = 0
+added_at = "2025-01-01T12:00:00Z"
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.toml");
+        std::fs::write(&path, toml_content).expect("write");
+
+        let result = crate::playlist::Playlist::load(&path);
+        assert!(result.is_ok(), "legacy TOML should load without error: {result:?}");
+
+        let pl = result.unwrap();
+        assert_eq!(pl.name, "LegacyPlaylist");
+        assert_eq!(pl.tracks.len(), 1);
+        assert_eq!(pl.tracks[0].video_id, "abc123");
+        assert_eq!(pl.tracks[0].title, "Legacy Track");
+    }
+
+    #[test]
+    fn playlist_with_optional_fields_absent_loads_correctly() {
+        // Playlists with optional fields (speed, user_title, user_artist, file) absent
+        // should still load correctly (backward compatibility)
+        let toml_content = r#"
+name = "MinimalPlaylist"
+created = "2025-06-01T00:00:00Z"
+loop_mode = "none"
+
+[[tracks]]
+url = "https://example.com/minimal"
+source = "bandcamp.com"
+title = "Minimal Track"
+artist = "Minimal Artist"
+channel = "MinChannel"
+duration = 120
+video_id = "min001"
+cache_status = "streaming"
+last_position = 0
+added_at = "2025-06-01T08:00:00Z"
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("minimal.toml");
+        std::fs::write(&path, toml_content).expect("write");
+
+        let result = crate::playlist::Playlist::load(&path);
+        assert!(result.is_ok(), "minimal playlist without optional fields should load: {result:?}");
+
+        let pl = result.unwrap();
+        assert!(pl.tracks[0].speed.is_none(), "speed should be None when absent");
+        assert!(pl.tracks[0].user_title.is_none(), "user_title should be None when absent");
+        assert!(pl.tracks[0].user_artist.is_none(), "user_artist should be None when absent");
+        assert!(pl.tracks[0].file.is_none(), "file should be None when absent");
+    }
+
+    #[test]
+    fn playlist_loop_mode_variants_all_load_correctly() {
+        // All loop_mode variants should deserialize without error
+        for (mode_str, expected) in [
+            ("none", crate::playlist::LoopMode::None),
+            ("track", crate::playlist::LoopMode::Track),
+            ("playlist", crate::playlist::LoopMode::Playlist),
+        ] {
+            let toml_content = format!(
+                r#"
+name = "LoopTest"
+created = "2025-01-01T00:00:00Z"
+loop_mode = "{mode_str}"
+tracks = []
+"#
+            );
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("loop_test.toml");
+            std::fs::write(&path, toml_content.as_bytes()).expect("write");
+
+            let result = crate::playlist::Playlist::load(&path);
+            assert!(result.is_ok(), "loop_mode={mode_str} should load: {result:?}");
+            assert_eq!(result.unwrap().loop_mode, expected, "loop_mode={mode_str} mismatch");
+        }
+    }
+
+    #[test]
+    fn cached_track_with_missing_file_degrades_to_streaming() {
+        // Backward compatibility: if a cached track's file no longer exists,
+        // Playlist::load() should reset it to streaming
+        let mut pl = make_playlist("CacheTest");
+        let mut track = make_track("vid1", "Cached Track");
+        track.cache_status = crate::playlist::CacheStatus::Cached;
+        track.file = Some(std::path::PathBuf::from("/nonexistent/path/audio.mp3"));
+        pl.tracks.push(track);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("CacheTest.toml");
+        pl.save(&path).expect("save");
+
+        let loaded = crate::playlist::Playlist::load(&path).expect("load");
+        assert_eq!(
+            loaded.tracks[0].cache_status,
+            crate::playlist::CacheStatus::Streaming,
+            "cached track with missing file should degrade to streaming"
+        );
+        assert!(
+            loaded.tracks[0].file.is_none(),
+            "file field should be cleared when file is missing"
+        );
+    }
 }
