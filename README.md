@@ -32,10 +32,22 @@ Required Cannons: ffmpeg and mpv (for the heavy lifting).
 ## 🧭 Navigating the Waters
 Key	Action
 j/k	Sail up/down through your booty
-s	Scout the horizon (Search)
-p	Plunder a new link (Download)
+/	Scout the horizon (Search/filter)
+a	Plunder a new link (Add URL)
 Enter	Fire! (Play media)
+m	Move track to another playlist
 q	Abandon ship
+
+## 🗂️ Playlist Management
+
+Manage multiple playlists without leaving the keyboard:
+
+- **Switch playlists**: Tab to sidebar → highlight playlist → Enter
+- **Create playlist**: `N` in track list, or sidebar → `↓ Plunder` → opens a name prompt
+- **Rename playlist**: Tab to sidebar → highlight playlist → `r`
+- **Delete playlist**: Tab to sidebar → highlight playlist → `d` → confirm with `y`
+- **Move track**: highlight track → `m` → pick destination playlist from context menu
+- **Add to specific playlist**: `a` → type URL → Tab to cycle target playlist → Enter
 
 ## 🖥️ Now Playing
 

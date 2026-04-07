@@ -395,14 +395,33 @@ widgets or custom `Paragraph` lines built from unicode block characters.
 | `↑`/`↓` | Move between selectable items (skips disabled/separators)  |
 | `Enter` | Playlists header: expand/collapse · Playlist: switch to it |
 |         | Plunder: open URL input · Settings: (reserved)             |
+| `r`     | Rename focused playlist (opens name input overlay)         |
+| `d`     | Delete focused playlist (confirm prompt)                   |
+
+### Track list focus — additional playlist keys
+
+| Key | Action                                               |
+|-----|------------------------------------------------------|
+| `m` | Move selected track: open context menu with playlist targets |
+| `N` | Create new playlist (name input prompt)              |
+
+In URL input mode (`a` key):
+
+| Key   | Action                                              |
+|-------|-----------------------------------------------------|
+| `Tab` | Cycle target playlist (instead of switching focus)  |
 
 ### Input / overlay modes
 
-| Mode            | Keys                                   |
-|-----------------|----------------------------------------|
-| URL / name input| type freely · `Enter` confirm · `Esc` cancel |
-| Search          | type to filter live · `Enter`/`Esc` exit    |
-| Confirm delete  | `y` confirm · `n` cancel                    |
+| Mode              | Keys                                   |
+|-------------------|----------------------------------------|
+| URL / name input  | type freely · `Enter` confirm · `Esc` cancel |
+| URL input (Tab)   | cycle target playlist while typing URL |
+| Search            | type to filter live · `Enter`/`Esc` exit    |
+| Confirm delete    | `y` confirm · `n` cancel                    |
+| Track context menu| `↑`/`↓` navigate · `Enter` confirm · `Esc` cancel |
+| Playlist rename   | type new name · `Enter` confirm · `Esc` cancel |
+| Playlist delete   | `y`/`Enter` confirm · `n`/`Esc` cancel |
 
 ---
 
@@ -474,6 +493,13 @@ to update the caching progress bar on Now Playing line 3.
 - `cache_status` transitions: `streaming` → `downloading` (when yt-dlp starts)
   → `cached` (when yt-dlp finishes, file path written to `file` field)
 - On load: reset any `downloading` → `streaming` (crash recovery)
+- `Playlist::add_track(track)` — append a track and atomically save
+- `Playlist::remove_track_by_video_id(id)` — remove and return track, atomically save
+- `Playlist::rename(new_name, old_path)` — renames TOML file + updates internal name, returns new path
+- `Playlist::delete(path)` — deletes the TOML file from disk
+- `App::move_track_to_playlist(target_name)` — loads target, removes from source, appends to target, saves both
+- `App::switch_to_playlist(name, path)` — loads playlist from path, resets track selection, pauses playback
+- `App::available_playlist_names()` — returns names of all playlists except the currently active one
 
 ### config.rs — global config
 - Read/write `~/.config/trovers/config.toml`
@@ -484,7 +510,12 @@ to update the caching progress bar on Now Playing line 3.
 **Key types:**
 ```rust
 pub enum Focus     { Sidebar, TrackList, Settings }
-pub enum InputMode { Normal, UrlInput, NewPlaylist, ConfirmDelete, SearchInput }
+pub enum InputMode {
+    Normal, UrlInput, NewPlaylist, ConfirmDelete, SearchInput,
+    TrackContextMenu,   // move-track popup: pick destination playlist
+    PlaylistRename,     // sidebar: rename selected playlist
+    PlaylistDelete,     // sidebar: confirm delete selected playlist
+}
 pub enum SidebarItem {
     PlaylistsHeader,
     Playlist { name, path },
@@ -501,7 +532,9 @@ pub enum SidebarItem {
 `focus`, `input_mode`, `input_buf`, `selected` (track cursor), `track_offset`
 (scroll), `track_list_height` (set each frame), `filtered_indices` (search),
 `sidebar_selected`, `playlists_expanded`, `available_playlists`,
-`position`, `download_progress`, `is_paused`.
+`position`, `download_progress`, `is_paused`,
+`context_menu_selected` (selected index in track move context menu),
+`target_playlist_for_url` (playlist name selected during URL input via Tab).
 
 **Event loop:**
 ```
@@ -524,7 +557,8 @@ loop:
   - `render_track_info_row()` — row 2: TITLE • Artist • source (bullet-separated)
   - `render_playback_bar()` — row 3: progress bar + time + volume + cache status
 - `render_footer()` — context-sensitive hint line
-- `render_input_overlay()` — `Clear` + centred rounded popup for text input
+- `render_input_overlay()` — `Clear` + centred rounded popup for text input; shows current target playlist when in `UrlInput` mode (Tab cycles through playlists)
+- `render_track_context_menu()` — centred popup listing available playlists for track move; highlights selected entry with `ACCENT` bg; same overlay pattern as `render_input_overlay()`
 - `make_panel_block()` — reusable rounded-border block with consistent focus styling
 - `build_progress_bar(width, ratio, fill, empty, thumb, fill_color, empty_color)` —
   builds `Vec<Span>` with separate colored spans for filled and empty sections.
