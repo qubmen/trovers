@@ -1,7 +1,8 @@
-use super::{App, Focus, InputMode, SidebarItem, SETTINGS_ITEMS};
-use crate::playlist::Playlist;
+use super::{App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
+use crate::playlist::{LoopMode, Playlist};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use tracing::{error, warn};
 
 #[derive(Debug, PartialEq)]
 pub enum Action {
@@ -65,8 +66,8 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                 match item {
                     SidebarItem::PlaylistsHeader => {
                         app.playlists_expanded = !app.playlists_expanded;
-                        let items2 = app.sidebar_items();
-                        if !items2
+                        let items = app.sidebar_items();
+                        if !items
                             .get(app.sidebar_selected)
                             .map(|i| i.is_selectable())
                             .unwrap_or(false)
@@ -78,7 +79,7 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                         let name = name.clone();
                         let path = path.clone();
                         if let Err(e) = app.switch_to_playlist(&name, &path) {
-                            tracing::error!(err = %e, "failed to switch playlist");
+                            error!(err = %e, "failed to switch playlist");
                             // Still move focus to track list even on error so UX doesn't
                             // get stuck in the sidebar.
                             app.focus = Focus::TrackList;
@@ -180,12 +181,12 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
 
         // Space: toggle pause if playing, otherwise start
         KeyCode::Char(' ') => {
-            if app.player.is_some() {
+            if let Some(player) = &app.player {
                 app.is_paused = !app.is_paused;
                 if app.is_paused {
-                    app.player.as_ref().unwrap().pause().await?;
+                    player.pause().await?;
                 } else {
-                    app.player.as_ref().unwrap().resume().await?;
+                    player.resume().await?;
                 }
             } else {
                 let idx = app.current_track_index()
@@ -256,7 +257,6 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
 
         // Loop mode
         KeyCode::Char('l') => {
-            use crate::playlist::LoopMode;
             app.playlist.loop_mode = match app.playlist.loop_mode {
                 LoopMode::None => LoopMode::Track,
                 LoopMode::Track => LoopMode::Playlist,
@@ -361,7 +361,6 @@ fn handle_settings(app: &mut App, key: KeyEvent) -> Result<Action> {
 }
 
 fn settings_change(app: &mut App, dir: i8) {
-    use super::SettingsItem;
     match SETTINGS_ITEMS.get(app.settings_selected) {
         Some(SettingsItem::AudioQuality) => {
             if dir > 0 {
@@ -440,7 +439,7 @@ async fn handle_new_playlist(app: &mut App, key: KeyEvent) -> Result<Action> {
                         app.available_playlists.sort_by(|a, b| a.0.cmp(&b.0));
                     }
                     Err(e) => {
-                        tracing::error!(err = %e, "failed to create playlist");
+                        error!(err = %e, "failed to create playlist");
                     }
                 }
             }
@@ -495,7 +494,7 @@ fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
             app.save_playlist();
             if let Some(path) = file_to_delete {
                 if let Err(e) = std::fs::remove_file(&path) {
-                    tracing::warn!(path = %path.display(), err = %e, "failed to delete cached file");
+                    warn!(path = %path.display(), err = %e, "failed to delete cached file");
                 }
             }
         }
@@ -529,7 +528,7 @@ fn handle_track_context_menu(app: &mut App, key: KeyEvent) -> Result<Action> {
             let names = app.available_playlist_names();
             if let Some(target_name) = names.get(app.context_menu_selected).cloned() {
                 if let Err(e) = app.move_track_to_playlist(&target_name) {
-                    tracing::error!(err = %e, "failed to move track");
+                    error!(err = %e, "failed to move track");
                 }
             }
             app.input_mode = InputMode::Normal;
@@ -558,14 +557,14 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
             if let Some(SidebarItem::Playlist { name: old_name, path: old_path }) = selected_item {
                 // Validate: no duplicate name
                 if let Err(msg) = validate_playlist_name(&new_name, &app.available_playlists, Some(&old_name)) {
-                    tracing::warn!(msg = %msg, "invalid playlist name");
+                    warn!(msg = %msg, "invalid playlist name");
                     return Ok(Action::Continue);
                 }
 
                 let mut playlist = match Playlist::load(&old_path) {
                     Ok(p) => p,
                     Err(e) => {
-                        tracing::error!(err = %e, "failed to load playlist for rename");
+                        error!(err = %e, "failed to load playlist for rename");
                         return Ok(Action::Continue);
                     }
                 };
@@ -589,7 +588,7 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
                         }
                     }
                     Err(e) => {
-                        tracing::error!(err = %e, "failed to rename playlist");
+                        error!(err = %e, "failed to rename playlist");
                     }
                 }
             }
@@ -615,7 +614,7 @@ async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> 
             if let Some(SidebarItem::Playlist { name, path }) = selected_item {
                 // Don't allow deleting the active playlist
                 if app.playlist.name == name {
-                    tracing::warn!("cannot delete the currently active playlist");
+                    warn!("cannot delete the currently active playlist");
                     return Ok(Action::Continue);
                 }
 
@@ -647,7 +646,7 @@ async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> 
                         }
                     }
                     Err(e) => {
-                        tracing::error!(err = %e, "failed to delete playlist");
+                        error!(err = %e, "failed to delete playlist");
                     }
                 }
             }
@@ -677,7 +676,7 @@ pub(crate) fn validate_playlist_name(
     // Reject names with filesystem-unfriendly characters
     let invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
     if name.chars().any(|c| invalid_chars.contains(&c)) {
-        return Err(format!("playlist name contains invalid character"));
+        return Err("playlist name contains invalid character".to_string());
     }
     // Reject names that are purely whitespace or dots
     if name.trim().is_empty() || name == "." || name == ".." {

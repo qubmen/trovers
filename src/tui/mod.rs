@@ -212,8 +212,6 @@ impl App {
         self.playlist.tracks.iter().position(|t| t.video_id == id)
     }
 
-    /// Request playback of track at Vec index `idx`.
-    /// Saves position of the current track, then spawns mpv in the background.
     /// Start playback of the track at Vec index `idx`.
     /// `start_pos`: resume at this position in seconds (used when switching
     /// from stream to local file mid-play; pass `None` for a fresh start).
@@ -332,7 +330,6 @@ impl App {
         while let Ok(msg) = self.task_rx.try_recv() {
             self.handle_task_msg(msg);
         }
-
     }
 
     pub(crate) fn handle_task_msg(&mut self, msg: TaskMsg) {
@@ -361,13 +358,7 @@ impl App {
 
                 // When a non-active target playlist path is set, add the track there
                 // instead of the currently displayed playlist.
-                let is_different_target = target_path
-                    .as_deref()
-                    .map(|p| p != self.playlist_path.as_path())
-                    .unwrap_or(false);
-
-                if is_different_target {
-                    let p = target_path.as_deref().unwrap();
+                if let Some(p) = target_path.as_deref().filter(|p| *p != self.playlist_path.as_path()) {
                     match Playlist::load(p) {
                         Ok(mut target_pl) => {
                             target_pl.add_track(track);

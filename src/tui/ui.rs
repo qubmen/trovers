@@ -23,6 +23,8 @@ const TEXT_DIM: Color = Color::Rgb(130, 130, 130);
 const BORDER_IDLE: Color = Color::Rgb(70, 70, 70);
 /// Color for non-interactive / disabled sidebar items.
 const ITEM_DISABLED: Color = Color::Rgb(90, 90, 90);
+/// Background color for the selected (but not playing) row in the track table.
+const ROW_SELECTED_BG: Color = Color::Rgb(60, 60, 60);
 
 // ── Panel block builder ───────────────────────────────────────────────────
 
@@ -205,6 +207,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     app.track_list_height = table_area.height;
 
+    // icons(2) + num(4) + sep(1) + artist(16) + sep(1) + dur(7) + padding(3)
     let title_width =
         table_area.width.saturating_sub(2 + 4 + 1 + 16 + 1 + 7 + 3) as usize;
 
@@ -223,6 +226,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 match track.cache_status {
                     CacheStatus::Cached => "◈",
                     CacheStatus::Streaming => "◌",
+                    CacheStatus::Downloading => "⟳",
                 }
             };
 
@@ -231,7 +235,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
             } else if is_playing {
                 Style::new().fg(SEA_GREEN).bold()
             } else if is_selected {
-                Style::new().fg(Color::White).bg(Color::Rgb(60, 60, 60))
+                Style::new().fg(Color::White).bg(ROW_SELECTED_BG)
             } else {
                 Style::default()
             };
@@ -530,6 +534,7 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
         match track.cache_status {
             CacheStatus::Cached => CacheState::Cached,
             CacheStatus::Streaming => CacheState::Streaming,
+            CacheStatus::Downloading => CacheState::Downloading(app.download_progress as f64 / 100.0),
         }
     };
 
@@ -923,13 +928,10 @@ pub(crate) fn playlist_delete_target<'a>(app: &'a App) -> Option<&'a str> {
 }
 
 fn render_playlist_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
-    let target = {
-        let items = app.sidebar_items();
-        match items.get(app.sidebar_selected) {
-            Some(SidebarItem::Playlist { name, .. }) => name.clone(),
-            _ => return,
-        }
+    let Some(target) = playlist_delete_target(app) else {
+        return;
     };
+    let target = target.to_string();
 
     let is_active = app.playlist.name == target;
 
@@ -1016,7 +1018,6 @@ pub(crate) fn build_progress_bar(
         spans
     }
 }
-
 
 /// Distribute `total_width` across N sections with optional fixed-width items.
 /// Returns a Vec of widths for each section.

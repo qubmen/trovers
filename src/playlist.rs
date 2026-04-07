@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 pub enum CacheStatus {
     Cached,
     Streaming,
+    Downloading,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,9 +57,12 @@ impl Playlist {
         let mut playlist: Playlist =
             toml::from_str(&raw).context("failed to parse playlist TOML")?;
 
-        // File-existence check: if cached file was deleted or never written, treat as streaming
+        // File-existence check: if cached file was deleted or never written, treat as streaming.
+        // Also reset any in-progress downloads (crash recovery) back to streaming.
         for track in &mut playlist.tracks {
-            if track.cache_status == CacheStatus::Cached {
+            if track.cache_status == CacheStatus::Downloading {
+                track.cache_status = CacheStatus::Streaming;
+            } else if track.cache_status == CacheStatus::Cached {
                 let exists = track.file.as_ref().map(|p| p.exists()).unwrap_or(false);
                 if !exists {
                     track.cache_status = CacheStatus::Streaming;
