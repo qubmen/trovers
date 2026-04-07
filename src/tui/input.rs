@@ -470,7 +470,13 @@ fn handle_track_context_menu(app: &mut App, key: KeyEvent) -> Result<Action> {
             }
         }
         KeyCode::Enter => {
-            // Selection confirmed: close menu (actual move will be implemented in Task 2)
+            // Perform the actual move
+            let names = app.available_playlist_names();
+            if let Some(target_name) = names.get(app.context_menu_selected).cloned() {
+                if let Err(e) = app.move_track_to_playlist(&target_name) {
+                    tracing::error!(err = %e, "failed to move track");
+                }
+            }
             app.input_mode = InputMode::Normal;
         }
         _ => {}

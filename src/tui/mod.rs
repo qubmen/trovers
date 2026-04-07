@@ -552,6 +552,78 @@ impl App {
             .collect()
     }
 
+    /// Move the currently selected track to the named playlist.
+    ///
+    /// Handles:
+    /// - Stopping playback if the moved track is currently playing.
+    /// - Loading the target playlist from disk (or returning an error if missing).
+    /// - Saving both source and target playlists atomically.
+    /// - Updating `available_playlists` when the target playlist is a new entry.
+    pub fn move_track_to_playlist(&mut self, target_name: &str) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+
+        // Determine the real track index for the cursor position
+        let track_idx = self
+            .track_index_at(self.selected)
+            .with_context(|| "no track at current selection")?;
+
+        let video_id = self.playlist.tracks[track_idx].video_id.clone();
+
+        // Resolve the target playlist path
+        let target_path = self
+            .available_playlists
+            .iter()
+            .find(|(n, _)| n == target_name)
+            .map(|(_, p)| p.clone())
+            .with_context(|| format!("target playlist '{target_name}' not found in available_playlists"))?;
+
+        // Load or create the target playlist from disk
+        let mut target_playlist = if target_path.exists() {
+            Playlist::load(&target_path)
+                .with_context(|| format!("failed to load target playlist '{target_name}'"))?
+        } else {
+            // Path listed but file missing – create a fresh empty playlist
+            let (pl, _) = Playlist::create(target_name)
+                .with_context(|| format!("failed to create target playlist '{target_name}'"))?;
+            pl
+        };
+
+        // Stop playback if the track being moved is the current one
+        let is_current = self.playlist.current_track.as_deref() == Some(&video_id);
+        if is_current {
+            self.player = None; // Drop kills mpv process
+            self.playlist.current_track = None;
+            self.is_paused = false;
+            self.position = 0.0;
+        }
+
+        // Remove from source playlist
+        let track = self
+            .playlist
+            .remove_track_by_video_id(&video_id)
+            .with_context(|| format!("track '{video_id}' not found in source playlist"))?;
+
+        // Append to target playlist
+        target_playlist.add_track(track);
+
+        // Save target first, then source (both atomic)
+        target_playlist
+            .save(&target_path)
+            .with_context(|| format!("failed to save target playlist '{target_name}'"))?;
+        self.playlist
+            .save(&self.playlist_path)
+            .with_context(|| "failed to save source playlist after move")?;
+
+        // Clamp the selection cursor so it stays in bounds
+        let new_count = self.visible_track_count();
+        if self.selected >= new_count && self.selected > 0 {
+            self.selected -= 1;
+        }
+        self.clamp_scroll();
+
+        Ok(())
+    }
+
     pub fn quality_next(&mut self) {
         self.config.audio_quality = match self.config.audio_quality {
             AudioQuality::Best => AudioQuality::High,

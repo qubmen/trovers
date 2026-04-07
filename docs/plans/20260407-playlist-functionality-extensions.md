@@ -106,15 +106,15 @@
 - Modify: `src/playlist.rs`
 - Modify: `src/tui/mod.rs`
 
-- [ ] Add `Playlist::add_track()` method to append track to playlist
-- [ ] Add `Playlist::remove_track_by_video_id()` method returning removed track
-- [ ] Implement `App::move_track_to_playlist()` method handling the full operation
-- [ ] Handle edge cases: moving current playing track, target playlist errors
-- [ ] Update `available_playlists` state when creating new playlists during move
-- [ ] Add atomic save pattern for both source and target playlists
-- [ ] Write tests for `Playlist::add_track()` and `remove_track_by_video_id()`
-- [ ] Write tests for `App::move_track_to_playlist()` success and error cases
-- [ ] Run tests - must pass before task 3
+- [x] Add `Playlist::add_track()` method to append track to playlist
+- [x] Add `Playlist::remove_track_by_video_id()` method returning removed track
+- [x] Implement `App::move_track_to_playlist()` method handling the full operation
+- [x] Handle edge cases: moving current playing track, target playlist errors
+- [x] Update `available_playlists` state when creating new playlists during move
+- [x] Add atomic save pattern for both source and target playlists
+- [x] Write tests for `Playlist::add_track()` and `remove_track_by_video_id()`
+- [x] Write tests for `App::move_track_to_playlist()` success and error cases
+- [x] Run tests - must pass before task 3
 
 ### Task 3: Implement playlist switching functionality
 

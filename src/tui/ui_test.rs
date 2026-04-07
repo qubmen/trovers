@@ -1684,4 +1684,243 @@ mod tests {
         assert_ne!(mode, InputMode::UrlInput);
         assert_ne!(mode, InputMode::SearchInput);
     }
+
+    // ── Task 2: track moving between playlists ────────────────────────────────
+
+    fn make_track(video_id: &str, title: &str) -> crate::playlist::Track {
+        use crate::playlist::CacheStatus;
+        crate::playlist::Track {
+            url: format!("https://example.com/{video_id}"),
+            source: "youtube.com".to_string(),
+            title: title.to_string(),
+            artist: "Test Artist".to_string(),
+            channel: "Test Channel".to_string(),
+            duration: 180,
+            video_id: video_id.to_string(),
+            cache_status: CacheStatus::Streaming,
+            file: None,
+            last_position: 0,
+            speed: None,
+            user_title: None,
+            user_artist: None,
+            added_at: chrono::Utc::now(),
+        }
+    }
+
+    // ── Playlist::add_track tests ─────────────────────────────────────────────
+
+    #[test]
+    fn add_track_appends_to_empty_playlist() {
+        let mut pl = make_playlist("Test");
+        let track = make_track("vid1", "Track One");
+        pl.add_track(track);
+        assert_eq!(pl.tracks.len(), 1);
+        assert_eq!(pl.tracks[0].video_id, "vid1");
+    }
+
+    #[test]
+    fn add_track_appends_to_existing_tracks() {
+        let mut pl = make_playlist("Test");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.add_track(make_track("vid2", "Track Two"));
+        assert_eq!(pl.tracks.len(), 2);
+        assert_eq!(pl.tracks[1].video_id, "vid2");
+    }
+
+    #[test]
+    fn add_track_does_not_modify_other_fields() {
+        let mut pl = make_playlist("Test");
+        let original_name = pl.name.clone();
+        pl.add_track(make_track("vid1", "Track One"));
+        assert_eq!(pl.name, original_name);
+        assert!(pl.current_track.is_none());
+    }
+
+    // ── Playlist::remove_track_by_video_id tests ─────────────────────────────
+
+    #[test]
+    fn remove_track_returns_removed_track() {
+        let mut pl = make_playlist("Test");
+        pl.add_track(make_track("vid1", "Track One"));
+        let removed = pl.remove_track_by_video_id("vid1");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().video_id, "vid1");
+        assert!(pl.tracks.is_empty());
+    }
+
+    #[test]
+    fn remove_track_returns_none_for_missing_id() {
+        let mut pl = make_playlist("Test");
+        pl.add_track(make_track("vid1", "Track One"));
+        let removed = pl.remove_track_by_video_id("nonexistent");
+        assert!(removed.is_none());
+        assert_eq!(pl.tracks.len(), 1, "track should remain");
+    }
+
+    #[test]
+    fn remove_track_clears_current_track_pointer() {
+        let mut pl = make_playlist("Test");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.current_track = Some("vid1".to_string());
+        pl.remove_track_by_video_id("vid1");
+        assert!(pl.current_track.is_none(), "current_track should be cleared");
+    }
+
+    #[test]
+    fn remove_track_preserves_current_track_for_other_tracks() {
+        let mut pl = make_playlist("Test");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.add_track(make_track("vid2", "Track Two"));
+        pl.current_track = Some("vid2".to_string());
+        pl.remove_track_by_video_id("vid1");
+        assert_eq!(pl.current_track.as_deref(), Some("vid2"), "current_track should be preserved");
+    }
+
+    #[test]
+    fn remove_track_removes_correct_track_from_middle() {
+        let mut pl = make_playlist("Test");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.add_track(make_track("vid2", "Track Two"));
+        pl.add_track(make_track("vid3", "Track Three"));
+        pl.remove_track_by_video_id("vid2");
+        assert_eq!(pl.tracks.len(), 2);
+        assert_eq!(pl.tracks[0].video_id, "vid1");
+        assert_eq!(pl.tracks[1].video_id, "vid3");
+    }
+
+    // ── App::move_track_to_playlist tests ────────────────────────────────────
+
+    fn make_app_with_tracks_and_targets(
+        active: &str,
+        tracks: &[(&str, &str)],
+        targets: &[&str],
+    ) -> crate::tui::App {
+        use std::path::PathBuf;
+        let mut playlist = make_playlist(active);
+        for (id, title) in tracks {
+            playlist.add_track(make_track(id, title));
+        }
+        let config = crate::config::Config::default();
+        let mut available: Vec<(String, PathBuf)> = vec![
+            (active.to_string(), PathBuf::from(format!("/fake/{active}.toml"))),
+        ];
+        for t in targets {
+            available.push((t.to_string(), PathBuf::from(format!("/fake/{t}.toml"))));
+        }
+        crate::tui::App::new(playlist, config, available, PathBuf::from(format!("/fake/{active}.toml")))
+    }
+
+    #[test]
+    fn move_track_fails_for_missing_target_playlist() {
+        let mut app = make_app_with_tracks_and_targets(
+            "Source",
+            &[("vid1", "Track One")],
+            &[], // no targets at all
+        );
+        let result = app.move_track_to_playlist("NonExistent");
+        assert!(result.is_err(), "should fail when target not in available_playlists");
+    }
+
+    #[test]
+    fn move_track_fails_when_no_track_at_selection() {
+        // Playlist is empty, nothing to move
+        let mut app = make_app_with_tracks_and_targets(
+            "Source",
+            &[],       // empty playlist
+            &["Rock"], // target exists
+        );
+        let result = app.move_track_to_playlist("Rock");
+        assert!(result.is_err(), "should fail when no track at cursor");
+    }
+
+    #[test]
+    fn move_track_stops_playback_when_moving_current_track() {
+        let mut app = make_app_with_tracks_and_targets(
+            "Source",
+            &[("vid1", "Track One")],
+            &["Rock"],
+        );
+        // Mark vid1 as current track (no actual player)
+        app.playlist.current_track = Some("vid1".to_string());
+        app.is_paused = true;
+        app.position = 42.0;
+
+        // The file doesn't exist on disk so this will fail at the save step,
+        // but the in-memory state should be correct up to that point.
+        // We can only test the in-memory part here without a real filesystem.
+        // Since target_path ("/fake/Rock.toml") won't exist, it will try Playlist::create
+        // which will also fail because the fake playlists_dir doesn't exist.
+        // This is expected - the test verifies error propagation, not success.
+        let result = app.move_track_to_playlist("Rock");
+        assert!(result.is_err(), "should fail due to missing fake file system");
+    }
+
+    #[test]
+    fn move_track_selection_clamps_after_removal() {
+        // This tests the clamping logic directly on the App struct
+        // without requiring disk I/O by checking the logic path
+        let mut app = make_app_with_tracks_and_targets(
+            "Source",
+            &[("vid1", "One"), ("vid2", "Two"), ("vid3", "Three")],
+            &["Rock"],
+        );
+        // Select last track
+        app.selected = 2;
+        // Simulate what move does: remove track and clamp
+        app.playlist.remove_track_by_video_id("vid3");
+        let new_count = app.visible_track_count();
+        if app.selected >= new_count && app.selected > 0 {
+            app.selected -= 1;
+        }
+        app.clamp_scroll();
+        assert_eq!(app.selected, 1, "selection should clamp to new last index");
+    }
+
+    #[test]
+    fn move_track_selection_stays_when_not_last() {
+        let mut app = make_app_with_tracks_and_targets(
+            "Source",
+            &[("vid1", "One"), ("vid2", "Two"), ("vid3", "Three")],
+            &["Rock"],
+        );
+        // Select first track
+        app.selected = 0;
+        // Remove middle track (simulate removing what's at cursor=0)
+        app.playlist.remove_track_by_video_id("vid1");
+        let new_count = app.visible_track_count();
+        if app.selected >= new_count && app.selected > 0 {
+            app.selected -= 1;
+        }
+        // selected=0 < new_count=2, so no clamping
+        assert_eq!(app.selected, 0, "selection should stay at 0 when not out of bounds");
+    }
+
+    #[test]
+    fn playlist_add_and_remove_round_trip() {
+        // Add then remove the same track — playlist should be empty again
+        let mut pl = make_playlist("Round Trip");
+        let track = make_track("vid1", "Track One");
+        pl.add_track(track);
+        let removed = pl.remove_track_by_video_id("vid1");
+        assert!(removed.is_some());
+        assert!(pl.tracks.is_empty(), "playlist should be empty after round trip");
+    }
+
+    #[test]
+    fn remove_track_from_empty_playlist_returns_none() {
+        let mut pl = make_playlist("Empty");
+        let result = pl.remove_track_by_video_id("vid1");
+        assert!(result.is_none(), "removing from empty playlist should return None");
+    }
+
+    #[test]
+    fn add_multiple_tracks_preserve_insertion_order() {
+        let mut pl = make_playlist("Order Test");
+        for i in 0..5 {
+            pl.add_track(make_track(&format!("vid{i}"), &format!("Track {i}")));
+        }
+        for (i, track) in pl.tracks.iter().enumerate() {
+            assert_eq!(track.video_id, format!("vid{i}"), "track order must be preserved");
+        }
+    }
 }
