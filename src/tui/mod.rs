@@ -47,7 +47,6 @@ pub enum InputMode {
 pub enum SidebarItem {
     PlaylistsHeader,
     Playlist { name: String, path: PathBuf },
-    PlaylistsOverflow { count: usize },
     Separator,
     Music,
     Video,
@@ -299,16 +298,11 @@ impl App {
         let mut items = Vec::new();
         items.push(SidebarItem::PlaylistsHeader);
         if self.playlists_expanded {
-            const MAX_VISIBLE: usize = 5;
-            for (name, path) in self.available_playlists.iter().take(MAX_VISIBLE) {
+            for (name, path) in &self.available_playlists {
                 items.push(SidebarItem::Playlist {
                     name: name.clone(),
                     path: path.clone(),
                 });
-            }
-            let overflow = self.available_playlists.len().saturating_sub(MAX_VISIBLE);
-            if overflow > 0 {
-                items.push(SidebarItem::PlaylistsOverflow { count: overflow });
             }
         }
         items.push(SidebarItem::Separator);

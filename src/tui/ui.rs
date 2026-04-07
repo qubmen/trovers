@@ -150,9 +150,6 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                         Style::new().fg(fg).bg(bg),
                     )
                 }
-                SidebarItem::PlaylistsOverflow { count } => {
-                    Line::styled(format!("   ▼ {count} more…"), Style::new().fg(TEXT_DIM))
-                }
                 SidebarItem::Separator => Line::raw(""),
                 SidebarItem::Music => Line::styled(" ♪ Music", Style::new().fg(ITEM_DISABLED)),
                 SidebarItem::Video => Line::styled(" ▶ Video", Style::new().fg(ITEM_DISABLED)),
@@ -799,9 +796,9 @@ fn render_track_context_menu(frame: &mut Frame, app: &App, area: Rect) {
     let items = app.available_playlist_names();
 
     let item_count = items.len();
-    // Height: 2 (border) + 1 (header line) + max(1, item_count) rows
+    // Height: 2 (border) + 1 (header line) + max(1, item_count) rows, clamped to terminal area
     let content_rows = if item_count == 0 { 1 } else { item_count };
-    let height = (2 + 1 + content_rows) as u16;
+    let height = ((2 + 1 + content_rows) as u16).min(area.height);
     let width = area.width.min(40).max(24);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;

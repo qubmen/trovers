@@ -433,6 +433,10 @@ async fn handle_new_playlist(app: &mut App, key: KeyEvent) -> Result<Action> {
             app.input_buf.clear();
             app.input_mode = InputMode::Normal;
             if !name.is_empty() {
+                if let Err(msg) = validate_playlist_name(&name, &app.available_playlists, None) {
+                    warn!(msg = %msg, "invalid playlist name");
+                    return Ok(Action::Continue);
+                }
                 match Playlist::create(&name) {
                     Ok((_, path)) => {
                         app.available_playlists.push((name, path));
@@ -487,6 +491,8 @@ fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
 
             let file_to_delete = app.playlist.tracks[idx].file.clone();
             app.playlist.tracks.remove(idx);
+            // Clear any active search filter; stale indices would point to wrong tracks
+            app.filtered_indices.clear();
             if app.selected >= app.visible_track_count() && app.selected > 0 {
                 app.selected -= 1;
             }
@@ -580,6 +586,13 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
                             }
                         }
                         app.available_playlists.sort_by(|a, b| a.0.cmp(&b.0));
+
+                        // Re-anchor sidebar_selected to the renamed playlist's new position.
+                        // sidebar_items() starts with PlaylistsHeader at index 0, so playlist
+                        // entries begin at index 1 when expanded.
+                        if let Some(new_pos) = app.available_playlists.iter().position(|(n, _)| n == &new_name) {
+                            app.sidebar_selected = 1 + new_pos; // +1 for PlaylistsHeader
+                        }
 
                         // If we just renamed the active playlist, update playlist_path too
                         if app.playlist.name == old_name {
