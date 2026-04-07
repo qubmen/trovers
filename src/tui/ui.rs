@@ -60,6 +60,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         InputMode::UrlInput | InputMode::NewPlaylist | InputMode::SearchInput => {
             render_input_overlay(frame, app, area);
         }
+        InputMode::TrackContextMenu => {
+            render_track_context_menu(frame, app, area);
+        }
         _ => {}
     }
 }
@@ -679,11 +682,14 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         (InputMode::ConfirmDelete, _) => {
             " Delete track?  ·  [y] confirm  ·  [n/esc] cancel"
         }
+        (InputMode::TrackContextMenu, _) => {
+            " [↑↓] nav  ·  [enter] move track  ·  [esc] cancel"
+        }
         (InputMode::Normal, Focus::Sidebar) => {
             " [↑↓] nav  ·  [enter] select  ·  [tab] → tracks  ·  [q] quit"
         }
         (InputMode::Normal, Focus::TrackList) => {
-            " [↑↓/jk] nav  ·  [enter] play  ·  [spc] play/pause  ·  [←→] seek  ·  [[]]] speed  ·  [a] add  ·  [/] search  ·  [N] playlist  ·  [q] quit"
+            " [↑↓/jk] nav  ·  [enter] play  ·  [spc] play/pause  ·  [←→] seek  ·  [[]]] speed  ·  [a] add  ·  [m] move  ·  [/] search  ·  [N] playlist  ·  [q] quit"
         }
         (InputMode::Normal, Focus::Settings) => {
             " [↑↓] select  ·  [←→] change  ·  [esc/tab] back"
@@ -725,6 +731,83 @@ fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
             .style(Style::new().fg(Color::White)),
         popup,
     );
+}
+
+// ── Track context menu ────────────────────────────────────────────────────
+
+/// Returns the list of context menu items (playlist names to move to) for the given app state.
+/// This is a pure function useful for testing.
+pub(crate) fn context_menu_items(app: &App) -> Vec<String> {
+    app.available_playlist_names()
+}
+
+fn render_track_context_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let items = context_menu_items(app);
+
+    let item_count = items.len();
+    // Height: 2 (border) + 1 (header line) + max(1, item_count) rows
+    let content_rows = if item_count == 0 { 1 } else { item_count };
+    let height = (2 + 1 + content_rows) as u16;
+    let width = area.width.min(40).max(24);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Move Track To ")
+        .title_style(Style::new().fg(ACCENT).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if item_count == 0 {
+        frame.render_widget(
+            Paragraph::new("  No other playlists").style(Style::new().fg(TEXT_DIM)),
+            inner,
+        );
+        return;
+    }
+
+    // Layout: 1-row hint + item rows
+    let rows = Layout::vertical(
+        std::iter::once(Constraint::Length(1))
+            .chain(std::iter::repeat(Constraint::Length(1)).take(item_count))
+            .chain(std::iter::once(Constraint::Min(0)))
+            .collect::<Vec<_>>(),
+    )
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ↑↓", Style::new().fg(TEXT_DIM)),
+            Span::raw(" navigate  "),
+            Span::styled("[enter]", Style::new().fg(ACCENT)),
+            Span::raw(" move  "),
+            Span::styled("[esc]", Style::new().fg(TEXT_DIM)),
+            Span::raw(" cancel"),
+        ])),
+        rows[0],
+    );
+
+    for (i, name) in items.iter().enumerate() {
+        let is_selected = i == app.context_menu_selected;
+        let (fg, bg) = if is_selected {
+            (Color::White, ACCENT_DIM)
+        } else {
+            (Color::White, Color::Reset)
+        };
+        let prefix = if is_selected { " ▶ " } else { "   " };
+        let label = format!("{}{}", prefix, truncate(name, width as usize - 5));
+        frame.render_widget(
+            Paragraph::new(label).style(Style::new().fg(fg).bg(bg)),
+            rows[i + 1],
+        );
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

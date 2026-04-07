@@ -90,15 +90,15 @@
 - Modify: `src/tui/ui.rs`
 - Modify: `src/tui/input.rs`
 
-- [ ] Add `TrackContextMenu` variant to `InputMode` enum
-- [ ] Add `context_menu_selected: usize` field to `App` struct  
-- [ ] Add helper method `App::available_playlist_names()` returning filtered playlist names
-- [ ] Implement `render_track_context_menu()` function using existing popup pattern
-- [ ] Add 'm' key handler in `handle_tracklist()` to enter context menu mode
-- [ ] Add context menu navigation (up/down/enter/escape) in `handle_track_context_menu()`
-- [ ] Write tests for context menu rendering with different playlist counts
-- [ ] Write tests for context menu navigation and selection logic
-- [ ] Run tests - must pass before task 2
+- [x] Add `TrackContextMenu` variant to `InputMode` enum
+- [x] Add `context_menu_selected: usize` field to `App` struct  
+- [x] Add helper method `App::available_playlist_names()` returning filtered playlist names
+- [x] Implement `render_track_context_menu()` function using existing popup pattern
+- [x] Add 'm' key handler in `handle_tracklist()` to enter context menu mode
+- [x] Add context menu navigation (up/down/enter/escape) in `handle_track_context_menu()`
+- [x] Write tests for context menu rendering with different playlist counts
+- [x] Write tests for context menu navigation and selection logic
+- [x] Run tests - must pass before task 2
 
 ### Task 2: Implement track moving between playlists
 

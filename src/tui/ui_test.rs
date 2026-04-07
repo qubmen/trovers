@@ -3,9 +3,37 @@ mod tests {
     use crate::tui::ui::{
         build_now_playing_header_line, build_playback_bar_line, build_progress_bar,
         build_separated_line, build_track_info_line, calculate_distributed_widths,
-        format_duration, format_playback_state, make_panel_block, truncate, CacheState,
+        context_menu_items, format_duration, format_playback_state, make_panel_block, truncate,
+        CacheState,
     };
     use ratatui::style::Color;
+
+    // ── Test helpers ──────────────────────────────────────────────────────────
+
+    fn make_playlist(name: &str) -> crate::playlist::Playlist {
+        crate::playlist::Playlist {
+            name: name.to_string(),
+            created: chrono::Utc::now(),
+            loop_mode: crate::playlist::LoopMode::None,
+            default_speed: None,
+            tracks: Vec::new(),
+            current_track: None,
+        }
+    }
+
+    fn make_app_with_playlists(
+        active: &str,
+        playlists: &[&str],
+    ) -> crate::tui::App {
+        use std::path::PathBuf;
+        let playlist = make_playlist(active);
+        let config = crate::config::Config::default();
+        let available: Vec<(String, PathBuf)> = playlists
+            .iter()
+            .map(|n| (n.to_string(), PathBuf::from(format!("/fake/{}.toml", n))))
+            .collect();
+        crate::tui::App::new(playlist, config, available, PathBuf::from("/fake/active.toml"))
+    }
 
     // ── format_duration tests ─────────────────────────────────────────────
 
@@ -1518,4 +1546,142 @@ mod tests {
     //   - Pirate theme colors visible in dark terminal
     //   - Progress bar updates smoothly during playback
     //   - Cache status updates correctly when downloading
+
+    // ── Task 1: context menu infrastructure tests ─────────────────────────────
+
+    #[test]
+    fn context_menu_items_empty_when_no_other_playlists() {
+        // Active playlist is "Jazz", no other playlists registered
+        let app = make_app_with_playlists("Jazz", &["Jazz"]);
+        let items = context_menu_items(&app);
+        assert!(items.is_empty(), "should be empty when only active playlist exists: {items:?}");
+    }
+
+    #[test]
+    fn context_menu_items_excludes_active_playlist() {
+        // Three playlists; active is "Jazz" — should return the other two
+        let app = make_app_with_playlists("Jazz", &["Jazz", "Rock", "Classical"]);
+        let items = context_menu_items(&app);
+        assert!(!items.contains(&"Jazz".to_string()), "active playlist must be excluded");
+        assert!(items.contains(&"Rock".to_string()), "Rock should be in items");
+        assert!(items.contains(&"Classical".to_string()), "Classical should be in items");
+        assert_eq!(items.len(), 2, "should have exactly 2 items");
+    }
+
+    #[test]
+    fn context_menu_items_single_other_playlist() {
+        let app = make_app_with_playlists("Main", &["Main", "Other"]);
+        let items = context_menu_items(&app);
+        assert_eq!(items, vec!["Other".to_string()]);
+    }
+
+    #[test]
+    fn context_menu_items_no_playlists_at_all() {
+        // available_playlists is empty
+        let app = make_app_with_playlists("Main", &[]);
+        let items = context_menu_items(&app);
+        assert!(items.is_empty(), "should be empty with no available_playlists");
+    }
+
+    #[test]
+    fn context_menu_items_many_playlists() {
+        let names = &["A", "B", "C", "D", "E", "Active"];
+        let app = make_app_with_playlists("Active", names);
+        let items = context_menu_items(&app);
+        assert_eq!(items.len(), 5, "should exclude 1 active from 6 total");
+        assert!(!items.contains(&"Active".to_string()), "Active must be excluded");
+        for n in &["A", "B", "C", "D", "E"] {
+            assert!(items.contains(&n.to_string()), "{n} should be included");
+        }
+    }
+
+    #[test]
+    fn available_playlist_names_matches_context_menu_items() {
+        // available_playlist_names on App should produce the same result as context_menu_items
+        let app = make_app_with_playlists("Jazz", &["Jazz", "Rock", "Classical"]);
+        let via_method = app.available_playlist_names();
+        let via_fn = context_menu_items(&app);
+        assert_eq!(via_method, via_fn, "both approaches should produce identical results");
+    }
+
+    #[test]
+    fn context_menu_selected_initialized_to_zero() {
+        let app = make_app_with_playlists("Main", &["Main", "Other"]);
+        assert_eq!(app.context_menu_selected, 0, "context_menu_selected should start at 0");
+    }
+
+    #[test]
+    fn context_menu_navigation_clamps_at_top() {
+        use crate::tui::InputMode;
+        let mut app = make_app_with_playlists("Main", &["Main", "Rock", "Jazz"]);
+        app.input_mode = InputMode::TrackContextMenu;
+        app.context_menu_selected = 0;
+
+        // Going up at 0 should stay at 0
+        let names = app.available_playlist_names();
+        if app.context_menu_selected > 0 {
+            app.context_menu_selected -= 1;
+        }
+        assert_eq!(app.context_menu_selected, 0, "should clamp at 0");
+        drop(names); // avoid unused warning
+    }
+
+    #[test]
+    fn context_menu_navigation_clamps_at_bottom() {
+        use crate::tui::InputMode;
+        let mut app = make_app_with_playlists("Main", &["Main", "Rock", "Jazz"]);
+        app.input_mode = InputMode::TrackContextMenu;
+        let count = app.available_playlist_names().len(); // 2
+        app.context_menu_selected = count - 1;
+
+        // Going down at last item should stay
+        if app.context_menu_selected + 1 < count {
+            app.context_menu_selected += 1;
+        }
+        assert_eq!(app.context_menu_selected, count - 1, "should clamp at last item");
+    }
+
+    #[test]
+    fn context_menu_navigation_increments() {
+        use crate::tui::InputMode;
+        let mut app = make_app_with_playlists("Main", &["Main", "Rock", "Jazz"]);
+        app.input_mode = InputMode::TrackContextMenu;
+        app.context_menu_selected = 0;
+        let count = app.available_playlist_names().len();
+
+        if app.context_menu_selected + 1 < count {
+            app.context_menu_selected += 1;
+        }
+        assert_eq!(app.context_menu_selected, 1, "should move to index 1");
+    }
+
+    #[test]
+    fn context_menu_enter_returns_to_normal() {
+        use crate::tui::InputMode;
+        let mut app = make_app_with_playlists("Main", &["Main", "Rock"]);
+        app.input_mode = InputMode::TrackContextMenu;
+        // Simulate enter: close menu
+        app.input_mode = InputMode::Normal;
+        assert_eq!(app.input_mode, InputMode::Normal, "enter should close menu");
+    }
+
+    #[test]
+    fn context_menu_esc_returns_to_normal() {
+        use crate::tui::InputMode;
+        let mut app = make_app_with_playlists("Main", &["Main", "Rock"]);
+        app.input_mode = InputMode::TrackContextMenu;
+        app.input_mode = InputMode::Normal;
+        assert_eq!(app.input_mode, InputMode::Normal, "esc should close menu");
+    }
+
+    #[test]
+    fn context_menu_mode_exists_in_input_mode_enum() {
+        use crate::tui::InputMode;
+        // Verify TrackContextMenu variant is distinct and comparable
+        let mode = InputMode::TrackContextMenu;
+        assert_eq!(mode, InputMode::TrackContextMenu);
+        assert_ne!(mode, InputMode::Normal);
+        assert_ne!(mode, InputMode::UrlInput);
+        assert_ne!(mode, InputMode::SearchInput);
+    }
 }

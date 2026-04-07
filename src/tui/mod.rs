@@ -36,6 +36,7 @@ pub enum InputMode {
     NewPlaylist,
     ConfirmDelete,
     SearchInput,
+    TrackContextMenu,
 }
 
 // ── SidebarItem ───────────────────────────────────────────────────────────
@@ -146,6 +147,8 @@ pub struct App {
     // In-flight metadata fetches
     pub pending_fetches: usize,
 
+    // Context menu
+    pub context_menu_selected: usize,
 }
 
 impl App {
@@ -187,6 +190,7 @@ impl App {
             is_paused: false,
             downloading: HashSet::new(),
             pending_fetches: 0,
+            context_menu_selected: 0,
         };
         if let Some(idx) = app.current_track_index() {
             app.selected = idx;
@@ -537,6 +541,15 @@ impl App {
         if let Err(e) = self.playlist.save(&self.playlist_path) {
             error!(err = %e, "failed to auto-save playlist");
         }
+    }
+
+    /// Returns playlist names available as move targets (excludes the currently active playlist).
+    pub fn available_playlist_names(&self) -> Vec<String> {
+        self.available_playlists
+            .iter()
+            .filter(|(name, _)| name != &self.playlist.name)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     pub fn quality_next(&mut self) {
