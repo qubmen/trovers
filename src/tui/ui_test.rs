@@ -1923,4 +1923,142 @@ mod tests {
             assert_eq!(track.video_id, format!("vid{i}"), "track order must be preserved");
         }
     }
+
+    // ── App::switch_to_playlist tests ─────────────────────────────────────────
+
+    /// Write a playlist to a temp file and return the path.
+    fn write_temp_playlist(pl: &crate::playlist::Playlist) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{}.toml", pl.name));
+        pl.save(&path).expect("save");
+        (dir, path)
+    }
+
+    #[test]
+    fn switch_to_playlist_loads_new_playlist() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch should succeed");
+
+        assert_eq!(app.playlist.name, "Beta");
+        assert_eq!(app.playlist_path, path);
+    }
+
+    #[test]
+    fn switch_to_playlist_resets_selection_and_scroll() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        app.selected = 5;
+        app.track_offset = 3;
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert_eq!(app.selected, 0, "selected should reset to 0");
+        assert_eq!(app.track_offset, 0, "track_offset should reset to 0");
+    }
+
+    #[test]
+    fn switch_to_playlist_clears_search_state() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        app.input_buf = "search text".to_string();
+        app.filtered_indices = vec![0, 2, 4];
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert!(app.input_buf.is_empty(), "input_buf should be cleared");
+        assert!(app.filtered_indices.is_empty(), "filtered_indices should be cleared");
+    }
+
+    #[test]
+    fn switch_to_playlist_stops_playback() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        app.is_paused = true;
+        app.position = 42.5;
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert!(!app.is_paused, "is_paused should be false after switch");
+        assert_eq!(app.position, 0.0, "position should reset to 0");
+    }
+
+    #[test]
+    fn switch_to_playlist_focuses_track_list() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        app.focus = crate::tui::Focus::Sidebar;
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert_eq!(app.focus, crate::tui::Focus::TrackList);
+    }
+
+    #[test]
+    fn switch_to_playlist_restores_cursor_to_current_track() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+
+        let mut beta = make_playlist("Beta");
+        beta.tracks.push(make_track("first", "First"));
+        beta.tracks.push(make_track("second", "Second"));
+        beta.tracks.push(make_track("third", "Third"));
+        beta.current_track = Some("second".to_string());
+
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert_eq!(app.selected, 1, "cursor should land on current_track index");
+    }
+
+    #[test]
+    fn switch_to_playlist_returns_error_on_missing_file() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        let missing = std::path::Path::new("/tmp/does_not_exist_trovers_test.toml");
+
+        let result = app.switch_to_playlist("Ghost", missing);
+
+        assert!(result.is_err(), "should return error for missing file");
+    }
+
+    #[test]
+    fn switch_to_playlist_returns_error_on_corrupted_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, b"not valid toml [[[[").expect("write");
+
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Bad"]);
+
+        let result = app.switch_to_playlist("Bad", &path);
+
+        assert!(result.is_err(), "should return error for corrupted TOML");
+    }
+
+    #[test]
+    fn switch_to_playlist_does_not_mutate_available_playlists() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta", "Gamma"]);
+        let original_count = app.available_playlists.len();
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert_eq!(
+            app.available_playlists.len(),
+            original_count,
+            "available_playlists should be unchanged after switch"
+        );
+    }
 }

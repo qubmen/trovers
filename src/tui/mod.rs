@@ -543,6 +543,46 @@ impl App {
         }
     }
 
+    /// Switch the active playlist to the one at `path` with the given `name`.
+    ///
+    /// - Stops any active playback (drops the player).
+    /// - Loads the playlist from disk; returns an error on failure.
+    /// - Resets track selection, scroll offset, and search filter state.
+    /// - Updates `playlist_path` to the new path.
+    /// - Switches focus to the track list so the user can browse the new playlist.
+    pub fn switch_to_playlist(&mut self, name: &str, path: &std::path::Path) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+
+        let new_playlist = Playlist::load(path)
+            .with_context(|| format!("failed to load playlist '{name}' from {}", path.display()))?;
+
+        // Stop any active playback
+        self.player = None;
+        self.is_paused = false;
+        self.position = 0.0;
+        let _ = self.pos_tx.send(0.0);
+
+        // Replace playlist state
+        self.playlist = new_playlist;
+        self.playlist_path = path.to_path_buf();
+
+        // Reset track list state
+        self.selected = 0;
+        self.track_offset = 0;
+        self.filtered_indices.clear();
+        self.input_buf.clear();
+
+        // Restore cursor to last-played track when available
+        if let Some(idx) = self.current_track_index() {
+            self.selected = idx;
+        }
+
+        // Move focus to track list so user can immediately interact
+        self.focus = Focus::TrackList;
+
+        Ok(())
+    }
+
     /// Returns playlist names available as move targets (excludes the currently active playlist).
     pub fn available_playlist_names(&self) -> Vec<String> {
         self.available_playlists

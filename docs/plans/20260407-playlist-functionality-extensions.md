@@ -122,15 +122,15 @@
 - Modify: `src/tui/input.rs`
 - Modify: `src/tui/mod.rs`
 
-- [ ] Replace TODO in `handle_sidebar()` with actual playlist loading logic
-- [ ] Add `App::switch_to_playlist()` method loading playlist and updating state
-- [ ] Handle current player state when switching (pause/stop if needed)
-- [ ] Update `playlist_path` field to point to new playlist file
-- [ ] Reset track selection and filtering state on playlist switch
-- [ ] Preserve sidebar selection position when appropriate
-- [ ] Write tests for `App::switch_to_playlist()` with various app states
-- [ ] Write tests for playlist switching edge cases (file not found, corrupted playlist)
-- [ ] Run tests - must pass before task 4
+- [x] Replace TODO in `handle_sidebar()` with actual playlist loading logic
+- [x] Add `App::switch_to_playlist()` method loading playlist and updating state
+- [x] Handle current player state when switching (pause/stop if needed)
+- [x] Update `playlist_path` field to point to new playlist file
+- [x] Reset track selection and filtering state on playlist switch
+- [x] Preserve sidebar selection position when appropriate
+- [x] Write tests for `App::switch_to_playlist()` with various app states
+- [x] Write tests for playlist switching edge cases (file not found, corrupted playlist)
+- [x] Run tests - must pass before task 4
 
 ### Task 4: Add playlist management in sidebar
 

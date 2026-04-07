@@ -62,10 +62,14 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                         }
                     }
                     SidebarItem::Playlist { name, path } => {
-                        // TODO: load playlist from path, replace app.playlist
-                        let _name = name.clone();
-                        let _path = path.clone();
-                        app.focus = Focus::TrackList;
+                        let name = name.clone();
+                        let path = path.clone();
+                        if let Err(e) = app.switch_to_playlist(&name, &path) {
+                            tracing::error!(err = %e, "failed to switch playlist");
+                            // Still move focus to track list even on error so UX doesn't
+                            // get stuck in the sidebar.
+                            app.focus = Focus::TrackList;
+                        }
                     }
                     SidebarItem::Plunder => {
                         app.input_mode = InputMode::UrlInput;
