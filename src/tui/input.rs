@@ -11,7 +11,13 @@ pub enum Action {
 
 /// Top-level key dispatcher. Tab is handled first, always.
 pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
-    // Tab switches focus regardless of mode (except when typing)
+    // Tab switches focus regardless of mode (except when typing or in context menu).
+    // In UrlInput mode, Tab cycles through available playlists instead.
+    if key.code == KeyCode::Tab && app.input_mode == InputMode::UrlInput {
+        app.cycle_url_target_playlist();
+        return Ok(Action::Continue);
+    }
+
     if key.code == KeyCode::Tab
         && !matches!(
             app.input_mode,
@@ -81,6 +87,7 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                     SidebarItem::Plunder => {
                         app.input_mode = InputMode::UrlInput;
                         app.input_buf.clear();
+                        app.target_playlist_for_url = Some(app.playlist.name.clone());
                         app.focus = Focus::TrackList;
                     }
                     SidebarItem::Settings => {
@@ -283,6 +290,8 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
         KeyCode::Char('a') => {
             app.input_mode = InputMode::UrlInput;
             app.input_buf.clear();
+            // Reset target to the currently active playlist
+            app.target_playlist_for_url = Some(app.playlist.name.clone());
         }
 
         // Delete track
@@ -387,13 +396,31 @@ async fn handle_url_input(app: &mut App, key: KeyEvent) -> Result<Action> {
             app.input_buf.clear();
             app.input_mode = InputMode::Normal;
             if !url.is_empty() {
-                // TODO: playlist selection — for now always adds to current playlist
-                app.fetch_url(url);
+                // Determine the target playlist path from target_playlist_for_url.
+                // If it matches the active playlist (or is not set), use the default flow.
+                let target_path = app
+                    .target_playlist_for_url
+                    .as_deref()
+                    .and_then(|name| {
+                        if name == app.playlist.name {
+                            None // Same as active – use default path
+                        } else {
+                            app.available_playlists
+                                .iter()
+                                .find(|(n, _)| n == name)
+                                .map(|(_, p)| p.clone())
+                        }
+                    });
+                app.fetch_url_to(url, target_path);
             }
+            // Reset target to current playlist for next invocation
+            app.target_playlist_for_url = Some(app.playlist.name.clone());
         }
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
             app.input_buf.clear();
+            // Reset target on cancel too
+            app.target_playlist_for_url = Some(app.playlist.name.clone());
         }
         _ => type_char(app, key),
     }

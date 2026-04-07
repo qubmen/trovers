@@ -70,7 +70,7 @@ impl SidebarItem {
 // ── Task messages (async → event loop) ───────────────────────────────────
 
 pub enum TaskMsg {
-    MetaReady { url: String, meta: TrackMeta },
+    MetaReady { url: String, meta: TrackMeta, target_path: Option<PathBuf> },
     MetaError { url: String, err: String },
     DownloadDone { video_id: String, file: PathBuf },
     DownloadError { video_id: String, err: String },
@@ -151,6 +151,9 @@ pub struct App {
 
     // Context menu
     pub context_menu_selected: usize,
+
+    // URL input playlist target
+    pub target_playlist_for_url: Option<String>,
 }
 
 impl App {
@@ -193,6 +196,7 @@ impl App {
             downloading: HashSet::new(),
             pending_fetches: 0,
             context_menu_selected: 0,
+            target_playlist_for_url: None,
         };
         if let Some(idx) = app.current_track_index() {
             app.selected = idx;
@@ -330,7 +334,7 @@ impl App {
 
     fn handle_task_msg(&mut self, msg: TaskMsg) {
         match msg {
-            TaskMsg::MetaReady { url, meta } => {
+            TaskMsg::MetaReady { url, meta, target_path } => {
                 self.pending_fetches = self.pending_fetches.saturating_sub(1);
                 let video_id = meta.video_id.clone();
                 info!(video_id = %video_id, title = %meta.title, "metadata ready, starting download");
@@ -352,11 +356,35 @@ impl App {
                     added_at: Utc::now(),
                 };
 
-                self.playlist.tracks.push(track);
-                self.playlist.current_track = Some(video_id.clone());
-                self.selected = self.playlist.tracks.len() - 1;
-                self.downloading.insert(video_id.clone());
-                self.save_playlist();
+                // When a non-active target playlist path is set, add the track there
+                // instead of the currently displayed playlist.
+                let is_different_target = target_path
+                    .as_deref()
+                    .map(|p| p != self.playlist_path.as_path())
+                    .unwrap_or(false);
+
+                if is_different_target {
+                    let p = target_path.as_deref().unwrap();
+                    match Playlist::load(p) {
+                        Ok(mut target_pl) => {
+                            target_pl.add_track(track);
+                            if let Err(e) = target_pl.save(p) {
+                                error!(err = %e, "failed to save target playlist after URL add");
+                            }
+                        }
+                        Err(e) => {
+                            error!(err = %e, path = %p.display(), "target playlist not found, track not added");
+                        }
+                    }
+                    self.downloading.insert(video_id.clone());
+                } else {
+                    // Default: add to the active playlist
+                    self.playlist.tracks.push(track);
+                    self.playlist.current_track = Some(video_id.clone());
+                    self.selected = self.playlist.tracks.len() - 1;
+                    self.downloading.insert(video_id.clone());
+                    self.save_playlist();
+                }
 
                 let task_tx = self.task_tx.clone();
                 let dl_tx = self.download_tx.clone();
@@ -524,19 +552,54 @@ impl App {
     }
 
     pub fn fetch_url(&mut self, url: String) {
+        self.fetch_url_to(url, None);
+    }
+
+    /// Fetch metadata for `url` and, on success, add the track to the playlist at
+    /// `target_path`. When `target_path` is `None` the track is added to the current
+    /// active playlist (the existing behaviour).
+    pub fn fetch_url_to(&mut self, url: String, target_path: Option<PathBuf>) {
         self.pending_fetches += 1;
-        info!(url = %url, "fetching metadata");
+        info!(url = %url, target = ?target_path, "fetching metadata");
         let task_tx = self.task_tx.clone();
         tokio::spawn(async move {
             match ytdlp::fetch_metadata(&url).await {
                 Ok(meta) => {
-                    let _ = task_tx.send(TaskMsg::MetaReady { url, meta });
+                    let _ = task_tx.send(TaskMsg::MetaReady { url, meta, target_path });
                 }
                 Err(e) => {
                     let _ = task_tx.send(TaskMsg::MetaError { url, err: e.to_string() });
                 }
             }
         });
+    }
+
+    /// Cycle `target_playlist_for_url` to the next available playlist.
+    /// The cycle order is: all playlists (including the active one) sorted alphabetically.
+    /// If `target_playlist_for_url` is `None` or points to the last in the list, wraps around.
+    pub fn cycle_url_target_playlist(&mut self) {
+        let all: Vec<String> = self
+            .available_playlists
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+
+        if all.is_empty() {
+            return;
+        }
+
+        let current = self
+            .target_playlist_for_url
+            .as_deref()
+            .unwrap_or(&self.playlist.name);
+
+        let next = if let Some(pos) = all.iter().position(|n| n == current) {
+            all[(pos + 1) % all.len()].clone()
+        } else {
+            all[0].clone()
+        };
+
+        self.target_playlist_for_url = Some(next);
     }
 
     pub fn save_playlist(&self) {

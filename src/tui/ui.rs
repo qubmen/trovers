@@ -724,26 +724,68 @@ fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
         _ => return,
     };
 
+    // For URL input mode, show the target playlist hint as a second line
+    let show_playlist_hint = app.input_mode == InputMode::UrlInput;
+    let height = if show_playlist_hint { 5u16 } else { 3u16 };
     let width = area.width.min(64).max(30);
-    let height = 3u16;
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(format!("{}{}_", prompt, app.input_buf))
-            .block(
-                Block::default()
-                    .title(format!(" {title} "))
-                    .title_style(Style::new().fg(ACCENT).bold())
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::new().fg(ACCENT)),
-            )
-            .style(Style::new().fg(Color::White)),
-        popup,
-    );
+
+    let block = Block::default()
+        .title(format!(" {title} "))
+        .title_style(Style::new().fg(ACCENT).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if show_playlist_hint {
+        let rows = Layout::vertical([
+            Constraint::Length(1), // URL input line
+            Constraint::Length(1), // empty separator
+            Constraint::Length(1), // playlist target line
+        ])
+        .split(inner);
+
+        frame.render_widget(
+            Paragraph::new(format!("{}{}_", prompt, app.input_buf))
+                .style(Style::new().fg(Color::White)),
+            rows[0],
+        );
+
+        let target_name = url_input_target_display(app);
+        let has_multiple = app.available_playlists.len() > 1;
+        let tab_hint = if has_multiple { "  [tab] cycle" } else { "" };
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Playlist: ", Style::new().fg(TEXT_DIM)),
+                Span::styled(target_name, Style::new().fg(ACCENT).bold()),
+                Span::styled(tab_hint, Style::new().fg(TEXT_DIM)),
+            ])),
+            rows[2],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(format!("{}{}_", prompt, app.input_buf))
+                .style(Style::new().fg(Color::White)),
+            inner,
+        );
+    }
+}
+
+/// Returns the display name for the current URL input target playlist.
+/// Falls back to the active playlist name when no target is set.
+pub(crate) fn url_input_target_display(app: &App) -> String {
+    app.target_playlist_for_url
+        .as_deref()
+        .unwrap_or(&app.playlist.name)
+        .to_string()
 }
 
 // ── Track context menu ────────────────────────────────────────────────────

@@ -157,16 +157,16 @@
 - Modify: `src/tui/ui.rs` 
 - Modify: `src/tui/input.rs`
 
-- [ ] Add `target_playlist_for_url: Option<String>` field to `App` struct
-- [ ] Modify `render_input_overlay()` to show current target playlist
-- [ ] Add Tab key handler in `handle_url_input()` to cycle through playlists
-- [ ] Update `fetch_url()` to use target playlist instead of current playlist
-- [ ] Add visual indication of target playlist in URL input overlay
-- [ ] Reset target playlist to current on URL input mode entry
-- [ ] Add helper method for playlist cycling logic
-- [ ] Write tests for playlist selection during URL input
-- [ ] Write tests for URL target playlist visual rendering
-- [ ] Run tests - must pass before task 6
+- [x] Add `target_playlist_for_url: Option<String>` field to `App` struct
+- [x] Modify `render_input_overlay()` to show current target playlist
+- [x] Add Tab key handler in `handle_url_input()` to cycle through playlists
+- [x] Update `fetch_url()` to use target playlist instead of current playlist
+- [x] Add visual indication of target playlist in URL input overlay
+- [x] Reset target playlist to current on URL input mode entry
+- [x] Add helper method for playlist cycling logic
+- [x] Write tests for playlist selection during URL input
+- [x] Write tests for URL target playlist visual rendering
+- [x] Run tests - must pass before task 6
 
 ### Task 6: Verify acceptance criteria and edge cases
 

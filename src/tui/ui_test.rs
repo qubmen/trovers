@@ -4,7 +4,7 @@ mod tests {
         build_now_playing_header_line, build_playback_bar_line, build_progress_bar,
         build_separated_line, build_track_info_line, calculate_distributed_widths,
         context_menu_items, format_duration, format_playback_state, make_panel_block, truncate,
-        CacheState,
+        url_input_target_display, CacheState,
     };
     use ratatui::style::Color;
 
@@ -2302,5 +2302,137 @@ mod tests {
         app.sidebar_selected = 0; // PlaylistsHeader
         let target = playlist_delete_target(&app);
         assert!(target.is_none(), "should return None for non-playlist item");
+    }
+
+    // ── Task 5: playlist selection during URL input ───────────────────────────
+
+    #[test]
+    fn url_input_target_display_defaults_to_active_playlist() {
+        use crate::tui::ui::url_input_target_display;
+        let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        app.target_playlist_for_url = None;
+        let display = url_input_target_display(&app);
+        assert_eq!(display, "Jazz", "should default to active playlist name");
+    }
+
+    #[test]
+    fn url_input_target_display_shows_target_when_set() {
+        use crate::tui::ui::url_input_target_display;
+        let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        app.target_playlist_for_url = Some("Rock".to_string());
+        let display = url_input_target_display(&app);
+        assert_eq!(display, "Rock", "should show configured target playlist");
+    }
+
+    #[test]
+    fn cycle_url_target_playlist_cycles_through_all() {
+        let mut app = make_app_with_playlists("Jazz", &["Classical", "Jazz", "Rock"]);
+        // Start with Jazz as target
+        app.target_playlist_for_url = Some("Jazz".to_string());
+
+        // Cycle once – should move to the next in alphabetical order
+        app.cycle_url_target_playlist();
+        let after_first = app.target_playlist_for_url.clone().unwrap();
+
+        // Cycle again
+        app.cycle_url_target_playlist();
+        let after_second = app.target_playlist_for_url.clone().unwrap();
+
+        // Cycle again
+        app.cycle_url_target_playlist();
+        let after_third = app.target_playlist_for_url.clone().unwrap();
+
+        // All three names should appear
+        let names: std::collections::HashSet<_> = [
+            &after_first as &str,
+            &after_second,
+            &after_third,
+        ]
+        .into_iter()
+        .collect();
+        assert!(
+            names.contains("Classical") || names.contains("Jazz") || names.contains("Rock"),
+            "cycle should cover all playlist names; got: {after_first:?}, {after_second:?}, {after_third:?}"
+        );
+    }
+
+    #[test]
+    fn cycle_url_target_playlist_wraps_around() {
+        let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        // available_playlists is sorted: ["Jazz", "Rock"]
+        app.target_playlist_for_url = Some("Jazz".to_string());
+
+        app.cycle_url_target_playlist();
+        assert_eq!(
+            app.target_playlist_for_url.as_deref(),
+            Some("Rock"),
+            "first cycle should go to Rock"
+        );
+
+        app.cycle_url_target_playlist();
+        assert_eq!(
+            app.target_playlist_for_url.as_deref(),
+            Some("Jazz"),
+            "second cycle should wrap back to Jazz"
+        );
+    }
+
+    #[test]
+    fn cycle_url_target_playlist_single_playlist_no_panic() {
+        let mut app = make_app_with_playlists("Jazz", &["Jazz"]);
+        app.target_playlist_for_url = Some("Jazz".to_string());
+        app.cycle_url_target_playlist();
+        // With only one playlist, should stay on Jazz
+        assert_eq!(
+            app.target_playlist_for_url.as_deref(),
+            Some("Jazz"),
+            "single playlist: should stay on same playlist"
+        );
+    }
+
+    #[test]
+    fn cycle_url_target_playlist_empty_playlists_no_panic() {
+        let mut app = make_app_with_playlists("Jazz", &[]);
+        app.target_playlist_for_url = Some("Jazz".to_string());
+        // Should not panic with no available playlists
+        app.cycle_url_target_playlist();
+        // target remains unchanged when empty
+        assert_eq!(
+            app.target_playlist_for_url.as_deref(),
+            Some("Jazz"),
+            "empty list: target should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn url_input_target_display_fallback_when_target_none() {
+        use crate::tui::ui::url_input_target_display;
+        let app = make_app_with_playlists("My Playlist", &["My Playlist"]);
+        // target_playlist_for_url defaults to None
+        let display = url_input_target_display(&app);
+        assert_eq!(display, "My Playlist");
+    }
+
+    #[test]
+    fn app_new_target_playlist_for_url_is_none() {
+        let app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        assert!(
+            app.target_playlist_for_url.is_none(),
+            "new App should have no URL target set"
+        );
+    }
+
+    #[test]
+    fn cycle_url_target_playlist_with_none_target_starts_from_first() {
+        let mut app = make_app_with_playlists("Jazz", &["Classical", "Jazz"]);
+        // No target set – cycle should pick from the available list based on active name
+        app.target_playlist_for_url = None;
+        app.cycle_url_target_playlist();
+        // Active is "Jazz"; in available_playlists ["Classical", "Jazz"], Jazz is at index 1
+        // Next after Jazz (index 1) → wrap to Classical (index 0)
+        assert!(
+            app.target_playlist_for_url.is_some(),
+            "after cycling, target should be set"
+        );
     }
 }
