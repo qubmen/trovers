@@ -166,6 +166,15 @@ async fn main() -> Result<()> {
 
     info!(playlist = %playlist.name, "opened playlist");
 
+    // Keep config.active_playlist in sync with whatever actually got opened
+    // (covers first launch, a since-renamed/deleted playlist, or CLI override),
+    // saving immediately so a crash before exit still leaves the config accurate.
+    let mut config = config;
+    if config.active_playlist.as_deref() != Some(playlist.name.as_str()) {
+        config.active_playlist = Some(playlist.name.clone());
+        let _ = config.save();
+    }
+
     let available_playlists = playlist::Playlist::list_all()
         .unwrap_or_default()
         .into_iter()

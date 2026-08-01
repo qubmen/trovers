@@ -79,25 +79,27 @@ Legend: ✅ done · 🚧 stub/partial · ⬜ not started
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Play track on Enter (spawn player) | 🚧 | cursor + index update done; player spawn TODO |
-| Add URL: fetch meta → add to playlist | 🚧 | input capture done; ytdlp call TODO |
-| Start download after play begins | ⬜ | |
-| Switch player when track changes (n/b) | 🚧 | index update done; player restart TODO |
-| Position polling → TOML on quit | ⬜ | |
-| cache_status: streaming→downloading→cached | ⬜ | |
-| Reload available_playlists on create | ⬜ | |
-| Switch playlist from sidebar Enter | 🚧 | skeleton in place; load TODO |
-| Save playlist + config on q | ⬜ | main.rs save() calls present but player flush missing |
+| Play track on Enter (spawn player) | ✅ | resumes from `last_position` via `resume_start_pos` |
+| Add URL: fetch meta → add to playlist | ✅ | adds + backgrounds download only; never auto-plays or touches `current_track` (fixed add-track playback-hijack bug) |
+| Start download after play begins | ✅ | per-`video_id` progress via `HashMap<String, f32>` (no cross-track clobbering) |
+| Switch player when track changes (n/b) | ✅ | `n`/`b` always step the **displayed** playlist (`app.playlist`), independent of what's actually playing |
+| Position polling → TOML on quit | ✅ | `App::flush_playing_position()` writes `last_position` for the `PlayingSession`'s track to disk in `run()`'s single quit path, before `ratatui::restore()` |
+| cache_status: streaming→downloading→cached | ✅ | transitions routed through `patch_and_save_playlist` path-aware helper |
+| Reload available_playlists on create | ✅ | |
+| Switch playlist from sidebar Enter | ✅ | `switch_to_playlist()` no longer stops playback — player/position/pause state are untouched by playlist switches; also persists `config.active_playlist` |
+| Save playlist + config on q | ✅ | quit path flushes playing-track position before saving, closing the previous "player flush missing" gap |
 
 ---
 
-## Next Steps (suggested order)
+## Next Steps
 
-1. Wire `Enter` in track list → spawn `Player`, start `poll_position_loop` tokio task
-2. Wire `a` / Plunder → `ytdlp::fetch_metadata` → push `Track` → save playlist
-3. Wire download: after `Player::spawn`, call `ytdlp::spawn_download` in tokio task,
-   update `cache_status` transitions, save TOML on completion
-4. Wire `n`/`b` → stop old player, start new one
-5. On `q`: get final position via IPC, save playlist + config
-6. Sidebar `Enter` on playlist name: `Playlist::load` + replace `app.playlist`
-7. Reload `available_playlists` after `Playlist::create`
+All originally-listed Integration wiring steps are now complete. The
+"Decouple Player from Displayed Playlist" effort (see
+`docs/plans/completed/20260801-decouple-player-from-playlist.md`) closed the
+remaining gaps: `switch_to_playlist` no longer stops playback, the playing
+track is tracked independently via `PlayingSession` (see ADR-011 in
+`docs/decisions.md`), resume-from-`last_position` works, position is flushed
+to TOML on quit, `active_playlist` persists across restarts, and download
+progress is tracked per `video_id`. No further Integration TODOs are
+outstanding; future work should be tracked as new plans rather than appended
+here.

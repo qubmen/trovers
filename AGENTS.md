@@ -13,9 +13,11 @@ This applies to every file in the project without exception.
 
 A Rust CLI utility for local caching of audio tracks from YouTube and other
 supported platforms (SoundCloud, Bandcamp, Mixcloud, Vimeo, etc. — anything
-yt-dlp can handle). The user provides a URL — the tool immediately starts playing
-the audio and simultaneously downloads the audio file to disk, adding it to a
-local playlist. The primary interface is a terminal UI built with ratatui.
+yt-dlp can handle). The user provides a URL — the tool adds the track to the
+current playlist and downloads the audio file to disk in the background;
+playback is never started automatically (see "Auto-play on add is
+intentionally not implemented" under Out of Scope). The primary interface is
+a terminal UI built with ratatui.
 
 The name **trovers** reflects the core idea: a personal treasure trove of media,
 plundered from any source and stored locally for playback anytime.
@@ -88,7 +90,7 @@ trovers [<URL>]
        ├─ 1. check that yt-dlp and mpv exist in PATH → exit with error if missing
        │
        ├─ 2. launch ratatui TUI
-       │       ├─ if URL provided → add track to current playlist and start playing
+       │       ├─ if URL provided → add track to current playlist and start caching (no auto-play)
        │       └─ if no URL → open TUI with last active playlist
        │
        └─ TUI event loop:
@@ -104,7 +106,9 @@ trovers [<URL>]
                │
                └─ on download complete:
                        ├─ set cache_status: cached, file: <path> in playlist TOML
-                       └─ mpv seamlessly continues (already playing stream URL)
+                       └─ if this track is the one actually playing: kill the
+                          streaming mpv process and respawn it against the local
+                          file, resuming at the current live position (hot-switch)
 ```
 
 ---
@@ -150,7 +154,7 @@ trovers/
 
 ```bash
 trovers                         # open TUI with last active playlist
-trovers <URL>                   # add URL to current playlist and start playing
+trovers <URL>                   # add URL to current playlist and start caching (no auto-play)
 trovers --playlist <name>       # open TUI with a specific playlist
 ```
 
@@ -377,12 +381,12 @@ widgets or custom `Paragraph` lines built from unicode block characters.
 | `Space`          | Play / Pause                                    |
 | `←` / `→`        | Seek −10s / +10s                               |
 | `Shift+←/→`      | Seek −60s / +60s                               |
-| `s` / `S`        | Speed +0.1 / −0.1 (saved to TOML immediately)  |
+| `[` / `]`        | Speed −0.1 / +0.1 (saved to TOML immediately)  |
 | `v` / `V`        | Volume +5 / −5                                  |
 | `l`              | Cycle loop mode: none → track → playlist → none |
 | `r`              | Toggle shuffle                                  |
-| `n`              | Next track                                      |
-| `b`              | Previous track                                  |
+| `n`              | Next track in the *displayed* playlist (resume from last_position; independent of whatever is actually playing if you're browsing elsewhere) |
+| `b`              | Previous track in the *displayed* playlist (resume from last_position; independent of whatever is actually playing if you're browsing elsewhere) |
 | `a`              | Add track: open URL input prompt                |
 | `/`              | Search/filter tracks (live, case-insensitive)   |
 | `d`              | Delete selected track (confirm prompt)          |
@@ -498,7 +502,10 @@ to update the caching progress bar on Now Playing line 3.
 - `Playlist::rename(new_name, old_path)` — renames TOML file + updates internal name, returns new path
 - `Playlist::delete(path)` — deletes the TOML file from disk
 - `App::move_track_to_playlist(target_name)` — loads target, removes from source, appends to target, saves both
-- `App::switch_to_playlist(name, path)` — loads playlist from path, resets track selection, pauses playback
+- `App::switch_to_playlist(name, path)` — loads playlist from path, resets track selection/scroll/search;
+  playback is **unaffected** by playlist switches — `app.player`/`app.playing`/`app.position` are left
+  untouched, so audio keeps playing (and Now Playing keeps showing it) while the user browses a
+  different playlist
 - `App::available_playlist_names()` — returns names of all playlists except the currently active one
 
 ### config.rs — global config
@@ -526,18 +533,41 @@ pub enum SidebarItem {
     Plunder,
     Settings,
 }
+
+pub struct PlayingSession {
+    pub path: PathBuf,       // playlist file the playing track belongs to
+    pub playlist: Playlist,  // full loaded copy of that playlist
+    pub track_idx: usize,    // index of the playing track within `playlist.tracks`
+}
 ```
 
-**App struct** holds: playlist + config + optional player, watch channels,
-`focus`, `input_mode`, `input_buf`, `selected` (track cursor), `track_offset`
+**App struct** holds: `playlist` (the **displayed** playlist, what the track list
+shows/edits — independent from what's playing) + config + optional player, watch
+channels, `focus`, `input_mode`, `input_buf`, `selected` (track cursor), `track_offset`
 (scroll), `track_list_height` (set each frame), `filtered_indices` (search),
 `sidebar_selected`, `playlists_expanded`, `available_playlists`,
-`position`, `download_progress`, `is_paused`,
+`position`, `download_progress: HashMap<String, f32>` (per-video-id caching progress),
+`is_paused`,
 `context_menu_selected` (selected index in track move context menu),
 `target_playlist_for_url` (playlist name selected during URL input via Tab),
 `download_targets: HashMap<String, PathBuf>` (maps video_id → target playlist path
 for tracks downloading into a non-active playlist; consulted by `DownloadDone` handler
-to update the correct file on disk).
+to update the correct file on disk),
+`playing: Option<PlayingSession>` — the single source of truth for what's currently
+playing, decoupled from `playlist`. It holds its own full `Playlist` (path, loaded
+data, and the playing track's index) so playback survives playlist switches and
+edits to unrelated playlists. `App::playing_track()`/`playing_track_mut()` are the
+accessors: when `playing.path == playlist_path` (the user is browsing the same
+playlist that's playing), they resolve the track from the live, possibly-edited
+`app.playlist` instead of the stashed copy, so edits are reflected immediately;
+otherwise they fall back to `playing.playlist`. Switching playlists, adding tracks,
+or editing a different playlist never touches `playing` — only `request_playback`
+(user-initiated play) and the delete/move guards (when the removed/moved track is
+the one actually playing) do. `Playlist.current_track` (on the displayed playlist)
+now means only "last track selected/played in *this* playlist file, used to restore
+cursor on load" — it is no longer read as "what's currently playing" anywhere in the
+UI (see `render_now_playing_header`/`render_track_info_row`/`render_playback_bar`/
+`render_track_table`, which all resolve the playing track via `app.playing` instead).
 
 **Event loop:**
 ```
@@ -548,6 +578,38 @@ loop:
   handle_key(event)       ← dispatch by focus + mode
   clamp_scroll()          ← keep selected in visible window
 ```
+
+**Core functions (playback/playlist decoupling):**
+- `request_playback(idx, start_pos)` — starts playback of the track at Vec
+  index `idx` in the *displayed* playlist. Before spawning the new player,
+  saves the leaving track's live position through whichever playlist copy is
+  its source of truth (via `save_playing_session_playlist()`), then replaces
+  `self.playing` with a fresh `PlayingSession`. `start_pos` resumes mid-track
+  (stream→file hot-switch); `None` means a fresh start (resets `self.position`).
+- `playing_track()` / `playing_track_mut()` — resolve the track actually
+  driving playback: from the live `self.playlist` when `playing.path ==
+  playlist_path`, otherwise from the session's own private copy.
+- `playing_playlist()` — same idea for the whole playlist (used by
+  `default_speed` fallback lookups).
+- `is_playing_track(path, video_id)` — identity guard used by delete/move to
+  check `(path, video_id)` together, so a track that merely shares a
+  `video_id` with an unrelated playing session in a different playlist file
+  is never mistaken for the one actually playing.
+- `save_playing_session_playlist()` — the single "resolve by path identity,
+  then persist" implementation shared by `request_playback`'s leaving-track
+  save, `flush_playing_position`, and `adjust_playing_track_speed`.
+- `patch_and_save_playlist(path, video_id, f)` — mutate a single track (found
+  by `video_id`) in the playlist at `path` and persist it, whether or not
+  `path` is the currently displayed playlist. Used by `DownloadDone`.
+- `flush_playing_position()` — called once, right before `ratatui::restore()`
+  on quit, to persist the playing track's live position (see "State save on
+  exit" below).
+- `hot_switch_to_local_file(owning_path, video_id, file)` — stream→local-file
+  switch triggered by `DownloadDone`; identity-checked as `(owning_path,
+  video_id)` via `is_playing_track`, mirroring the delete/move guards.
+- `spawn_player_for(video_id, source, speed, start_pos)` — the pure "start an
+  mpv process and wire up position polling" primitive; callers own all
+  `self.playing`/`current_track`/`position` bookkeeping beforehand.
 
 ### tui/ui.rs — rendering
 
@@ -622,17 +684,45 @@ When building multi-section rows in the now-playing area:
   whitespace-only names, names containing `/`, `\`, or `:`, the special names `.` and
   `..`, and duplicates already in `existing`. When `current_name` is `Some(n)`, `n`
   is excluded from the duplicate check (rename-in-place is allowed).
+- `resume_start_pos(track) -> Option<f64>` — pure helper: `Some(last_position)`
+  when nonzero, else `None`. Wired into every user-initiated `request_playback`
+  call site (`Enter`, `Space` fallback, `n`, `b`) so pressing play always
+  resumes near where a track was left off.
+- `adjust_playing_track_speed(app, delta)` — `[`/`]` handler; mutates the
+  *playing* track's speed via `playing_track_mut()` (not the displayed
+  playlist's cursor track — they may differ), sends the new speed to mpv if a
+  player is running, then persists via `save_playing_session_playlist()`.
+- `handle_confirm_delete` / `move_track_to_playlist` — stop playback only when
+  the track being removed/moved is identity-checked as the one actually
+  playing (`is_playing_track(path, video_id)`), not merely a `video_id` match.
+- `handle_playlist_rename` — if the renamed playlist file is the one
+  `app.playing` points at, re-points the playing session's `path` at the new
+  file so later saves don't resurrect the deleted old file.
+- `handle_playlist_delete` — blocks deleting the *displayed* playlist; if the
+  playlist being deleted is instead the one `app.playing` points at (even
+  though it isn't displayed), stops playback before removing the file, for
+  the same reason as the rename case above.
 
 ### Concurrency model
 - Main thread: ratatui event loop (non-blocking via `event::poll` with 100ms timeout)
 - tokio task: mpv IPC polling every 1s (sends `time-pos` via `watch::Sender<f64>`)
-- tokio task: yt-dlp download process (sends progress % via `watch::Sender<f32>`)
+- tokio task: yt-dlp download process (sends `(video_id, progress %)` via
+  `watch::Sender<(String, f32)>` — keyed by `video_id` so concurrent downloads
+  into different playlists never cross-contaminate each other's displayed
+  percentage; `App.download_progress: HashMap<String, f32>` holds the per-track
+  values)
 - TUI reads both `watch::Receiver`s on each render tick via `has_changed()` +
   `borrow_and_update()`
 
 ### State save on exit
-On `q` key: write current `time-pos` from mpv via IPC → save to TOML → quit.
-This ensures `last_position` is always up to date for the next session.
+On `q` key: `App::flush_playing_position()` writes the already-polled
+`time-pos` value (from the position `watch::Receiver`, no synchronous IPC
+round-trip at quit time) into the playing track's `last_position`, routed
+through whichever playlist copy is the source of truth (the displayed
+playlist or the playing session's own private copy — see `PlayingSession`),
+then saves it to TOML before `ratatui::restore()`. This ensures `last_position`
+is always up to date for the next session, even if the playing track belongs
+to a playlist other than the one currently displayed.
 
 ---
 
@@ -644,3 +734,9 @@ This ensures `last_position` is always up to date for the next session.
 - Mouse support in TUI
 - Video playback (architecture supports it via mpv, but UI is audio-only for now)
 - Settings screen (⚙ Settings sidebar item is reserved but not implemented)
+- **Auto-play on add is intentionally not implemented.** Adding a track (via
+  CLI URL argument or the `a`/Plunder flow inside the TUI) only appends it to
+  the target playlist and kicks off caching (metadata fetch + background
+  download) — it never starts playback and never changes what's currently
+  playing (`app.playing`/`PlayingSession`). This was confirmed by the product
+  owner as desired behavior, not a bug — do not "fix" this in a future pass.

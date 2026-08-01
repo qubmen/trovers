@@ -1,5 +1,5 @@
 use super::{App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
-use crate::playlist::{LoopMode, Playlist};
+use crate::playlist::{LoopMode, Playlist, Track};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::io::Write;
@@ -184,7 +184,7 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
 
 // ── Track list ────────────────────────────────────────────────────────────
 
-async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
+pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
     let count = app.visible_track_count();
     let visible = app.track_list_height as usize;
 
@@ -228,14 +228,17 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
             app.clamp_scroll();
         }
 
-        // Enter: select track and start playback
+        // Enter: select track and start playback (resuming from
+        // `last_position` if the track has one).
         KeyCode::Enter => {
             if let Some(idx) = app.track_index_at(app.selected) {
-                app.request_playback(idx, None);
+                let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                app.request_playback(idx, start_pos);
             }
         }
 
-        // Space: toggle pause if playing, otherwise start
+        // Space: toggle pause if playing, otherwise start (resuming from
+        // `last_position` if the track has one).
         KeyCode::Char(' ') => {
             if let Some(player) = &app.player {
                 app.is_paused = !app.is_paused;
@@ -244,12 +247,9 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
                 } else {
                     player.resume().await?;
                 }
-            } else {
-                let idx = app.current_track_index()
-                    .or_else(|| app.track_index_at(app.selected));
-                if let Some(idx) = idx {
-                    app.request_playback(idx, None);
-                }
+            } else if let Some(idx) = app.track_index_at(app.selected) {
+                let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                app.request_playback(idx, start_pos);
             }
         }
 
@@ -267,32 +267,15 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
             }
         }
 
-        // Speed: [ = slower, ] = faster
+        // Speed: [ = slower, ] = faster. Adjusts the speed of the *playing*
+        // track (which may live in a playlist other than the one displayed),
+        // not whatever track happens to sit at `current_track_index()` in
+        // the displayed playlist.
         KeyCode::Char(']') => {
-            if let Some(idx) = app.current_track_index() {
-                let base = app.playlist.tracks[idx].speed
-                    .or(app.playlist.default_speed)
-                    .unwrap_or(app.config.default_speed);
-                let speed = (base + 0.1).min(3.0);
-                app.playlist.tracks[idx].speed = Some(speed);
-                if let Some(player) = &app.player {
-                    player.set_speed(speed).await?;
-                }
-                app.save_playlist();
-            }
+            adjust_playing_track_speed(app, 0.1).await?;
         }
         KeyCode::Char('[') => {
-            if let Some(idx) = app.current_track_index() {
-                let base = app.playlist.tracks[idx].speed
-                    .or(app.playlist.default_speed)
-                    .unwrap_or(app.config.default_speed);
-                let speed = (base - 0.1).max(0.25);
-                app.playlist.tracks[idx].speed = Some(speed);
-                if let Some(player) = &app.player {
-                    player.set_speed(speed).await?;
-                }
-                app.save_playlist();
-            }
+            adjust_playing_track_speed(app, -0.1).await?;
         }
 
         // Volume
@@ -320,25 +303,34 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
             };
         }
 
-        // Next / Previous
+        // Next / Previous: always step relative to the cursor position in
+        // the *displayed* playlist (`app.selected`), wrapping at its bounds,
+        // and play the resulting displayed-playlist track — regardless of
+        // where the currently-playing track (if any) actually lives. This
+        // matches "browsing playlist X and pressing n/b walks X's tracks"
+        // even while something else plays in the background.
         KeyCode::Char('n') => {
-            let len = app.playlist.tracks.len();
-            if len > 0 {
-                let cur = app.current_track_index().unwrap_or(0);
-                let next = (cur + 1) % len;
-                app.selected = next;
+            let count = app.visible_track_count();
+            if count > 0 {
+                let next_cursor = (app.selected + 1) % count;
+                app.selected = next_cursor;
                 app.clamp_scroll();
-                app.request_playback(next, None);
+                if let Some(idx) = app.track_index_at(next_cursor) {
+                    let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                    app.request_playback(idx, start_pos);
+                }
             }
         }
         KeyCode::Char('b') => {
-            let len = app.playlist.tracks.len();
-            if len > 0 {
-                let cur = app.current_track_index().unwrap_or(0);
-                let prev = cur.checked_sub(1).unwrap_or(len - 1);
-                app.selected = prev;
+            let count = app.visible_track_count();
+            if count > 0 {
+                let prev_cursor = app.selected.checked_sub(1).unwrap_or(count - 1);
+                app.selected = prev_cursor;
                 app.clamp_scroll();
-                app.request_playback(prev, None);
+                if let Some(idx) = app.track_index_at(prev_cursor) {
+                    let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                    app.request_playback(idx, start_pos);
+                }
             }
         }
 
@@ -382,6 +374,41 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
     }
 
     Ok(Action::Continue)
+}
+
+/// Adjust the speed of the track actually driving playback right now (per
+/// `app.playing`), not whatever the displayed playlist's cursor happens to
+/// point at — the playing track may live in a different playlist entirely.
+/// No-op if nothing is playing. `delta` is added to the track's current
+/// effective speed and clamped to mpv's supported range.
+pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) -> Result<()> {
+    if app.playing.is_none() {
+        return Ok(());
+    }
+    let default_speed = app.config.default_speed;
+    let playlist_default_speed = app.playing.as_ref().and_then(|p| p.playlist.default_speed);
+
+    let speed = {
+        let Some(track) = app.playing_track_mut() else {
+            return Ok(());
+        };
+        let base = track.speed.or(playlist_default_speed).unwrap_or(default_speed);
+        let new_speed = (base + delta).clamp(0.25, 3.0);
+        track.speed = Some(new_speed);
+        new_speed
+    };
+
+    if let Some(player) = &app.player {
+        player.set_speed(speed).await?;
+    }
+
+    // Persist through whichever copy is the source of truth for the playing
+    // track's identity: the displayed playlist (already the case when paths
+    // match, since `playing_track_mut` mutated it directly) or the playing
+    // session's own playlist file.
+    app.save_playing_session_playlist();
+
+    Ok(())
 }
 
 // ── Settings panel ────────────────────────────────────────────────────────
@@ -532,15 +559,20 @@ fn handle_search(app: &mut App, key: KeyEvent) -> Result<Action> {
     Ok(Action::Continue)
 }
 
-fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
+pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
     if key.code == KeyCode::Char('y') {
         if let Some(idx) = app.track_index_at(app.selected) {
-            let is_current = app.playlist.current_track.as_deref()
-                == Some(app.playlist.tracks[idx].video_id.as_str());
+            let video_id = app.playlist.tracks[idx].video_id.clone();
+            // Only stop playback if the track being deleted is literally the
+            // one actually driving playback right now (identity is `(path,
+            // video_id)`) — not just any track with a matching video_id that
+            // happens to exist in a differently-playing session elsewhere.
+            let is_current = app.is_playing_track(&app.playlist_path, &video_id);
 
             if is_current {
                 // Stop playback immediately when deleting current track
                 app.player = None;  // Drop implementation kills mpv process
+                app.playing = None;
                 app.playlist.current_track = None;
                 app.is_paused = false;
             }
@@ -602,7 +634,7 @@ fn handle_track_context_menu(app: &mut App, key: KeyEvent) -> Result<Action> {
 
 // ── Playlist rename ───────────────────────────────────────────────────────
 
-async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> {
+pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> {
     match key.code {
         KeyCode::Enter => {
             let new_name = app.input_buf.trim().to_string();
@@ -668,6 +700,17 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
                             app.sidebar_selected = 1 + new_pos; // +1 for PlaylistsHeader
                         }
 
+                        // If the playing session belongs to the renamed playlist file,
+                        // re-point it at the new path so future saves (flush_playing_position,
+                        // adjust_playing_track_speed, request_playback's leaving-track save)
+                        // target the file that now actually exists on disk, instead of
+                        // resurrecting the just-deleted `old_path`.
+                        if let Some(session) = app.playing.as_mut() {
+                            if session.path == old_path {
+                                session.path = new_path.clone();
+                            }
+                        }
+
                         // If we just renamed the active playlist, update playlist_path too
                         if app.playlist.name == old_name {
                             app.playlist.name = new_name.clone();
@@ -708,7 +751,7 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
 
 // ── Playlist delete ───────────────────────────────────────────────────────
 
-async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
+pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Enter => {
             app.input_mode = InputMode::Normal;
@@ -720,6 +763,18 @@ async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> 
                 if app.playlist.name == name {
                     warn!("cannot delete the currently active playlist");
                     return Ok(Action::Continue);
+                }
+
+                // If the playlist being deleted is the one `app.playing` points at
+                // (even though it's not the *displayed* playlist), stop playback
+                // first — otherwise the file gets removed out from under a live
+                // session, and a later save (flush_playing_position, etc.) would
+                // resurrect the just-deleted file with a stale snapshot.
+                let deleting_playing_playlist = app.playing.as_ref().is_some_and(|p| p.path == path);
+                if deleting_playing_playlist {
+                    app.player = None; // Drop kills mpv process
+                    app.playing = None;
+                    app.is_paused = false;
                 }
 
                 match Playlist::delete(&path) {
@@ -797,6 +852,18 @@ pub(crate) fn validate_playlist_name(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Decide the resume position to pass to `request_playback` for a
+/// user-initiated play of `track`: resume from `Track.last_position` if it's
+/// non-zero (meaning we've previously left off somewhere mid-track), else
+/// start fresh from the beginning.
+pub(crate) fn resume_start_pos(track: &Track) -> Option<f64> {
+    if track.last_position > 0 {
+        Some(track.last_position as f64)
+    } else {
+        None
+    }
+}
 
 fn type_char(app: &mut App, key: KeyEvent) {
     match key.code {

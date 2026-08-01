@@ -13,11 +13,11 @@ use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 // ── Focus ──────────────────────────────────────────────────────────────────
 
@@ -103,6 +103,33 @@ pub const SETTINGS_ITEMS: &[SettingsItem] = &[
     SettingsItem::DefaultVolume,
 ];
 
+// ── PlayingSession ────────────────────────────────────────────────────────
+
+/// Snapshot of the playlist/track that is actually driving playback right
+/// now, independent of whichever playlist the user happens to be browsing.
+///
+/// `playlist` is a full loaded copy of the playlist the playing track
+/// belongs to. When `path` matches `App::playlist_path` (the user is
+/// browsing the same playlist that's playing), display/mutation code should
+/// prefer `App::playlist` instead — see `App::playing_track`/
+/// `App::playing_track_mut` — so the two views of "the same playlist" never
+/// diverge.
+pub struct PlayingSession {
+    pub path: PathBuf,
+    pub playlist: Playlist,
+    pub track_idx: usize,
+}
+
+impl PlayingSession {
+    pub fn track(&self) -> &Track {
+        &self.playlist.tracks[self.track_idx]
+    }
+
+    pub fn track_mut(&mut self) -> &mut Track {
+        &mut self.playlist.tracks[self.track_idx]
+    }
+}
+
 // ── App ───────────────────────────────────────────────────────────────────
 
 pub struct App {
@@ -111,12 +138,15 @@ pub struct App {
     pub playlist_path: PathBuf,
     pub config: Config,
     pub player: Option<Player>,
+    /// The session (playlist + track index) actually driving playback right
+    /// now — independent of whichever playlist is currently displayed.
+    pub playing: Option<PlayingSession>,
 
     // Async channels
     pub pos_tx: watch::Sender<f64>,
     pub position_rx: watch::Receiver<f64>,
-    pub download_tx: watch::Sender<f32>,
-    pub download_rx: watch::Receiver<f32>,
+    pub download_tx: watch::Sender<(String, f32)>,
+    pub download_rx: watch::Receiver<(String, f32)>,
     pub task_tx: mpsc::UnboundedSender<TaskMsg>,
     pub task_rx: mpsc::UnboundedReceiver<TaskMsg>,
 
@@ -142,7 +172,11 @@ pub struct App {
 
     // Playback state
     pub position: f64,
-    pub download_progress: f32,
+    /// Per-track download progress percentage (0.0-100.0), keyed by
+    /// `video_id`. A `HashMap` (rather than a single global `f32`) so
+    /// multiple concurrent downloads never cross-contaminate each other's
+    /// displayed percentage.
+    pub download_progress: HashMap<String, f32>,
     pub is_paused: bool,
 
     // Footer status message (toast-style)
@@ -170,7 +204,7 @@ impl App {
         playlist_path: PathBuf,
     ) -> Self {
         let (pos_tx, position_rx) = watch::channel(0.0f64);
-        let (download_tx, download_rx) = watch::channel(0.0f32);
+        let (download_tx, download_rx) = watch::channel((String::new(), 0.0f32));
         let (task_tx, task_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
@@ -178,6 +212,7 @@ impl App {
             playlist_path,
             config,
             player: None,
+            playing: None,
             pos_tx,
             position_rx,
             download_tx,
@@ -197,7 +232,7 @@ impl App {
             available_playlists,
             settings_selected: 0,
             position: 0.0,
-            download_progress: 0.0,
+            download_progress: HashMap::new(),
             is_paused: false,
             status_message: None,
             downloading: HashSet::new(),
@@ -212,44 +247,142 @@ impl App {
         app
     }
 
+    /// Index (within the *displayed* playlist, `self.playlist`) of the track
+    /// marked as `current_track` in the playlist file. This is now used
+    /// strictly to restore the cursor position when a playlist is (re)loaded
+    /// from disk — it is **not** the source of truth for "what's playing".
+    /// See `self.playing` (`PlayingSession`) for that.
     pub fn current_track_index(&self) -> Option<usize> {
         let id = self.playlist.current_track.as_deref()?;
         self.playlist.tracks.iter().position(|t| t.video_id == id)
     }
 
-    /// Start playback of the track at Vec index `idx`.
+    /// Returns true if the track identified by `(path, video_id)` is
+    /// literally the one actually driving playback right now — i.e.
+    /// `self.playing` points at a session whose playlist file is `path` and
+    /// whose current track's `video_id` matches. Used to guard delete/move
+    /// operations so they only stop playback when the track being removed is
+    /// truly the one playing, not just any track that happens to share a
+    /// `video_id` with an unrelated playing session in a different playlist.
+    pub fn is_playing_track(&self, path: &Path, video_id: &str) -> bool {
+        self.playing
+            .as_ref()
+            .is_some_and(|p| p.path == path && p.track().video_id == video_id)
+    }
+
+    /// Persist whatever mutation was just made (via `playing_track_mut()`)
+    /// to the track actually driving playback, routed through the same
+    /// in-memory-vs-disk identity rule used throughout this module: if the
+    /// playing session's playlist file is the one currently displayed, save
+    /// via `self.save_playlist()` so in-memory and on-disk state stay in
+    /// sync; otherwise save the playing session's own private playlist copy
+    /// directly to its file. No-op if nothing is playing. This is the single
+    /// "resolve by path identity, then persist" implementation shared by
+    /// `request_playback` (leaving-track position save), `flush_playing_position`,
+    /// and `adjust_playing_track_speed`.
+    pub fn save_playing_session_playlist(&mut self) {
+        let Some(session) = self.playing.as_ref() else {
+            return;
+        };
+        if session.path == self.playlist_path {
+            self.save_playlist();
+        } else {
+            let path = session.path.clone();
+            if let Err(e) = session.playlist.save(&path) {
+                error!(err = %e, path = %path.display(), "failed to save playing session's playlist");
+            }
+        }
+    }
+
+    /// Returns the playlist that owns the currently playing track, if any —
+    /// the playing session's own private copy, or `self.playlist` when the
+    /// displayed playlist happens to be the one that's playing. Used for
+    /// lookups like `default_speed` fallback that need "the playlist the
+    /// playing track lives in", not "the displayed playlist".
+    pub fn playing_playlist(&self) -> Option<&Playlist> {
+        self.playing.as_ref().map(|p| &p.playlist)
+    }
+
+    /// Returns the track that is actually driving playback right now, if any.
+    ///
+    /// When the playing session's playlist is the same file currently
+    /// displayed (`playing.path == self.playlist_path`), this resolves the
+    /// track from `self.playlist` instead of the session's private copy, so
+    /// edits made through the track list (rename, speed change, etc.) are
+    /// reflected immediately without any extra sync step.
+    pub fn playing_track(&self) -> Option<&Track> {
+        let session = self.playing.as_ref()?;
+        if session.path == self.playlist_path {
+            let video_id = &session.track().video_id;
+            self.playlist.tracks.iter().find(|t| t.video_id == *video_id)
+        } else {
+            Some(session.track())
+        }
+    }
+
+    /// Mutable counterpart of `playing_track` — see its docs for the
+    /// same-path/borrow-from-displayed-playlist behavior.
+    pub fn playing_track_mut(&mut self) -> Option<&mut Track> {
+        let path_matches = self.playing.as_ref()?.path == self.playlist_path;
+        if path_matches {
+            let video_id = self.playing.as_ref().unwrap().track().video_id.clone();
+            self.playlist.tracks.iter_mut().find(|t| t.video_id == video_id)
+        } else {
+            self.playing.as_mut().map(|p| p.track_mut())
+        }
+    }
+
+    /// Start playback of the track at Vec index `idx` within the displayed
+    /// playlist (`self.playlist`).
     /// `start_pos`: resume at this position in seconds (used when switching
     /// from stream to local file mid-play; pass `None` for a fresh start).
     pub fn request_playback(&mut self, idx: usize, start_pos: Option<f64>) {
         // Collect all track data before any mutations (borrow checker)
-        let (video_id, url, speed, source) = {
+        let (video_id, speed, source) = {
             let Some(track) = self.playlist.tracks.get(idx) else {
                 return;
             };
             let video_id = track.video_id.clone();
-            let url = track.url.clone();
             let speed = track.speed
                 .or(self.playlist.default_speed)
                 .unwrap_or(self.config.default_speed);
             let source = match (&track.cache_status, &track.file) {
                 (CacheStatus::Cached, Some(file)) => PlaySource::File(file.clone()),
-                _ => PlaySource::Stream(url.clone()),
+                _ => PlaySource::Stream(track.url.clone()),
             };
-            (video_id, url, speed, source)
+            (video_id, speed, source)
         };
 
         // Save position of the track we're leaving (not applicable when switching
-        // within the same track, e.g. stream → local file)
-        if let Some(cur_idx) = self.current_track_index() {
-            if cur_idx != idx {
-                self.playlist.tracks[cur_idx].last_position = self.position as u64;
+        // within the same track, e.g. stream → local file). The leaving track may
+        // live in the displayed playlist or in a different one entirely (the user
+        // was browsing elsewhere while it played) — route the write through
+        // whichever copy is the source of truth for that track's identity.
+        if let Some(session) = self.playing.as_ref() {
+            let leaving_id = session.track().video_id.clone();
+            if leaving_id != video_id {
+                let pos = self.position as u64;
+                if let Some(t) = self.playing_track_mut() {
+                    t.last_position = pos;
+                }
+                // Persist the mutation above — whichever copy is the source of
+                // truth for the leaving track (displayed playlist or the
+                // playing session's own file) — so the position update isn't
+                // silently dropped when `self.playing` is replaced below.
+                self.save_playing_session_playlist();
             }
         }
 
-        let volume = self.config.default_volume;
-        let quality = self.config.audio_quality.clone();
-        let _ = url; // consumed via source
-
+        self.playing = Some(PlayingSession {
+            path: self.playlist_path.clone(),
+            playlist: self.playlist.clone(),
+            track_idx: idx,
+        });
+        // `current_track` on the displayed playlist means strictly "last
+        // track selected/played in *this* playlist file" — used only to
+        // restore the cursor on load. Since `idx` always indexes into
+        // `self.playlist` here, the playing track does live in the
+        // displayed playlist, so record it.
         self.playlist.current_track = Some(video_id.clone());
         self.is_paused = false;
         // Only reset the position display on a fresh start, not on stream→file switch
@@ -258,6 +391,67 @@ impl App {
             let _ = self.pos_tx.send(0.0);
         }
 
+        self.spawn_player_for(video_id, source, speed, start_pos);
+    }
+
+    /// If `(owning_path, video_id)` identifies the track actually driving
+    /// playback right now (per `self.playing`, independent of what's
+    /// displayed), sync its cache status/file into the playing session's own
+    /// view, and — if a player is actually running — spawn a fresh mpv
+    /// process against the freshly downloaded local `file`, resuming at the
+    /// current live position. This is the stream→local-file hot-switch
+    /// triggered by `TaskMsg::DownloadDone`.
+    ///
+    /// Identity is checked as `(path, video_id)`, not `video_id` alone —
+    /// matching `is_playing_track` — so a download for a track that merely
+    /// shares a `video_id` with the actually-playing track in a *different*
+    /// playlist file never hijacks playback.
+    fn hot_switch_to_local_file(&mut self, owning_path: &Path, video_id: &str, file: PathBuf) {
+        if !self.is_playing_track(owning_path, video_id) {
+            return;
+        }
+
+        // `patch_and_save_playlist` above already updated the on-disk copy and, if
+        // `playing.path == self.playlist_path`, the in-memory displayed playlist too
+        // (which `playing_track`/`playing_track_mut` borrow from in that case). When
+        // the playing session belongs to a *different* playlist than the one
+        // displayed, that patch never touched the session's own private `Playlist`
+        // copy — sync it here so `playing_track()` reflects the new cache state
+        // regardless of whether a player is actually running.
+        if let Some(track) = self.playing_track_mut() {
+            track.cache_status = CacheStatus::Cached;
+            track.file = Some(file.clone());
+        }
+
+        if self.player.is_none() {
+            return;
+        }
+
+        let speed = {
+            // Fall back to the *playing* playlist's default speed, not the
+            // displayed one — they may differ once playback is decoupled
+            // from the displayed playlist.
+            let playing_playlist = self
+                .playing_playlist()
+                .expect("just verified a playing track exists");
+            let track = self
+                .playing_track()
+                .expect("just verified a playing track exists");
+            effective_speed(track, playing_playlist, &self.config)
+        };
+        let pos = self.position;
+        info!(video_id = %video_id, pos = pos, "switching stream → local file");
+        self.is_paused = false;
+        self.spawn_player_for(video_id.to_string(), PlaySource::File(file), speed, Some(pos));
+    }
+
+    /// Resolve the stream/local-file source and spawn mpv, wiring up position
+    /// polling and reporting the result back via `TaskMsg::PlayerReady`/
+    /// `PlayerError`. Pure "start a player" — callers are responsible for any
+    /// `self.playing`/`current_track`/`position` bookkeeping beforehand.
+    fn spawn_player_for(&self, video_id: String, source: PlaySource, speed: f32, start_pos: Option<f64>) {
+        let volume = self.config.default_volume;
+        let quality = self.config.audio_quality.clone();
         let task_tx = self.task_tx.clone();
         let pos_tx = self.pos_tx.clone();
 
@@ -325,7 +519,8 @@ impl App {
             self.position = *self.position_rx.borrow_and_update();
         }
         if self.download_rx.has_changed().unwrap_or(false) {
-            self.download_progress = *self.download_rx.borrow_and_update();
+            let (video_id, pct) = self.download_rx.borrow_and_update().clone();
+            self.download_progress.insert(video_id, pct);
         }
         while let Ok(msg) = self.task_rx.try_recv() {
             self.handle_task_msg(msg);
@@ -362,34 +557,40 @@ impl App {
                     added_at: Utc::now(),
                 };
 
-                // When a non-active target playlist path is set, add the track there
-                // instead of the currently displayed playlist.
-                if let Some(p) = target_path.as_deref().filter(|p| *p != self.playlist_path.as_path()) {
-                    match Playlist::load(p) {
+                // Resolve which playlist file this track actually belongs to. Always
+                // recorded here, at add-time, regardless of whether it's the active
+                // playlist — the user may switch playlists before the download
+                // finishes, so `DownloadDone` must not have to guess the path from
+                // whatever happens to be displayed at completion time.
+                let owning_path = target_path.unwrap_or_else(|| self.playlist_path.clone());
+
+                // When the target playlist path is not the currently displayed one, add
+                // the track there instead of the currently displayed playlist.
+                if owning_path != self.playlist_path {
+                    match Playlist::load(&owning_path) {
                         Ok(mut target_pl) => {
                             target_pl.add_track(track);
-                            if let Err(e) = target_pl.save(p) {
+                            if let Err(e) = target_pl.save(&owning_path) {
                                 error!(err = %e, "failed to save target playlist after URL add");
                             }
                         }
                         Err(e) => {
-                            error!(err = %e, path = %p.display(), "target playlist not found, track not added");
+                            error!(err = %e, path = %owning_path.display(), "target playlist not found, track not added");
                         }
                     }
-                    self.downloading.insert(video_id.clone());
                     self.set_status(format!("Added to playlist: {status_title}"));
-                    // Remember that this download belongs to the non-active playlist so
-                    // DownloadDone can update the correct file on disk.
-                    self.download_targets.insert(video_id.clone(), p.to_path_buf());
                 } else {
-                    // Default: add to the active playlist
+                    // Default: add to the active (displayed) playlist
                     self.playlist.tracks.push(track);
-                    self.playlist.current_track = Some(video_id.clone());
                     self.selected = self.playlist.tracks.len() - 1;
-                    self.downloading.insert(video_id.clone());
                     self.save_playlist();
                     self.set_status(format!("Added: {status_title}"));
                 }
+                self.downloading.insert(video_id.clone());
+                // Remember which playlist file this download belongs to so
+                // `DownloadDone` can patch the correct file on disk, even if the
+                // user has since switched to browsing a different playlist.
+                self.download_targets.insert(video_id.clone(), owning_path.clone());
 
                 let task_tx = self.task_tx.clone();
                 let dl_tx = self.download_tx.clone();
@@ -420,63 +621,48 @@ impl App {
             TaskMsg::DownloadDone { video_id, file } => {
                 info!(video_id = %video_id, path = %file.display(), "download complete");
                 self.downloading.remove(&video_id);
-                let _ = self.download_tx.send(0.0);
+                self.download_progress.remove(&video_id);
                 self.set_status("Download complete");
 
-                // Check whether this download was for a non-active playlist.
-                if let Some(target_path) = self.download_targets.remove(&video_id) {
-                    // Update the track in the target playlist file on disk.
-                    match Playlist::load(&target_path) {
-                        Ok(mut target_pl) => {
-                            if let Some(track) =
-                                target_pl.tracks.iter_mut().find(|t| t.video_id == video_id)
-                            {
-                                track.cache_status = CacheStatus::Cached;
-                                track.file = Some(file);
-                            }
-                            if let Err(e) = target_pl.save(&target_path) {
-                                error!(err = %e, "failed to save target playlist after download done");
-                            }
-                        }
-                        Err(e) => {
-                            error!(err = %e, path = %target_path.display(),
-                                "failed to load target playlist after download done");
-                        }
-                    }
-                    return;
-                }
+                // `download_targets` is always populated at add-time (see
+                // `TaskMsg::MetaReady`), regardless of whether the track was added to
+                // the active playlist or a different one — so this single call always
+                // patches the file the track actually lives in, even if the user has
+                // since switched to browsing something else. Fall back to the
+                // displayed playlist's path defensively in case an entry is ever
+                // missing (should not normally happen).
+                let owning_path = self
+                    .download_targets
+                    .remove(&video_id)
+                    .unwrap_or_else(|| self.playlist_path.clone());
 
-                // Active-playlist path: update in-memory state and save.
-                let idx = self.playlist.tracks.iter().position(|t| t.video_id == video_id);
-
-                if let Some(track) =
-                    self.playlist.tracks.iter_mut().find(|t| t.video_id == video_id)
-                {
+                let file_for_patch = file.clone();
+                self.patch_and_save_playlist(&owning_path, &video_id, move |track| {
                     track.cache_status = CacheStatus::Cached;
-                    track.file = Some(file);
-                }
-                self.save_playlist();
+                    track.file = Some(file_for_patch);
+                });
 
-                // If this track is currently streaming, switch mpv to the local file
-                let is_current = self.playlist.current_track.as_deref() == Some(&video_id);
-                if is_current && self.player.is_some() {
-                    if let Some(idx) = idx {
-                        let pos = self.position;
-                        info!(video_id = %video_id, pos = pos, "switching stream → local file");
-                        self.request_playback(idx, Some(pos));
-                    }
-                }
+                // If this track is the one actually driving playback right now — per
+                // `self.playing`, independent of whatever playlist is displayed — and
+                // it was streaming, hot-switch mpv to the freshly downloaded local file.
+                self.hot_switch_to_local_file(&owning_path, &video_id, file);
             }
 
             TaskMsg::DownloadError { video_id, err } => {
                 error!(video_id = %video_id, err = %err, "download failed");
                 self.downloading.remove(&video_id);
+                self.download_progress.remove(&video_id);
+                self.download_targets.remove(&video_id);
                 self.set_status("Download failed");
             }
 
             TaskMsg::PlayerReady { video_id, player } => {
                 // Ignore if user already switched to a different track
-                if self.playlist.current_track.as_deref() != Some(&video_id) {
+                let matches_playing = self
+                    .playing
+                    .as_ref()
+                    .is_some_and(|p| p.track().video_id == video_id);
+                if !matches_playing {
                     info!(video_id = %video_id, "player ready but track changed, discarding");
                     return;
                 }
@@ -642,9 +828,84 @@ impl App {
         }
     }
 
-    /// Switch the active playlist to the one at `path` with the given `name`.
+    /// Persist the currently playing track's live position into
+    /// `last_position` and save it to disk. Called right before quitting so
+    /// resume-on-launch (Task 6) has an up-to-date value — previously
+    /// `last_position` was only ever updated when switching *away* from a
+    /// track mid-session (in `request_playback`), never on quit, so whatever
+    /// track was playing when the user pressed `q` always resumed from 0:00.
     ///
-    /// - Stops any active playback (drops the player).
+    /// No-op if nothing is playing. Routes the write through the same
+    /// in-memory-vs-disk identity rule as the rest of this module: if the
+    /// playing session's playlist file is the one currently displayed, the
+    /// mutation goes through `self.playlist` (and `save_playlist`) so an
+    /// in-progress edit to the displayed playlist isn't clobbered by a stale
+    /// on-disk write; otherwise it's written directly to the playing
+    /// session's own playlist file.
+    pub fn flush_playing_position(&mut self) {
+        if self.playing.is_none() {
+            return;
+        }
+        let pos = self.position as u64;
+        if let Some(track) = self.playing_track_mut() {
+            track.last_position = pos;
+        }
+        self.save_playing_session_playlist();
+    }
+
+    /// Patch a single track (found by `video_id`) in the playlist at `path`
+    /// and persist the change to disk — the general "mutate a track that
+    /// might not be in the currently displayed playlist" mechanism.
+    ///
+    /// - If `path == self.playlist_path`, the track lives in the
+    ///   already-loaded `self.playlist`: mutate it in place and save via
+    ///   `self.save_playlist()` so in-memory and on-disk state stay in sync.
+    /// - Otherwise, load the playlist at `path` from disk, mutate the track
+    ///   there, and save it back to `path`. `self.playlist` (the displayed
+    ///   playlist) is left untouched.
+    /// - If no track with `video_id` exists in the target playlist, this is
+    ///   a no-op (logged, not an error) — matches the existing style used by
+    ///   the target-playlist branch this replaces.
+    /// - Load/save errors are logged and cause an early return.
+    pub fn patch_and_save_playlist(&mut self, path: &Path, video_id: &str, f: impl FnOnce(&mut Track)) {
+        if path == self.playlist_path.as_path() {
+            match self.playlist.tracks.iter_mut().find(|t| t.video_id == video_id) {
+                Some(track) => f(track),
+                None => {
+                    warn!(video_id = %video_id, path = %path.display(), "patch_and_save_playlist: track not found in displayed playlist");
+                    return;
+                }
+            }
+            self.save_playlist();
+            return;
+        }
+
+        let mut target_pl = match Playlist::load(path) {
+            Ok(pl) => pl,
+            Err(e) => {
+                error!(err = %e, path = %path.display(), "patch_and_save_playlist: failed to load playlist");
+                return;
+            }
+        };
+
+        match target_pl.tracks.iter_mut().find(|t| t.video_id == video_id) {
+            Some(track) => f(track),
+            None => {
+                warn!(video_id = %video_id, path = %path.display(), "patch_and_save_playlist: track not found");
+                return;
+            }
+        }
+
+        if let Err(e) = target_pl.save(path) {
+            error!(err = %e, path = %path.display(), "patch_and_save_playlist: failed to save playlist");
+        }
+    }
+
+    /// Switch the displayed playlist to the one at `path` with the given `name`.
+    ///
+    /// - Does **not** affect playback: `self.player`, `self.playing`, and
+    ///   `self.position` are left untouched, so browsing/editing another
+    ///   playlist never interrupts whatever is currently playing.
     /// - Loads the playlist from disk; returns an error on failure.
     /// - Resets track selection, scroll offset, and search filter state.
     /// - Updates `playlist_path` to the new path.
@@ -655,15 +916,13 @@ impl App {
         let new_playlist = Playlist::load(path)
             .with_context(|| format!("failed to load playlist '{name}' from {}", path.display()))?;
 
-        // Stop any active playback
-        self.player = None;
-        self.is_paused = false;
-        self.position = 0.0;
-        let _ = self.pos_tx.send(0.0);
-
         // Replace playlist state
         self.playlist = new_playlist;
         self.playlist_path = path.to_path_buf();
+
+        // Persist the newly active playlist so restarting the app reopens it.
+        self.config.active_playlist = Some(name.to_string());
+        let _ = self.config.save();
 
         // Reset track list state
         self.selected = 0;
@@ -727,10 +986,14 @@ impl App {
             pl
         };
 
-        // Stop playback if the track being moved is the current one
-        let is_current = self.playlist.current_track.as_deref() == Some(&video_id);
+        // Stop playback only if the track being moved is literally the one
+        // actually driving playback right now — identity is `(path,
+        // video_id)`, not just a matching `video_id` that might coincidentally
+        // also exist in an unrelated playing session elsewhere.
+        let is_current = self.is_playing_track(&self.playlist_path, &video_id);
         if is_current {
             self.player = None; // Drop kills mpv process
+            self.playing = None;
             self.playlist.current_track = None;
             self.is_paused = false;
             self.position = 0.0;
@@ -815,6 +1078,8 @@ pub async fn run(app: &mut App) -> Result<()> {
             break;
         }
     }
+
+    app.flush_playing_position();
 
     ratatui::restore();
     Ok(())

@@ -96,7 +96,7 @@ pub async fn spawn_download(
     audio_dir: &Path,
     video_id: &str,
     quality: &AudioQuality,
-    progress_tx: watch::Sender<f32>,
+    progress_tx: watch::Sender<(String, f32)>,
 ) -> Result<PathBuf> {
     let template = audio_dir
         .join(format!("{video_id}.%(ext)s"))
@@ -134,7 +134,7 @@ pub async fn spawn_download(
         }
         if let Some(caps) = progress_re.captures(&line) {
             if let Ok(pct) = caps[1].parse::<f32>() {
-                let _ = progress_tx.send(pct);
+                let _ = progress_tx.send((video_id.to_string(), pct));
             }
         }
     }
@@ -144,7 +144,7 @@ pub async fn spawn_download(
         bail!("yt-dlp download exited with status {status}");
     }
 
-    let _ = progress_tx.send(100.0);
+    let _ = progress_tx.send((video_id.to_string(), 100.0));
 
     // Use the destination logged by yt-dlp, or scan directory as fallback
     let file = dest

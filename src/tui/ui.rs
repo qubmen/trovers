@@ -187,6 +187,16 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
 // ── Track table ───────────────────────────────────────────────────────────
 
+/// Whether the track table row for `video_id` should show the `▶`
+/// highlight — true only when the playing session's track actually belongs
+/// to the currently *displayed* playlist file, not just when the id happens
+/// to match (ids can collide across playlist files).
+pub(crate) fn row_is_playing(app: &App, video_id: &str) -> bool {
+    app.playing
+        .as_ref()
+        .is_some_and(|p| p.path == app.playlist_path && p.track().video_id == video_id)
+}
+
 fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let total = app.visible_track_count();
     let first = app.track_offset + 1;
@@ -218,8 +228,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .filter_map(|cursor| {
             let track_idx = app.track_index_at(cursor)?;
             let track = app.playlist.tracks.get(track_idx)?;
-            let is_playing = app.playlist.current_track.as_deref()
-                == Some(track.video_id.as_str());
+            let is_playing = row_is_playing(app, &track.video_id);
             let is_selected = cursor == app.selected;
 
             let play_icon = if is_playing { "▶" } else { " " };
@@ -381,19 +390,17 @@ fn render_now_playing(frame: &mut Frame, app: &App, area: Rect) {
 fn render_now_playing_header(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
 
-    let current_idx = app
-        .playlist
-        .current_track
-        .as_deref()
-        .and_then(|id| app.playlist.tracks.iter().position(|t| t.video_id == id));
-
-    let Some(track) = current_idx.and_then(|i| app.playlist.tracks.get(i)) else {
+    let Some(track) = app.playing_track() else {
         let line = build_now_playing_header_line(width, None, None);
         frame.render_widget(Paragraph::new(line), area);
         return;
     };
 
-    let speed = effective_speed(track, &app.playlist, &app.config);
+    // Fall back to the *playing* playlist's `default_speed`, not the
+    // displayed one — they may differ once playback is decoupled from the
+    // displayed playlist.
+    let fallback_playlist = app.playing_playlist().unwrap_or(&app.playlist);
+    let speed = effective_speed(track, fallback_playlist, &app.config);
     let speed_str = format!("{:.1}×", speed);
     let (status_icon, status_text) =
         format_playback_state(app.player.is_some(), app.is_paused, true);
@@ -462,13 +469,7 @@ pub(crate) fn build_now_playing_header_line<'a>(
 fn render_track_info_row(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
 
-    let current_idx = app
-        .playlist
-        .current_track
-        .as_deref()
-        .and_then(|id| app.playlist.tracks.iter().position(|t| t.video_id == id));
-
-    let Some(track) = current_idx.and_then(|i| app.playlist.tracks.get(i)) else {
+    let Some(track) = app.playing_track() else {
         // No track: render empty row
         frame.render_widget(Paragraph::new(Line::raw("")), area);
         return;
@@ -516,12 +517,7 @@ pub(crate) fn build_track_info_line<'a>(
 }
 
 fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let current_idx = app
-        .playlist
-        .current_track
-        .as_deref()
-        .and_then(|id| app.playlist.tracks.iter().position(|t| t.video_id == id));
-    let Some(track) = current_idx.and_then(|i| app.playlist.tracks.get(i)) else {
+    let Some(track) = app.playing_track() else {
         return;
     };
 
@@ -529,13 +525,21 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
     let dur_str = format_duration(track.duration);
     let vol_str = format!("♪ {}%", app.config.default_volume);
 
+    let track_progress = || {
+        app.download_progress
+            .get(&track.video_id)
+            .copied()
+            .unwrap_or(0.0) as f64
+            / 100.0
+    };
+
     let cache_state = if app.downloading.contains(&track.video_id) {
-        CacheState::Downloading(app.download_progress as f64 / 100.0)
+        CacheState::Downloading(track_progress())
     } else {
         match track.cache_status {
             CacheStatus::Cached => CacheState::Cached,
             CacheStatus::Streaming => CacheState::Streaming,
-            CacheStatus::Downloading => CacheState::Downloading(app.download_progress as f64 / 100.0),
+            CacheStatus::Downloading => CacheState::Downloading(track_progress()),
         }
     };
 
