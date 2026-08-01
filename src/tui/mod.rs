@@ -103,6 +103,33 @@ pub const SETTINGS_ITEMS: &[SettingsItem] = &[
     SettingsItem::DefaultVolume,
 ];
 
+// ── PlayingSession ────────────────────────────────────────────────────────
+
+/// Snapshot of the playlist/track that is actually driving playback right
+/// now, independent of whichever playlist the user happens to be browsing.
+///
+/// `playlist` is a full loaded copy of the playlist the playing track
+/// belongs to. When `path` matches `App::playlist_path` (the user is
+/// browsing the same playlist that's playing), display/mutation code should
+/// prefer `App::playlist` instead — see `App::playing_track`/
+/// `App::playing_track_mut` — so the two views of "the same playlist" never
+/// diverge.
+pub struct PlayingSession {
+    pub path: PathBuf,
+    pub playlist: Playlist,
+    pub track_idx: usize,
+}
+
+impl PlayingSession {
+    pub fn track(&self) -> &Track {
+        &self.playlist.tracks[self.track_idx]
+    }
+
+    pub fn track_mut(&mut self) -> &mut Track {
+        &mut self.playlist.tracks[self.track_idx]
+    }
+}
+
 // ── App ───────────────────────────────────────────────────────────────────
 
 pub struct App {
@@ -111,6 +138,9 @@ pub struct App {
     pub playlist_path: PathBuf,
     pub config: Config,
     pub player: Option<Player>,
+    /// The session (playlist + track index) actually driving playback right
+    /// now — independent of whichever playlist is currently displayed.
+    pub playing: Option<PlayingSession>,
 
     // Async channels
     pub pos_tx: watch::Sender<f64>,
@@ -178,6 +208,7 @@ impl App {
             playlist_path,
             config,
             player: None,
+            playing: None,
             pos_tx,
             position_rx,
             download_tx,
@@ -212,12 +243,47 @@ impl App {
         app
     }
 
+    /// Index (within the *displayed* playlist, `self.playlist`) of the track
+    /// marked as `current_track` in the playlist file. This is now used
+    /// strictly to restore the cursor position when a playlist is (re)loaded
+    /// from disk — it is **not** the source of truth for "what's playing".
+    /// See `self.playing` (`PlayingSession`) for that.
     pub fn current_track_index(&self) -> Option<usize> {
         let id = self.playlist.current_track.as_deref()?;
         self.playlist.tracks.iter().position(|t| t.video_id == id)
     }
 
-    /// Start playback of the track at Vec index `idx`.
+    /// Returns the track that is actually driving playback right now, if any.
+    ///
+    /// When the playing session's playlist is the same file currently
+    /// displayed (`playing.path == self.playlist_path`), this resolves the
+    /// track from `self.playlist` instead of the session's private copy, so
+    /// edits made through the track list (rename, speed change, etc.) are
+    /// reflected immediately without any extra sync step.
+    pub fn playing_track(&self) -> Option<&Track> {
+        let session = self.playing.as_ref()?;
+        if session.path == self.playlist_path {
+            let video_id = &session.track().video_id;
+            self.playlist.tracks.iter().find(|t| t.video_id == *video_id)
+        } else {
+            Some(session.track())
+        }
+    }
+
+    /// Mutable counterpart of `playing_track` — see its docs for the
+    /// same-path/borrow-from-displayed-playlist behavior.
+    pub fn playing_track_mut(&mut self) -> Option<&mut Track> {
+        let path_matches = self.playing.as_ref()?.path == self.playlist_path;
+        if path_matches {
+            let video_id = self.playing.as_ref().unwrap().track().video_id.clone();
+            self.playlist.tracks.iter_mut().find(|t| t.video_id == video_id)
+        } else {
+            self.playing.as_mut().map(|p| p.track_mut())
+        }
+    }
+
+    /// Start playback of the track at Vec index `idx` within the displayed
+    /// playlist (`self.playlist`).
     /// `start_pos`: resume at this position in seconds (used when switching
     /// from stream to local file mid-play; pass `None` for a fresh start).
     pub fn request_playback(&mut self, idx: usize, start_pos: Option<f64>) {
@@ -239,10 +305,20 @@ impl App {
         };
 
         // Save position of the track we're leaving (not applicable when switching
-        // within the same track, e.g. stream → local file)
-        if let Some(cur_idx) = self.current_track_index() {
-            if cur_idx != idx {
-                self.playlist.tracks[cur_idx].last_position = self.position as u64;
+        // within the same track, e.g. stream → local file). The leaving track may
+        // live in the displayed playlist or in a different one entirely (the user
+        // was browsing elsewhere while it played) — route the write through
+        // whichever copy is the source of truth for that track's identity.
+        if let Some(session) = self.playing.as_mut() {
+            let leaving_id = session.track().video_id.clone();
+            if leaving_id != video_id {
+                if session.path == self.playlist_path {
+                    if let Some(t) = self.playlist.tracks.iter_mut().find(|t| t.video_id == leaving_id) {
+                        t.last_position = self.position as u64;
+                    }
+                } else {
+                    session.track_mut().last_position = self.position as u64;
+                }
             }
         }
 
@@ -250,6 +326,16 @@ impl App {
         let quality = self.config.audio_quality.clone();
         let _ = url; // consumed via source
 
+        self.playing = Some(PlayingSession {
+            path: self.playlist_path.clone(),
+            playlist: self.playlist.clone(),
+            track_idx: idx,
+        });
+        // `current_track` on the displayed playlist means strictly "last
+        // track selected/played in *this* playlist file" — used only to
+        // restore the cursor on load. Since `idx` always indexes into
+        // `self.playlist` here, the playing track does live in the
+        // displayed playlist, so record it.
         self.playlist.current_track = Some(video_id.clone());
         self.is_paused = false;
         // Only reset the position display on a fresh start, not on stream→file switch
@@ -475,7 +561,11 @@ impl App {
 
             TaskMsg::PlayerReady { video_id, player } => {
                 // Ignore if user already switched to a different track
-                if self.playlist.current_track.as_deref() != Some(&video_id) {
+                let matches_playing = self
+                    .playing
+                    .as_ref()
+                    .is_some_and(|p| p.track().video_id == video_id);
+                if !matches_playing {
                     info!(video_id = %video_id, "player ready but track changed, discarding");
                     return;
                 }
@@ -641,9 +731,11 @@ impl App {
         }
     }
 
-    /// Switch the active playlist to the one at `path` with the given `name`.
+    /// Switch the displayed playlist to the one at `path` with the given `name`.
     ///
-    /// - Stops any active playback (drops the player).
+    /// - Does **not** affect playback: `self.player`, `self.playing`, and
+    ///   `self.position` are left untouched, so browsing/editing another
+    ///   playlist never interrupts whatever is currently playing.
     /// - Loads the playlist from disk; returns an error on failure.
     /// - Resets track selection, scroll offset, and search filter state.
     /// - Updates `playlist_path` to the new path.
@@ -653,12 +745,6 @@ impl App {
 
         let new_playlist = Playlist::load(path)
             .with_context(|| format!("failed to load playlist '{name}' from {}", path.display()))?;
-
-        // Stop any active playback
-        self.player = None;
-        self.is_paused = false;
-        self.position = 0.0;
-        let _ = self.pos_tx.send(0.0);
 
         // Replace playlist state
         self.playlist = new_playlist;

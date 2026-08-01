@@ -2000,7 +2000,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_to_playlist_stops_playback() {
+    fn switch_to_playlist_does_not_stop_playback() {
         let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
         app.is_paused = true;
         app.position = 42.5;
@@ -2010,8 +2010,8 @@ mod tests {
 
         app.switch_to_playlist("Beta", &path).expect("switch");
 
-        assert!(!app.is_paused, "is_paused should be false after switch");
-        assert_eq!(app.position, 0.0, "position should reset to 0");
+        assert!(app.is_paused, "is_paused must be unaffected by playlist switch");
+        assert_eq!(app.position, 42.5, "position must be unaffected by playlist switch");
     }
 
     #[test]
@@ -2082,6 +2082,87 @@ mod tests {
             original_count,
             "available_playlists should be unchanged after switch"
         );
+    }
+
+    // ── Task 2: PlayingSession decoupled from switch_to_playlist ───────────────
+
+    #[test]
+    fn playing_session_survives_switch_to_playlist() {
+        use crate::tui::PlayingSession;
+
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+
+        // Simulate a track from a third, unrelated playlist "Gamma" playing.
+        let mut gamma = make_playlist("Gamma");
+        gamma.tracks.push(make_track("g1", "Gamma Track"));
+        let gamma_path = std::path::PathBuf::from("/fake/Gamma.toml");
+        app.playing = Some(PlayingSession {
+            path: gamma_path.clone(),
+            playlist: gamma,
+            track_idx: 0,
+        });
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        let session = app.playing.as_ref().expect("playing session should survive switch");
+        assert_eq!(session.path, gamma_path, "playing session path unchanged");
+        assert_eq!(session.track().video_id, "g1", "playing track unchanged");
+        assert_eq!(app.playlist.name, "Beta", "displayed playlist did switch");
+    }
+
+    #[test]
+    fn playing_track_reflects_live_edit_when_paths_match() {
+        use crate::tui::PlayingSession;
+
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        app.playlist.tracks.push(make_track("t1", "Original Title"));
+        app.playlist_path = std::path::PathBuf::from("/fake/Alpha.toml");
+
+        app.playing = Some(PlayingSession {
+            path: app.playlist_path.clone(),
+            playlist: app.playlist.clone(),
+            track_idx: 0,
+        });
+
+        // Simulate an edit made through the track list (e.g. a rename) directly
+        // on the displayed playlist, without any manual sync step.
+        app.playlist.tracks[0].user_title = Some("Edited Title".to_string());
+
+        let playing_track = app.playing_track().expect("playing track should resolve");
+        assert_eq!(
+            playing_track.user_title.as_deref(),
+            Some("Edited Title"),
+            "playing_track() should reflect the live edit when paths match"
+        );
+    }
+
+    #[test]
+    fn playing_track_uses_own_copy_when_paths_differ() {
+        use crate::tui::PlayingSession;
+
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        app.playlist_path = std::path::PathBuf::from("/fake/Alpha.toml");
+
+        let mut gamma = make_playlist("Gamma");
+        gamma.tracks.push(make_track("g1", "Gamma Track"));
+        let gamma_path = std::path::PathBuf::from("/fake/Gamma.toml");
+        app.playing = Some(PlayingSession {
+            path: gamma_path,
+            playlist: gamma,
+            track_idx: 0,
+        });
+
+        // Editing the displayed (Alpha) playlist must not affect the playing
+        // track, which belongs to a different playlist (Gamma).
+        app.playlist.tracks.push(make_track("g1", "Colliding Id But Different Playlist"));
+        app.playlist.tracks[0].user_title = Some("Should not leak".to_string());
+
+        let playing_track = app.playing_track().expect("playing track should resolve");
+        assert_eq!(playing_track.title, "Gamma Track", "should use session's own copy, not displayed playlist");
+        assert_eq!(playing_track.user_title, None, "must not pick up edits from the unrelated displayed playlist");
     }
 
     // ── Task 4: Playlist management in sidebar ────────────────────────────────
@@ -2490,10 +2571,10 @@ mod tests {
         assert_eq!(items.len(), 2, "both non-active playlists visible");
     }
 
-    // --- Verify playlist switching preserves playback state correctly ---
+    // --- Verify playlist switching leaves playback state untouched ---
 
     #[test]
-    fn switch_to_playlist_clears_paused_state() {
+    fn switch_to_playlist_does_not_clear_paused_state() {
         let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
         app.is_paused = true;
 
@@ -2501,11 +2582,11 @@ mod tests {
         let (_dir, path) = write_temp_playlist(&beta);
         app.switch_to_playlist("Beta", &path).expect("switch");
 
-        assert!(!app.is_paused, "paused state should be cleared on playlist switch");
+        assert!(app.is_paused, "paused state must survive a playlist switch");
     }
 
     #[test]
-    fn switch_to_playlist_resets_position_to_zero() {
+    fn switch_to_playlist_does_not_reset_position() {
         let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
         app.position = 123.4;
 
@@ -2513,7 +2594,7 @@ mod tests {
         let (_dir, path) = write_temp_playlist(&beta);
         app.switch_to_playlist("Beta", &path).expect("switch");
 
-        assert_eq!(app.position, 0.0, "position should reset on playlist switch");
+        assert_eq!(app.position, 123.4, "position must survive a playlist switch");
     }
 
     #[test]

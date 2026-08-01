@@ -38,7 +38,7 @@ pub struct Track {
     pub added_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
     pub created: DateTime<Utc>,
