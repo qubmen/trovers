@@ -2093,6 +2093,56 @@ mod tests {
         );
     }
 
+    // ── Task 8: active_playlist persisted on switch ─────────────────────────
+
+    #[test]
+    fn switch_to_playlist_updates_config_active_playlist() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
+        assert_eq!(app.config.active_playlist, None);
+
+        let beta = make_playlist("Beta");
+        let (_dir, path) = write_temp_playlist(&beta);
+
+        app.switch_to_playlist("Beta", &path).expect("switch");
+
+        assert_eq!(
+            app.config.active_playlist,
+            Some("Beta".to_string()),
+            "config.active_playlist should reflect the newly switched-to playlist"
+        );
+    }
+
+    #[test]
+    fn switch_to_playlist_updates_config_active_playlist_across_multiple_switches() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta", "Gamma"]);
+
+        let beta = make_playlist("Beta");
+        let (_dir_beta, path_beta) = write_temp_playlist(&beta);
+        app.switch_to_playlist("Beta", &path_beta).expect("switch to beta");
+        assert_eq!(app.config.active_playlist, Some("Beta".to_string()));
+
+        let gamma = make_playlist("Gamma");
+        let (_dir_gamma, path_gamma) = write_temp_playlist(&gamma);
+        app.switch_to_playlist("Gamma", &path_gamma).expect("switch to gamma");
+        assert_eq!(app.config.active_playlist, Some("Gamma".to_string()));
+    }
+
+    #[test]
+    fn switch_to_playlist_does_not_update_config_active_playlist_on_error() {
+        let mut app = make_app_with_playlists("Alpha", &["Alpha"]);
+        app.config.active_playlist = Some("Alpha".to_string());
+        let missing = std::path::Path::new("/tmp/does_not_exist_trovers_test_task8.toml");
+
+        let result = app.switch_to_playlist("Ghost", missing);
+
+        assert!(result.is_err(), "should return error for missing file");
+        assert_eq!(
+            app.config.active_playlist,
+            Some("Alpha".to_string()),
+            "config.active_playlist must be unchanged when the switch fails"
+        );
+    }
+
     // ── Task 2: PlayingSession decoupled from switch_to_playlist ───────────────
 
     #[test]

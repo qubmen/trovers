@@ -892,6 +892,10 @@ impl App {
         self.playlist = new_playlist;
         self.playlist_path = path.to_path_buf();
 
+        // Persist the newly active playlist so restarting the app reopens it.
+        self.config.active_playlist = Some(name.to_string());
+        let _ = self.config.save();
+
         // Reset track list state
         self.selected = 0;
         self.track_offset = 0;
