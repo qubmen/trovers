@@ -253,6 +253,19 @@ impl App {
         self.playlist.tracks.iter().position(|t| t.video_id == id)
     }
 
+    /// Returns true if the track identified by `(path, video_id)` is
+    /// literally the one actually driving playback right now — i.e.
+    /// `self.playing` points at a session whose playlist file is `path` and
+    /// whose current track's `video_id` matches. Used to guard delete/move
+    /// operations so they only stop playback when the track being removed is
+    /// truly the one playing, not just any track that happens to share a
+    /// `video_id` with an unrelated playing session in a different playlist.
+    pub fn is_playing_track(&self, path: &Path, video_id: &str) -> bool {
+        self.playing
+            .as_ref()
+            .is_some_and(|p| p.path == path && p.track().video_id == video_id)
+    }
+
     /// Returns the track that is actually driving playback right now, if any.
     ///
     /// When the playing session's playlist is the same file currently
@@ -898,10 +911,14 @@ impl App {
             pl
         };
 
-        // Stop playback if the track being moved is the current one
-        let is_current = self.playlist.current_track.as_deref() == Some(&video_id);
+        // Stop playback only if the track being moved is literally the one
+        // actually driving playback right now — identity is `(path,
+        // video_id)`, not just a matching `video_id` that might coincidentally
+        // also exist in an unrelated playing session elsewhere.
+        let is_current = self.is_playing_track(&self.playlist_path, &video_id);
         if is_current {
             self.player = None; // Drop kills mpv process
+            self.playing = None;
             self.playlist.current_track = None;
             self.is_paused = false;
             self.position = 0.0;

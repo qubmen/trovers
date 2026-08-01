@@ -184,7 +184,7 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
 
 // ── Track list ────────────────────────────────────────────────────────────
 
-async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
+pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
     let count = app.visible_track_count();
     let visible = app.track_list_height as usize;
 
@@ -244,12 +244,8 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
                 } else {
                     player.resume().await?;
                 }
-            } else {
-                let idx = app.current_track_index()
-                    .or_else(|| app.track_index_at(app.selected));
-                if let Some(idx) = idx {
-                    app.request_playback(idx, None);
-                }
+            } else if let Some(idx) = app.track_index_at(app.selected) {
+                app.request_playback(idx, None);
             }
         }
 
@@ -303,25 +299,32 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
             };
         }
 
-        // Next / Previous
+        // Next / Previous: always step relative to the cursor position in
+        // the *displayed* playlist (`app.selected`), wrapping at its bounds,
+        // and play the resulting displayed-playlist track — regardless of
+        // where the currently-playing track (if any) actually lives. This
+        // matches "browsing playlist X and pressing n/b walks X's tracks"
+        // even while something else plays in the background.
         KeyCode::Char('n') => {
-            let len = app.playlist.tracks.len();
-            if len > 0 {
-                let cur = app.current_track_index().unwrap_or(0);
-                let next = (cur + 1) % len;
-                app.selected = next;
+            let count = app.visible_track_count();
+            if count > 0 {
+                let next_cursor = (app.selected + 1) % count;
+                app.selected = next_cursor;
                 app.clamp_scroll();
-                app.request_playback(next, None);
+                if let Some(idx) = app.track_index_at(next_cursor) {
+                    app.request_playback(idx, None);
+                }
             }
         }
         KeyCode::Char('b') => {
-            let len = app.playlist.tracks.len();
-            if len > 0 {
-                let cur = app.current_track_index().unwrap_or(0);
-                let prev = cur.checked_sub(1).unwrap_or(len - 1);
-                app.selected = prev;
+            let count = app.visible_track_count();
+            if count > 0 {
+                let prev_cursor = app.selected.checked_sub(1).unwrap_or(count - 1);
+                app.selected = prev_cursor;
                 app.clamp_scroll();
-                app.request_playback(prev, None);
+                if let Some(idx) = app.track_index_at(prev_cursor) {
+                    app.request_playback(idx, None);
+                }
             }
         }
 
@@ -557,15 +560,20 @@ fn handle_search(app: &mut App, key: KeyEvent) -> Result<Action> {
     Ok(Action::Continue)
 }
 
-fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
+pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
     if key.code == KeyCode::Char('y') {
         if let Some(idx) = app.track_index_at(app.selected) {
-            let is_current = app.playlist.current_track.as_deref()
-                == Some(app.playlist.tracks[idx].video_id.as_str());
+            let video_id = app.playlist.tracks[idx].video_id.clone();
+            // Only stop playback if the track being deleted is literally the
+            // one actually driving playback right now (identity is `(path,
+            // video_id)`) — not just any track with a matching video_id that
+            // happens to exist in a differently-playing session elsewhere.
+            let is_current = app.is_playing_track(&app.playlist_path, &video_id);
 
             if is_current {
                 // Stop playback immediately when deleting current track
                 app.player = None;  // Drop implementation kills mpv process
+                app.playing = None;
                 app.playlist.current_track = None;
                 app.is_paused = false;
             }
