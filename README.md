@@ -49,6 +49,15 @@ Manage multiple playlists without leaving the keyboard:
 - **Move track**: highlight track → `m` → pick destination playlist from context menu
 - **Add to specific playlist**: `a` → type URL → Tab to cycle target playlist → Enter
 
+## ⏱️ Playback That Survives the Storm
+
+- **Playback keeps sailing across playlist switches**: browsing or editing a
+  different playlist never stops, pauses, or resets whatever's currently playing.
+- **Resume near where you left off**: pressing play on a track picks up from
+  its last known position instead of always starting at 0:00.
+- **Your last playlist is remembered**: `trovers` reopens whichever playlist
+  was active when you last quit.
+
 ## 🖥️ Now Playing
 
 The bottom of the screen shows track info and playback controls in a clean three-row layout:

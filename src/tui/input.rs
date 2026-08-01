@@ -406,14 +406,7 @@ pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) -> Res
     // track's identity: the displayed playlist (already the case when paths
     // match, since `playing_track_mut` mutated it directly) or the playing
     // session's own playlist file.
-    let session_path = app.playing.as_ref().map(|p| p.path.clone());
-    if session_path.as_deref() == Some(app.playlist_path.as_path()) {
-        app.save_playlist();
-    } else if let Some(session) = app.playing.as_ref() {
-        if let Err(e) = session.playlist.save(&session.path) {
-            error!(err = %e, "failed to save playing session's playlist after speed change");
-        }
-    }
+    app.save_playing_session_playlist();
 
     Ok(())
 }
@@ -641,7 +634,7 @@ fn handle_track_context_menu(app: &mut App, key: KeyEvent) -> Result<Action> {
 
 // ── Playlist rename ───────────────────────────────────────────────────────
 
-async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> {
+pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> {
     match key.code {
         KeyCode::Enter => {
             let new_name = app.input_buf.trim().to_string();
@@ -707,6 +700,17 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
                             app.sidebar_selected = 1 + new_pos; // +1 for PlaylistsHeader
                         }
 
+                        // If the playing session belongs to the renamed playlist file,
+                        // re-point it at the new path so future saves (flush_playing_position,
+                        // adjust_playing_track_speed, request_playback's leaving-track save)
+                        // target the file that now actually exists on disk, instead of
+                        // resurrecting the just-deleted `old_path`.
+                        if let Some(session) = app.playing.as_mut() {
+                            if session.path == old_path {
+                                session.path = new_path.clone();
+                            }
+                        }
+
                         // If we just renamed the active playlist, update playlist_path too
                         if app.playlist.name == old_name {
                             app.playlist.name = new_name.clone();
@@ -747,7 +751,7 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
 
 // ── Playlist delete ───────────────────────────────────────────────────────
 
-async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
+pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Enter => {
             app.input_mode = InputMode::Normal;
@@ -759,6 +763,18 @@ async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> 
                 if app.playlist.name == name {
                     warn!("cannot delete the currently active playlist");
                     return Ok(Action::Continue);
+                }
+
+                // If the playlist being deleted is the one `app.playing` points at
+                // (even though it's not the *displayed* playlist), stop playback
+                // first — otherwise the file gets removed out from under a live
+                // session, and a later save (flush_playing_position, etc.) would
+                // resurrect the just-deleted file with a stale snapshot.
+                let deleting_playing_playlist = app.playing.as_ref().is_some_and(|p| p.path == path);
+                if deleting_playing_playlist {
+                    app.player = None; // Drop kills mpv process
+                    app.playing = None;
+                    app.is_paused = false;
                 }
 
                 match Playlist::delete(&path) {

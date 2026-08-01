@@ -3120,6 +3120,66 @@ tracks = []
         assert_eq!(track_b.file.as_deref(), Some(fake_file.as_path()));
     }
 
+    #[tokio::test]
+    async fn meta_ready_adds_to_non_active_target_playlist_via_handle_task_msg() {
+        // End-to-end coverage (via the real handle_task_msg code path, not a
+        // manually pre-populated download_targets) for MetaReady's
+        // "add to non-active target playlist" branch: the track must land in
+        // the target playlist file on disk, the displayed (active) playlist
+        // must be untouched, and download_targets must be populated so a
+        // later DownloadDone knows which file to patch.
+        use crate::tui::{App, TaskMsg};
+        use crate::ytdlp::TrackMeta;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let active_path = dir.path().join("Active.toml");
+        let active_pl = make_playlist("Active");
+        active_pl.save(&active_path).expect("save active");
+
+        let rock_path = dir.path().join("Rock.toml");
+        let rock_pl = make_playlist("Rock");
+        rock_pl.save(&rock_path).expect("save rock");
+
+        let config = crate::config::Config::default();
+        let available = vec![
+            ("Active".to_string(), active_path.clone()),
+            ("Rock".to_string(), rock_path.clone()),
+        ];
+        let mut app = App::new(active_pl, config, available, active_path.clone());
+
+        app.handle_task_msg(TaskMsg::MetaReady {
+            url: "https://example.com/vidX".to_string(),
+            meta: TrackMeta {
+                title: "Track X".to_string(),
+                artist: "Artist X".to_string(),
+                channel: "Channel X".to_string(),
+                duration: 150,
+                video_id: "vidX".to_string(),
+                source: "youtube.com".to_string(),
+            },
+            target_path: Some(rock_path.clone()),
+        });
+
+        // Active (displayed) playlist must be untouched in memory and on disk.
+        assert!(app.playlist.tracks.is_empty(), "active playlist must not be mutated in memory");
+        let active_reloaded = crate::playlist::Playlist::load(&active_path).expect("reload active");
+        assert!(active_reloaded.tracks.is_empty(), "active playlist must not be mutated on disk");
+
+        // Target (Rock) playlist must have the new track on disk.
+        let rock_reloaded = crate::playlist::Playlist::load(&rock_path).expect("reload rock");
+        let track = rock_reloaded.tracks.iter().find(|t| t.video_id == "vidX").expect("vidX added to Rock");
+        assert_eq!(track.title, "Track X");
+
+        // download_targets must be populated so DownloadDone patches Rock.toml,
+        // not the active playlist.
+        assert_eq!(
+            app.download_targets.get("vidX"),
+            Some(&rock_path),
+            "download_targets must map vidX to the target playlist's path"
+        );
+    }
+
     // ── Task 3: patch_and_save_playlist ─────────────────────────────────────
 
     #[test]
@@ -4101,6 +4161,93 @@ tracks = []
         );
     }
 
+    // ── Playlist rename/delete syncing app.playing (review finding #2) ──────
+
+    #[tokio::test]
+    async fn playlist_rename_updates_stale_playing_session_path() {
+        use crate::tui::input::handle_playlist_rename;
+        use crate::tui::PlayingSession;
+
+        // The playlist being renamed ("Elsewhere") is not the displayed
+        // playlist ("Browsing"), but it is the one `app.playing` points at.
+        let mut elsewhere = make_playlist("Elsewhere");
+        elsewhere.tracks.push(make_track("vid1", "Track One"));
+        let (dir, old_path) = write_temp_playlist(&elsewhere);
+
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+        app.available_playlists.push(("Elsewhere".to_string(), old_path.clone()));
+
+        app.playing = Some(PlayingSession {
+            path: old_path.clone(),
+            playlist: elsewhere,
+            track_idx: 0,
+        });
+
+        // Point the sidebar cursor at the "Elsewhere" entry.
+        let items = app.sidebar_items();
+        let pos = items
+            .iter()
+            .position(|i| matches!(i, crate::tui::SidebarItem::Playlist { name, .. } if name == "Elsewhere"))
+            .expect("Elsewhere present in sidebar");
+        app.sidebar_selected = pos;
+
+        app.input_buf = "Renamed".to_string();
+        handle_playlist_rename(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("handle rename");
+
+        let new_path = dir.path().join("Renamed.toml");
+        assert!(new_path.exists(), "renamed file should exist");
+        assert!(!old_path.exists(), "old file should be gone");
+
+        let session = app.playing.as_ref().expect("playing session must survive rename");
+        assert_eq!(
+            session.path, new_path,
+            "playing session's path must be re-pointed at the renamed file, not the deleted old_path"
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_delete_stops_playback_when_deleting_playing_but_not_displayed_playlist() {
+        use crate::tui::input::handle_playlist_delete;
+        use crate::tui::PlayingSession;
+
+        // The playlist being deleted ("Elsewhere") is not the displayed
+        // playlist ("Browsing"), but it is the one `app.playing` points at.
+        let mut elsewhere = make_playlist("Elsewhere");
+        elsewhere.tracks.push(make_track("vid1", "Track One"));
+        let (_dir, elsewhere_path) = write_temp_playlist(&elsewhere);
+
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+        app.available_playlists.push(("Elsewhere".to_string(), elsewhere_path.clone()));
+
+        app.playing = Some(PlayingSession {
+            path: elsewhere_path.clone(),
+            playlist: elsewhere,
+            track_idx: 0,
+        });
+        app.is_paused = true;
+
+        let items = app.sidebar_items();
+        let pos = items
+            .iter()
+            .position(|i| matches!(i, crate::tui::SidebarItem::Playlist { name, .. } if name == "Elsewhere"))
+            .expect("Elsewhere present in sidebar");
+        app.sidebar_selected = pos;
+
+        handle_playlist_delete(&mut app, key(crossterm::event::KeyCode::Char('y')))
+            .await
+            .expect("handle delete");
+
+        assert!(!elsewhere_path.exists(), "playlist file should be deleted");
+        assert!(
+            app.playing.is_none(),
+            "app.playing must be cleared when deleting the playlist it points at, \
+             even though it isn't the displayed playlist"
+        );
+        assert!(!app.is_paused, "paused state must be cleared alongside playback");
+    }
+
     #[test]
     fn flush_playing_position_is_noop_when_nothing_playing() {
         let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
@@ -4111,5 +4258,80 @@ tracks = []
         app.flush_playing_position();
 
         assert_eq!(app.playlist.tracks[0].last_position, 0);
+    }
+
+    // ── request_playback: leaving-track position save (review finding #1) ───
+
+    #[tokio::test]
+    async fn request_playback_saves_leaving_track_position_same_playlist() {
+        use crate::tui::PlayingSession;
+
+        // Both the leaving track (A) and the new track (B) live in the
+        // displayed playlist — the `session.path == self.playlist_path`
+        // branch.
+        let mut pl = make_playlist("Active");
+        pl.tracks.push(make_track("A", "Track A"));
+        pl.tracks.push(make_track("B", "Track B"));
+        let (_dir, path) = write_temp_playlist(&pl);
+
+        let config = crate::config::Config::default();
+        let available = vec![("Active".to_string(), path.clone())];
+        let mut app = crate::tui::App::new(pl.clone(), config, available, path.clone());
+
+        app.playing = Some(PlayingSession {
+            path: path.clone(),
+            playlist: pl,
+            track_idx: 0, // A
+        });
+        app.position = 99.0;
+
+        // Switch to B — A is the leaving track.
+        app.request_playback(1, None);
+
+        assert_eq!(
+            app.playlist.tracks[0].last_position, 99,
+            "leaving track A's last_position must be updated in the displayed playlist"
+        );
+        let reloaded = crate::playlist::Playlist::load(&path).expect("reload");
+        assert_eq!(
+            reloaded.tracks[0].last_position, 99,
+            "leaving track A's last_position must be flushed to disk, not dropped when \
+             self.playing is replaced by the new session"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_playback_saves_leaving_track_position_cross_playlist() {
+        use crate::tui::PlayingSession;
+
+        // The leaving track (A) lives in a different playlist file than the
+        // one displayed — the `session.path != self.playlist_path` branch.
+        let mut elsewhere = make_playlist("Elsewhere");
+        elsewhere.tracks.push(make_track("A", "Track A"));
+        let (_dir_elsewhere, elsewhere_path) = write_temp_playlist(&elsewhere);
+
+        let mut app = make_app_with_playlists("Browsing", &["Browsing", "Elsewhere"]);
+        app.playlist.tracks.push(make_track("B", "Track B"));
+
+        app.playing = Some(PlayingSession {
+            path: elsewhere_path.clone(),
+            playlist: elsewhere,
+            track_idx: 0, // A
+        });
+        app.position = 77.0;
+
+        // Switch to B in the displayed playlist — A (in Elsewhere.toml) is
+        // the leaving track.
+        app.request_playback(0, None);
+
+        // The displayed playlist must be untouched by the leaving-track save.
+        assert_eq!(app.playlist.tracks[0].video_id, "B");
+
+        let reloaded = crate::playlist::Playlist::load(&elsewhere_path).expect("reload elsewhere");
+        assert_eq!(
+            reloaded.tracks[0].last_position, 77,
+            "leaving track A's last_position must be flushed to its own playlist file \
+             (Elsewhere.toml), not dropped when self.playing is replaced by the new session"
+        );
     }
 }

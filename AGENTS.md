@@ -106,7 +106,9 @@ trovers [<URL>]
                │
                └─ on download complete:
                        ├─ set cache_status: cached, file: <path> in playlist TOML
-                       └─ mpv seamlessly continues (already playing stream URL)
+                       └─ if this track is the one actually playing: kill the
+                          streaming mpv process and respawn it against the local
+                          file, resuming at the current live position (hot-switch)
 ```
 
 ---
@@ -379,12 +381,12 @@ widgets or custom `Paragraph` lines built from unicode block characters.
 | `Space`          | Play / Pause                                    |
 | `←` / `→`        | Seek −10s / +10s                               |
 | `Shift+←/→`      | Seek −60s / +60s                               |
-| `s` / `S`        | Speed +0.1 / −0.1 (saved to TOML immediately)  |
+| `[` / `]`        | Speed −0.1 / +0.1 (saved to TOML immediately)  |
 | `v` / `V`        | Volume +5 / −5                                  |
 | `l`              | Cycle loop mode: none → track → playlist → none |
 | `r`              | Toggle shuffle                                  |
-| `n`              | Next track                                      |
-| `b`              | Previous track                                  |
+| `n`              | Next track in the *displayed* playlist (resume from last_position; independent of whatever is actually playing if you're browsing elsewhere) |
+| `b`              | Previous track in the *displayed* playlist (resume from last_position; independent of whatever is actually playing if you're browsing elsewhere) |
 | `a`              | Add track: open URL input prompt                |
 | `/`              | Search/filter tracks (live, case-insensitive)   |
 | `d`              | Delete selected track (confirm prompt)          |
@@ -577,6 +579,38 @@ loop:
   clamp_scroll()          ← keep selected in visible window
 ```
 
+**Core functions (playback/playlist decoupling):**
+- `request_playback(idx, start_pos)` — starts playback of the track at Vec
+  index `idx` in the *displayed* playlist. Before spawning the new player,
+  saves the leaving track's live position through whichever playlist copy is
+  its source of truth (via `save_playing_session_playlist()`), then replaces
+  `self.playing` with a fresh `PlayingSession`. `start_pos` resumes mid-track
+  (stream→file hot-switch); `None` means a fresh start (resets `self.position`).
+- `playing_track()` / `playing_track_mut()` — resolve the track actually
+  driving playback: from the live `self.playlist` when `playing.path ==
+  playlist_path`, otherwise from the session's own private copy.
+- `playing_playlist()` — same idea for the whole playlist (used by
+  `default_speed` fallback lookups).
+- `is_playing_track(path, video_id)` — identity guard used by delete/move to
+  check `(path, video_id)` together, so a track that merely shares a
+  `video_id` with an unrelated playing session in a different playlist file
+  is never mistaken for the one actually playing.
+- `save_playing_session_playlist()` — the single "resolve by path identity,
+  then persist" implementation shared by `request_playback`'s leaving-track
+  save, `flush_playing_position`, and `adjust_playing_track_speed`.
+- `patch_and_save_playlist(path, video_id, f)` — mutate a single track (found
+  by `video_id`) in the playlist at `path` and persist it, whether or not
+  `path` is the currently displayed playlist. Used by `DownloadDone`.
+- `flush_playing_position()` — called once, right before `ratatui::restore()`
+  on quit, to persist the playing track's live position (see "State save on
+  exit" below).
+- `hot_switch_to_local_file(owning_path, video_id, file)` — stream→local-file
+  switch triggered by `DownloadDone`; identity-checked as `(owning_path,
+  video_id)` via `is_playing_track`, mirroring the delete/move guards.
+- `spawn_player_for(video_id, source, speed, start_pos)` — the pure "start an
+  mpv process and wire up position polling" primitive; callers own all
+  `self.playing`/`current_track`/`position` bookkeeping beforehand.
+
 ### tui/ui.rs — rendering
 
 - `render()` — top-level: splits frame into 4 rows, calls sub-renderers
@@ -650,17 +684,45 @@ When building multi-section rows in the now-playing area:
   whitespace-only names, names containing `/`, `\`, or `:`, the special names `.` and
   `..`, and duplicates already in `existing`. When `current_name` is `Some(n)`, `n`
   is excluded from the duplicate check (rename-in-place is allowed).
+- `resume_start_pos(track) -> Option<f64>` — pure helper: `Some(last_position)`
+  when nonzero, else `None`. Wired into every user-initiated `request_playback`
+  call site (`Enter`, `Space` fallback, `n`, `b`) so pressing play always
+  resumes near where a track was left off.
+- `adjust_playing_track_speed(app, delta)` — `[`/`]` handler; mutates the
+  *playing* track's speed via `playing_track_mut()` (not the displayed
+  playlist's cursor track — they may differ), sends the new speed to mpv if a
+  player is running, then persists via `save_playing_session_playlist()`.
+- `handle_confirm_delete` / `move_track_to_playlist` — stop playback only when
+  the track being removed/moved is identity-checked as the one actually
+  playing (`is_playing_track(path, video_id)`), not merely a `video_id` match.
+- `handle_playlist_rename` — if the renamed playlist file is the one
+  `app.playing` points at, re-points the playing session's `path` at the new
+  file so later saves don't resurrect the deleted old file.
+- `handle_playlist_delete` — blocks deleting the *displayed* playlist; if the
+  playlist being deleted is instead the one `app.playing` points at (even
+  though it isn't displayed), stops playback before removing the file, for
+  the same reason as the rename case above.
 
 ### Concurrency model
 - Main thread: ratatui event loop (non-blocking via `event::poll` with 100ms timeout)
 - tokio task: mpv IPC polling every 1s (sends `time-pos` via `watch::Sender<f64>`)
-- tokio task: yt-dlp download process (sends progress % via `watch::Sender<f32>`)
+- tokio task: yt-dlp download process (sends `(video_id, progress %)` via
+  `watch::Sender<(String, f32)>` — keyed by `video_id` so concurrent downloads
+  into different playlists never cross-contaminate each other's displayed
+  percentage; `App.download_progress: HashMap<String, f32>` holds the per-track
+  values)
 - TUI reads both `watch::Receiver`s on each render tick via `has_changed()` +
   `borrow_and_update()`
 
 ### State save on exit
-On `q` key: write current `time-pos` from mpv via IPC → save to TOML → quit.
-This ensures `last_position` is always up to date for the next session.
+On `q` key: `App::flush_playing_position()` writes the already-polled
+`time-pos` value (from the position `watch::Receiver`, no synchronous IPC
+round-trip at quit time) into the playing track's `last_position`, routed
+through whichever playlist copy is the source of truth (the displayed
+playlist or the playing session's own private copy — see `PlayingSession`),
+then saves it to TOML before `ratatui::restore()`. This ensures `last_position`
+is always up to date for the next session, even if the playing track belongs
+to a playlist other than the one currently displayed.
 
 ---
 

@@ -399,7 +399,7 @@ fn render_now_playing_header(frame: &mut Frame, app: &App, area: Rect) {
     // Fall back to the *playing* playlist's `default_speed`, not the
     // displayed one — they may differ once playback is decoupled from the
     // displayed playlist.
-    let fallback_playlist = app.playing.as_ref().map(|p| &p.playlist).unwrap_or(&app.playlist);
+    let fallback_playlist = app.playing_playlist().unwrap_or(&app.playlist);
     let speed = effective_speed(track, fallback_playlist, &app.config);
     let speed_str = format!("{:.1}×", speed);
     let (status_icon, status_text) =
