@@ -3761,4 +3761,141 @@ tracks = []
             "moving a colliding-id track out of Browsing must not clear an unrelated playing session"
         );
     }
+
+    // ── Task 6: Resume playback from `last_position` ──────────────────────────
+
+    #[test]
+    fn resume_start_pos_returns_none_for_zero_last_position() {
+        use crate::tui::input::resume_start_pos;
+
+        let mut track = make_track("vid1", "Track One");
+        track.last_position = 0;
+
+        assert_eq!(resume_start_pos(&track), None);
+    }
+
+    #[test]
+    fn resume_start_pos_returns_some_for_nonzero_last_position() {
+        use crate::tui::input::resume_start_pos;
+
+        let mut track = make_track("vid1", "Track One");
+        track.last_position = 90;
+
+        assert_eq!(resume_start_pos(&track), Some(90.0));
+    }
+
+    #[tokio::test]
+    async fn enter_resumes_from_last_position_via_request_playback_arg() {
+        // We can't observe the real spawned player (no mpv in tests), but we
+        // can observe the *decision*: request_playback records the resume
+        // position as the position display isn't reset when start_pos is
+        // `Some`, whereas a fresh start (`None`) resets `app.position` to
+        // 0.0. So: seed a nonzero `app.position`, then press Enter on a
+        // track with a nonzero `last_position` and confirm `app.position`
+        // is left untouched (proving `start_pos` was `Some`, not `None`).
+        use crate::tui::input::handle_tracklist;
+
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+        let mut track = make_track("vid1", "Resume Track");
+        track.last_position = 90;
+        app.playlist.tracks.push(track);
+        app.selected = 0;
+        app.position = 42.0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("handle enter");
+
+        assert_eq!(
+            app.position, 42.0,
+            "request_playback must have been called with Some(start_pos), which does not reset app.position to 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_starts_fresh_when_last_position_is_zero() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+        let track = make_track("vid1", "Fresh Track"); // last_position defaults to 0
+        app.playlist.tracks.push(track);
+        app.selected = 0;
+        app.position = 42.0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("handle enter");
+
+        assert_eq!(
+            app.position, 0.0,
+            "request_playback must have been called with None, resetting app.position to 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn n_resumes_next_track_from_its_last_position() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+        app.playlist.tracks.push(make_track("x1", "X One"));
+        let mut second = make_track("x2", "X Two");
+        second.last_position = 55;
+        app.playlist.tracks.push(second);
+        app.selected = 0;
+        app.position = 42.0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('n')))
+            .await
+            .expect("handle n");
+
+        assert_eq!(app.selected, 1, "n should move cursor to the next track");
+        assert_eq!(
+            app.position, 42.0,
+            "n landing on a track with nonzero last_position must resume (Some), not reset app.position"
+        );
+    }
+
+    #[tokio::test]
+    async fn b_resumes_previous_track_from_its_last_position() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut first = make_track("x1", "X One");
+        first.last_position = 30;
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+        app.playlist.tracks.push(first);
+        app.playlist.tracks.push(make_track("x2", "X Two"));
+        app.selected = 1;
+        app.position = 42.0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('b')))
+            .await
+            .expect("handle b");
+
+        assert_eq!(app.selected, 0, "b should move cursor to the previous track");
+        assert_eq!(
+            app.position, 42.0,
+            "b landing on a track with nonzero last_position must resume (Some), not reset app.position"
+        );
+    }
+
+    #[tokio::test]
+    async fn space_resumes_from_last_position_when_nothing_playing() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+        let mut track = make_track("vid1", "Resume Track");
+        track.last_position = 12;
+        app.playlist.tracks.push(track);
+        app.selected = 0;
+        app.position = 42.0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char(' ')))
+            .await
+            .expect("handle space");
+
+        assert_eq!(
+            app.position, 42.0,
+            "space fallback-to-play on a track with nonzero last_position must resume (Some), not reset app.position"
+        );
+    }
 }

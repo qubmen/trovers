@@ -1,5 +1,5 @@
 use super::{App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
-use crate::playlist::{LoopMode, Playlist};
+use crate::playlist::{LoopMode, Playlist, Track};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::io::Write;
@@ -228,14 +228,17 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             app.clamp_scroll();
         }
 
-        // Enter: select track and start playback
+        // Enter: select track and start playback (resuming from
+        // `last_position` if the track has one).
         KeyCode::Enter => {
             if let Some(idx) = app.track_index_at(app.selected) {
-                app.request_playback(idx, None);
+                let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                app.request_playback(idx, start_pos);
             }
         }
 
-        // Space: toggle pause if playing, otherwise start
+        // Space: toggle pause if playing, otherwise start (resuming from
+        // `last_position` if the track has one).
         KeyCode::Char(' ') => {
             if let Some(player) = &app.player {
                 app.is_paused = !app.is_paused;
@@ -245,7 +248,8 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                     player.resume().await?;
                 }
             } else if let Some(idx) = app.track_index_at(app.selected) {
-                app.request_playback(idx, None);
+                let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                app.request_playback(idx, start_pos);
             }
         }
 
@@ -312,7 +316,8 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                 app.selected = next_cursor;
                 app.clamp_scroll();
                 if let Some(idx) = app.track_index_at(next_cursor) {
-                    app.request_playback(idx, None);
+                    let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                    app.request_playback(idx, start_pos);
                 }
             }
         }
@@ -323,7 +328,8 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                 app.selected = prev_cursor;
                 app.clamp_scroll();
                 if let Some(idx) = app.track_index_at(prev_cursor) {
-                    app.request_playback(idx, None);
+                    let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                    app.request_playback(idx, start_pos);
                 }
             }
         }
@@ -830,6 +836,18 @@ pub(crate) fn validate_playlist_name(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Decide the resume position to pass to `request_playback` for a
+/// user-initiated play of `track`: resume from `Track.last_position` if it's
+/// non-zero (meaning we've previously left off somewhere mid-track), else
+/// start fresh from the beginning.
+pub(crate) fn resume_start_pos(track: &Track) -> Option<f64> {
+    if track.last_position > 0 {
+        Some(track.last_position as f64)
+    } else {
+        None
+    }
+}
 
 fn type_char(app: &mut App, key: KeyEvent) {
     match key.code {
