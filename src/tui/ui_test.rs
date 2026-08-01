@@ -3385,4 +3385,92 @@ tracks = []
         let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
         assert_eq!(track.speed, Some(3.0), "speed must clamp at 3.0");
     }
+
+    // ── Task 4: Now Playing / track-highlight render from app.playing ──────────
+
+    #[test]
+    fn playing_track_shows_data_from_unrelated_displayed_playlist() {
+        use crate::tui::PlayingSession;
+
+        // Playing session points at playlist A ("Alpha")...
+        let mut alpha = make_playlist("Alpha");
+        alpha.tracks.push(make_track("a1", "Alpha Track"));
+        let alpha_path = std::path::PathBuf::from("/fake/Alpha.toml");
+
+        // ...while the user is browsing a completely different playlist B
+        // ("Beta") with different tracks.
+        let mut app = make_app_with_playlists("Beta", &["Alpha", "Beta"]);
+        app.playlist.tracks.push(make_track("b1", "Beta Track"));
+        app.playlist_path = std::path::PathBuf::from("/fake/Beta.toml");
+
+        app.playing = Some(PlayingSession {
+            path: alpha_path,
+            playlist: alpha,
+            track_idx: 0,
+        });
+
+        let track = app.playing_track().expect("playing track should resolve");
+        assert_eq!(
+            track.title, "Alpha Track",
+            "Now Playing must reflect the playing session's track, not the displayed playlist"
+        );
+    }
+
+    #[test]
+    fn row_is_playing_false_when_paths_differ_even_with_matching_video_id() {
+        use crate::tui::ui::row_is_playing;
+        use crate::tui::PlayingSession;
+
+        // Playing session lives in "Alpha.toml" and its track happens to
+        // share a video_id with a track in the displayed "Beta" playlist.
+        let mut alpha = make_playlist("Alpha");
+        alpha.tracks.push(make_track("shared", "Alpha Track"));
+        let alpha_path = std::path::PathBuf::from("/fake/Alpha.toml");
+
+        let mut app = make_app_with_playlists("Beta", &["Alpha", "Beta"]);
+        app.playlist.tracks.push(make_track("shared", "Beta Track"));
+        app.playlist_path = std::path::PathBuf::from("/fake/Beta.toml");
+
+        app.playing = Some(PlayingSession {
+            path: alpha_path,
+            playlist: alpha,
+            track_idx: 0,
+        });
+
+        assert!(
+            !row_is_playing(&app, "shared"),
+            "must not highlight a row just because the video_id matches across different playlist files"
+        );
+    }
+
+    #[test]
+    fn row_is_playing_true_when_paths_and_video_id_match() {
+        use crate::tui::ui::row_is_playing;
+        use crate::tui::PlayingSession;
+
+        let mut app = make_app_with_playlists("Alpha", &["Alpha"]);
+        app.playlist.tracks.push(make_track("vid1", "Track One"));
+        app.playlist_path = std::path::PathBuf::from("/fake/Alpha.toml");
+
+        app.playing = Some(PlayingSession {
+            path: app.playlist_path.clone(),
+            playlist: app.playlist.clone(),
+            track_idx: 0,
+        });
+
+        assert!(
+            row_is_playing(&app, "vid1"),
+            "must highlight the row when the playing session's track belongs to the displayed playlist"
+        );
+    }
+
+    #[test]
+    fn row_is_playing_false_when_nothing_playing() {
+        use crate::tui::ui::row_is_playing;
+
+        let mut app = make_app_with_playlists("Alpha", &["Alpha"]);
+        app.playlist.tracks.push(make_track("vid1", "Track One"));
+
+        assert!(!row_is_playing(&app, "vid1"), "no highlight when app.playing is None");
+    }
 }
