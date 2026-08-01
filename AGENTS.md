@@ -13,9 +13,11 @@ This applies to every file in the project without exception.
 
 A Rust CLI utility for local caching of audio tracks from YouTube and other
 supported platforms (SoundCloud, Bandcamp, Mixcloud, Vimeo, etc. — anything
-yt-dlp can handle). The user provides a URL — the tool immediately starts playing
-the audio and simultaneously downloads the audio file to disk, adding it to a
-local playlist. The primary interface is a terminal UI built with ratatui.
+yt-dlp can handle). The user provides a URL — the tool adds the track to the
+current playlist and downloads the audio file to disk in the background;
+playback is never started automatically (see "Auto-play on add is
+intentionally not implemented" under Out of Scope). The primary interface is
+a terminal UI built with ratatui.
 
 The name **trovers** reflects the core idea: a personal treasure trove of media,
 plundered from any source and stored locally for playback anytime.
@@ -88,7 +90,7 @@ trovers [<URL>]
        ├─ 1. check that yt-dlp and mpv exist in PATH → exit with error if missing
        │
        ├─ 2. launch ratatui TUI
-       │       ├─ if URL provided → add track to current playlist and start playing
+       │       ├─ if URL provided → add track to current playlist and start caching (no auto-play)
        │       └─ if no URL → open TUI with last active playlist
        │
        └─ TUI event loop:
@@ -150,7 +152,7 @@ trovers/
 
 ```bash
 trovers                         # open TUI with last active playlist
-trovers <URL>                   # add URL to current playlist and start playing
+trovers <URL>                   # add URL to current playlist and start caching (no auto-play)
 trovers --playlist <name>       # open TUI with a specific playlist
 ```
 
@@ -498,7 +500,10 @@ to update the caching progress bar on Now Playing line 3.
 - `Playlist::rename(new_name, old_path)` — renames TOML file + updates internal name, returns new path
 - `Playlist::delete(path)` — deletes the TOML file from disk
 - `App::move_track_to_playlist(target_name)` — loads target, removes from source, appends to target, saves both
-- `App::switch_to_playlist(name, path)` — loads playlist from path, resets track selection, pauses playback
+- `App::switch_to_playlist(name, path)` — loads playlist from path, resets track selection/scroll/search;
+  playback is **unaffected** by playlist switches — `app.player`/`app.playing`/`app.position` are left
+  untouched, so audio keeps playing (and Now Playing keeps showing it) while the user browses a
+  different playlist
 - `App::available_playlist_names()` — returns names of all playlists except the currently active one
 
 ### config.rs — global config
@@ -526,18 +531,41 @@ pub enum SidebarItem {
     Plunder,
     Settings,
 }
+
+pub struct PlayingSession {
+    pub path: PathBuf,       // playlist file the playing track belongs to
+    pub playlist: Playlist,  // full loaded copy of that playlist
+    pub track_idx: usize,    // index of the playing track within `playlist.tracks`
+}
 ```
 
-**App struct** holds: playlist + config + optional player, watch channels,
-`focus`, `input_mode`, `input_buf`, `selected` (track cursor), `track_offset`
+**App struct** holds: `playlist` (the **displayed** playlist, what the track list
+shows/edits — independent from what's playing) + config + optional player, watch
+channels, `focus`, `input_mode`, `input_buf`, `selected` (track cursor), `track_offset`
 (scroll), `track_list_height` (set each frame), `filtered_indices` (search),
 `sidebar_selected`, `playlists_expanded`, `available_playlists`,
-`position`, `download_progress`, `is_paused`,
+`position`, `download_progress: HashMap<String, f32>` (per-video-id caching progress),
+`is_paused`,
 `context_menu_selected` (selected index in track move context menu),
 `target_playlist_for_url` (playlist name selected during URL input via Tab),
 `download_targets: HashMap<String, PathBuf>` (maps video_id → target playlist path
 for tracks downloading into a non-active playlist; consulted by `DownloadDone` handler
-to update the correct file on disk).
+to update the correct file on disk),
+`playing: Option<PlayingSession>` — the single source of truth for what's currently
+playing, decoupled from `playlist`. It holds its own full `Playlist` (path, loaded
+data, and the playing track's index) so playback survives playlist switches and
+edits to unrelated playlists. `App::playing_track()`/`playing_track_mut()` are the
+accessors: when `playing.path == playlist_path` (the user is browsing the same
+playlist that's playing), they resolve the track from the live, possibly-edited
+`app.playlist` instead of the stashed copy, so edits are reflected immediately;
+otherwise they fall back to `playing.playlist`. Switching playlists, adding tracks,
+or editing a different playlist never touches `playing` — only `request_playback`
+(user-initiated play) and the delete/move guards (when the removed/moved track is
+the one actually playing) do. `Playlist.current_track` (on the displayed playlist)
+now means only "last track selected/played in *this* playlist file, used to restore
+cursor on load" — it is no longer read as "what's currently playing" anywhere in the
+UI (see `render_now_playing_header`/`render_track_info_row`/`render_playback_bar`/
+`render_track_table`, which all resolve the playing track via `app.playing` instead).
 
 **Event loop:**
 ```
@@ -644,3 +672,9 @@ This ensures `last_position` is always up to date for the next session.
 - Mouse support in TUI
 - Video playback (architecture supports it via mpv, but UI is audio-only for now)
 - Settings screen (⚙ Settings sidebar item is reserved but not implemented)
+- **Auto-play on add is intentionally not implemented.** Adding a track (via
+  CLI URL argument or the `a`/Plunder flow inside the TUI) only appends it to
+  the target playlist and kicks off caching (metadata fetch + background
+  download) — it never starts playback and never changes what's currently
+  playing (`app.playing`/`PlayingSession`). This was confirmed by the product
+  owner as desired behavior, not a bug — do not "fix" this in a future pass.
