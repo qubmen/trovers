@@ -384,7 +384,6 @@ impl App {
                 } else {
                     // Default: add to the active playlist
                     self.playlist.tracks.push(track);
-                    self.playlist.current_track = Some(video_id.clone());
                     self.selected = self.playlist.tracks.len() - 1;
                     self.downloading.insert(video_id.clone());
                     self.save_playlist();

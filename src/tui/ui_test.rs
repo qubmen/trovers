@@ -2870,4 +2870,113 @@ tracks = []
         assert_eq!(track.cache_status, CacheStatus::Cached, "in-memory cache_status must be Cached");
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()), "in-memory file must be set");
     }
+
+    // ── Task 1: add-track playback-hijack regression tests ─────────────────────
+
+    #[tokio::test]
+    async fn adding_track_does_not_change_current_track() {
+        use crate::tui::{App, TaskMsg};
+        use crate::ytdlp::TrackMeta;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Active.toml");
+
+        let mut pl = make_playlist("Active");
+        pl.add_track(make_track("A", "Track A"));
+        pl.current_track = Some("A".to_string());
+        pl.save(&path).expect("save");
+
+        let config = crate::config::Config::default();
+        let available = vec![("Active".to_string(), path.clone())];
+        let mut app = App::new(pl, config, available, path.clone());
+
+        // Simulate track A currently playing at a non-zero position.
+        app.position = 137.0;
+
+        // Simulate adding a brand-new track B to the active playlist via the
+        // URL-add flow (MetaReady with no target_path override).
+        app.handle_task_msg(TaskMsg::MetaReady {
+            url: "https://example.com/B".to_string(),
+            meta: TrackMeta {
+                title: "Track B".to_string(),
+                artist: "Artist B".to_string(),
+                channel: "Channel B".to_string(),
+                duration: 200,
+                video_id: "B".to_string(),
+                source: "youtube.com".to_string(),
+            },
+            target_path: None,
+        });
+
+        // Track B must have been added...
+        assert!(app.playlist.tracks.iter().any(|t| t.video_id == "B"), "track B should be added");
+        // ...but current_track must remain unchanged (still A), and playback
+        // position must not have been touched by adding the track.
+        assert_eq!(
+            app.playlist.current_track.as_deref(),
+            Some("A"),
+            "adding a track must not change current_track"
+        );
+        assert_eq!(app.position, 137.0, "adding a track must not touch playback position");
+    }
+
+    #[tokio::test]
+    async fn download_done_for_newly_added_track_does_not_hijack_playback() {
+        use crate::tui::{App, TaskMsg};
+        use crate::ytdlp::TrackMeta;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Active.toml");
+
+        let mut pl = make_playlist("Active");
+        pl.add_track(make_track("A", "Track A"));
+        pl.current_track = Some("A".to_string());
+        pl.save(&path).expect("save");
+
+        let config = crate::config::Config::default();
+        let available = vec![("Active".to_string(), path.clone())];
+        let mut app = App::new(pl, config, available, path.clone());
+
+        // Track A is "playing" at a non-zero position (mirrors the user report:
+        // track A playing, non-zero position, then a track is added).
+        app.position = 137.0;
+
+        // Add track B while A is playing.
+        app.handle_task_msg(TaskMsg::MetaReady {
+            url: "https://example.com/B".to_string(),
+            meta: TrackMeta {
+                title: "Track B".to_string(),
+                artist: "Artist B".to_string(),
+                channel: "Channel B".to_string(),
+                duration: 200,
+                video_id: "B".to_string(),
+                source: "youtube.com".to_string(),
+            },
+            target_path: None,
+        });
+
+        // B's background download finishes.
+        let fake_file = dir.path().join("B.m4a");
+        std::fs::write(&fake_file, b"audio data").expect("write fake audio");
+        app.handle_task_msg(TaskMsg::DownloadDone {
+            video_id: "B".to_string(),
+            file: fake_file.clone(),
+        });
+
+        // The hot-switch "is this the currently playing track" check must
+        // evaluate false for B, since current_track is still "A" — proving
+        // the DownloadDone handler no longer hijacks playback for a track
+        // that was merely added, not actually playing.
+        assert_eq!(
+            app.playlist.current_track.as_deref(),
+            Some("A"),
+            "current_track must still be A after B's download completes"
+        );
+        assert_eq!(app.position, 137.0, "playback position must remain untouched");
+
+        // B's cache metadata should still have been updated normally.
+        let track_b = app.playlist.tracks.iter().find(|t| t.video_id == "B").expect("track B");
+        assert_eq!(track_b.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(track_b.file.as_deref(), Some(fake_file.as_path()));
+    }
 }
