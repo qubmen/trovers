@@ -15,6 +15,7 @@ use crossterm::event::{self, Event};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info};
 
@@ -39,6 +40,7 @@ pub enum InputMode {
     TrackContextMenu,
     PlaylistRename,
     PlaylistDelete,
+    Help,
 }
 
 // ── SidebarItem ───────────────────────────────────────────────────────────
@@ -143,6 +145,9 @@ pub struct App {
     pub download_progress: f32,
     pub is_paused: bool,
 
+    // Footer status message (toast-style)
+    pub status_message: Option<(String, Instant)>,
+
     // Tracks being downloaded
     pub downloading: HashSet<String>,
     // Maps video_id → target playlist path for tracks downloading into a non-active playlist
@@ -194,6 +199,7 @@ impl App {
             position: 0.0,
             download_progress: 0.0,
             is_paused: false,
+            status_message: None,
             downloading: HashSet::new(),
             download_targets: HashMap::new(),
             pending_fetches: 0,
@@ -326,12 +332,18 @@ impl App {
         }
     }
 
+    /// Set a transient status message for the footer.
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some((msg.into(), Instant::now()));
+    }
+
     pub(crate) fn handle_task_msg(&mut self, msg: TaskMsg) {
         match msg {
             TaskMsg::MetaReady { url, meta, target_path } => {
                 self.pending_fetches = self.pending_fetches.saturating_sub(1);
                 let video_id = meta.video_id.clone();
                 info!(video_id = %video_id, title = %meta.title, "metadata ready, starting download");
+                let status_title = meta.title.clone();
 
                 let track = Track {
                     url: url.clone(),
@@ -365,6 +377,7 @@ impl App {
                         }
                     }
                     self.downloading.insert(video_id.clone());
+                    self.set_status(format!("Added to playlist: {status_title}"));
                     // Remember that this download belongs to the non-active playlist so
                     // DownloadDone can update the correct file on disk.
                     self.download_targets.insert(video_id.clone(), p.to_path_buf());
@@ -375,6 +388,7 @@ impl App {
                     self.selected = self.playlist.tracks.len() - 1;
                     self.downloading.insert(video_id.clone());
                     self.save_playlist();
+                    self.set_status(format!("Added: {status_title}"));
                 }
 
                 let task_tx = self.task_tx.clone();
@@ -400,12 +414,14 @@ impl App {
             TaskMsg::MetaError { url, err } => {
                 self.pending_fetches = self.pending_fetches.saturating_sub(1);
                 error!(url = %url, err = %err, "metadata fetch failed");
+                self.set_status("Metadata fetch failed");
             }
 
             TaskMsg::DownloadDone { video_id, file } => {
                 info!(video_id = %video_id, path = %file.display(), "download complete");
                 self.downloading.remove(&video_id);
                 let _ = self.download_tx.send(0.0);
+                self.set_status("Download complete");
 
                 // Check whether this download was for a non-active playlist.
                 if let Some(target_path) = self.download_targets.remove(&video_id) {
@@ -455,6 +471,7 @@ impl App {
             TaskMsg::DownloadError { video_id, err } => {
                 error!(video_id = %video_id, err = %err, "download failed");
                 self.downloading.remove(&video_id);
+                self.set_status("Download failed");
             }
 
             TaskMsg::PlayerReady { video_id, player } => {
@@ -466,10 +483,12 @@ impl App {
                 info!(video_id = %video_id, "player started");
                 self.player = Some(*player);
                 self.is_paused = false;
+                self.set_status("Player ready");
             }
 
             TaskMsg::PlayerError { video_id, err } => {
                 error!(video_id = %video_id, err = %err, "player failed to start");
+                self.set_status("Player error");
             }
         }
     }

@@ -2,7 +2,39 @@ use super::{App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
 use crate::playlist::{LoopMode, Playlist};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::io::Write;
 use tracing::{error, warn};
+
+// #region agent log
+fn agent_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: serde_json::Value,
+) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "sessionId": "d28f88",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": ts
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Users/den/Projects/trovers/.cursor/debug-d28f88.log")
+    {
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion agent log
 
 #[derive(Debug, PartialEq)]
 pub enum Action {
@@ -12,6 +44,19 @@ pub enum Action {
 
 /// Top-level key dispatcher. Tab is handled first, always.
 pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
+    // Help modal: only allow closing toggles while open.
+    if app.input_mode == InputMode::Help {
+        return handle_help(app, key);
+    }
+
+    // Global help toggle (only in non-text-input modes).
+    if key.code == KeyCode::Char('?')
+        && matches!(app.input_mode, InputMode::Normal | InputMode::ConfirmDelete)
+    {
+        app.input_mode = InputMode::Help;
+        return Ok(Action::Continue);
+    }
+
     // Tab switches focus regardless of mode (except when typing or in context menu).
     // In UrlInput mode, Tab cycles through available playlists instead.
     if key.code == KeyCode::Tab && app.input_mode == InputMode::UrlInput {
@@ -50,7 +95,18 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
         InputMode::TrackContextMenu => handle_track_context_menu(app, key),
         InputMode::PlaylistRename => handle_playlist_rename(app, key).await,
         InputMode::PlaylistDelete => handle_playlist_delete(app, key).await,
+        InputMode::Help => Ok(Action::Continue),
     }
+}
+
+fn handle_help(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?') => {
+            app.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(Action::Continue)
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────
@@ -561,6 +617,23 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
             let items = app.sidebar_items();
             let selected_item = items.get(app.sidebar_selected).cloned();
             if let Some(SidebarItem::Playlist { name: old_name, path: old_path }) = selected_item {
+                // #region agent log
+                agent_log(
+                    "pre",
+                    "C",
+                    "src/tui/input.rs:playlist_rename_enter",
+                    "rename playlist requested",
+                    serde_json::json!({
+                        "old_name": old_name,
+                        "old_path": old_path.display().to_string(),
+                        "new_name": new_name,
+                        "app_active_playlist_name": app.playlist.name,
+                        "app_playlist_path": app.playlist_path.display().to_string(),
+                        "config_active_playlist": app.config.active_playlist,
+                    }),
+                );
+                // #endregion agent log
+
                 // Validate: no duplicate name
                 if let Err(msg) = validate_playlist_name(&new_name, &app.available_playlists, Some(&old_name)) {
                     warn!(msg = %msg, "invalid playlist name");
@@ -577,6 +650,7 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
 
                 match playlist.rename(&new_name, &old_path) {
                     Ok(new_path) => {
+                        let new_path_for_log = new_path.display().to_string();
                         // Update available_playlists entry
                         for entry in &mut app.available_playlists {
                             if entry.0 == old_name {
@@ -599,6 +673,23 @@ async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Result<Action> 
                             app.playlist.name = new_name.clone();
                             app.playlist_path = new_path;
                         }
+
+                        // #region agent log
+                        agent_log(
+                            "pre",
+                            "C",
+                            "src/tui/input.rs:playlist_rename_done",
+                            "rename playlist completed",
+                            serde_json::json!({
+                                "old_name": old_name,
+                                "new_name": new_name,
+                                "new_path": new_path_for_log,
+                                "app_active_playlist_name_now": app.playlist.name,
+                                "app_playlist_path_now": app.playlist_path.display().to_string(),
+                                "config_active_playlist_now": app.config.active_playlist,
+                            }),
+                        );
+                        // #endregion agent log
                     }
                     Err(e) => {
                         error!(err = %e, "failed to rename playlist");

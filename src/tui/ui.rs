@@ -12,6 +12,7 @@ use ratatui::{
     },
     Frame,
 };
+use std::time::Duration;
 
 // ── Color palette ─────────────────────────────────────────────────────────
 
@@ -25,6 +26,8 @@ const BORDER_IDLE: Color = Color::Rgb(70, 70, 70);
 const ITEM_DISABLED: Color = Color::Rgb(90, 90, 90);
 /// Background color for the selected (but not playing) row in the track table.
 const ROW_SELECTED_BG: Color = Color::Rgb(60, 60, 60);
+/// Background color for the footer status line.
+const FOOTER_BG: Color = Color::Rgb(55, 55, 55);
 
 // ── Panel block builder ───────────────────────────────────────────────────
 
@@ -71,6 +74,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         InputMode::PlaylistDelete => {
             render_playlist_delete_overlay(frame, app, area);
+        }
+        InputMode::Help => {
+            render_help_overlay(frame, app, area);
         }
         _ => {}
     }
@@ -413,37 +419,35 @@ pub(crate) fn build_now_playing_header_line<'a>(
 ) -> Line<'a> {
     let label = "🎵 Now Playing";
 
+    let label_len = label.chars().count();
+
     match (center, speed) {
-        (Some(center_text), Some(speed_str)) => {
-            // Three-section layout: label | center status | speed
-            let label_section_len = 1 + label.chars().count(); // leading space + label
-            let speed_section_len = speed_str.chars().count() + 1; // speed + trailing space
-            let center_len = center_text.chars().count();
+        (Some(status_text), Some(speed_str)) => {
+            // Two-section compact layout: label (left) + right-aligned "status · speed"
+            let sep = " · ";
+            let right_text = format!("{status_text}{sep}{speed_str}");
+            let right_len = right_text.chars().count();
 
-            let fixed = [(0, label_section_len), (2, speed_section_len)];
-            let widths = calculate_distributed_widths(width, 3, &fixed);
-            let center_width = widths[1];
+            // Fixed: leading space + label + at least 1 space + right + trailing space
+            let fixed = 1 + label_len + 1 + right_len + 1;
+            let pad = width.saturating_sub(fixed);
 
-            let center_pad = center_width.saturating_sub(center_len);
-            let left_pad = center_pad / 2;
-            let right_pad = center_pad - left_pad;
-
+            // Style right side with separate spans so speed can be ACCENT.
             Line::from(vec![
                 Span::raw(" "),
                 Span::styled(label.to_string(), Style::new().fg(GOLD).bold()),
-                Span::raw(" ".repeat(left_pad)),
-                Span::styled(center_text.to_string(), Style::new().fg(Color::White)),
-                Span::raw(" ".repeat(right_pad)),
+                Span::raw(" ".repeat(1 + pad)),
+                Span::styled(status_text.to_string(), Style::new().fg(Color::White)),
+                Span::styled(sep.to_string(), Style::new().fg(TEXT_DIM)),
                 Span::styled(speed_str.to_string(), Style::new().fg(ACCENT).bold()),
                 Span::raw(" "),
             ])
         }
         _ => {
-            // No track or fetching: label + status message
-            let label_len = label.chars().count();
             let status = "No track selected".to_string();
             let status_len = status.chars().count();
-            let pad = width.saturating_sub(1 + label_len + 1 + status_len);
+            let fixed = 1 + label_len + 1 + status_len;
+            let pad = width.saturating_sub(fixed);
             Line::from(vec![
                 Span::raw(" "),
                 Span::styled(label.to_string(), Style::new().fg(GOLD).bold()),
@@ -678,42 +682,131 @@ fn build_downloading_bar_line<'a>(
 // ── Footer ────────────────────────────────────────────────────────────────
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let text = match (&app.input_mode, &app.focus) {
-        (InputMode::UrlInput, _) => {
-            " Enter URL and press [enter]  ·  [esc] cancel"
-        }
-        (InputMode::NewPlaylist, _) => {
-            " Enter playlist name and press [enter]  ·  [esc] cancel"
-        }
-        (InputMode::SearchInput, _) => {
-            " Type to filter  ·  [enter] confirm  ·  [esc] clear"
-        }
-        (InputMode::ConfirmDelete, _) => {
-            " Delete track?  ·  [y] confirm  ·  [n/esc] cancel"
-        }
-        (InputMode::TrackContextMenu, _) => {
-            " [↑↓] nav  ·  [enter] move track  ·  [esc] cancel"
-        }
-        (InputMode::PlaylistRename, _) => {
-            " Enter new name and press [enter]  ·  [esc] cancel"
-        }
-        (InputMode::PlaylistDelete, _) => {
-            " Delete playlist?  ·  [y/enter] confirm  ·  [n/esc] cancel"
-        }
-        (InputMode::Normal, Focus::Sidebar) => {
-            " [↑↓] nav  ·  [enter] select  ·  [r] rename  ·  [d] delete  ·  [tab] → tracks  ·  [q] quit"
-        }
-        (InputMode::Normal, Focus::TrackList) => {
-            " [↑↓/jk] nav  ·  [enter] play  ·  [spc] play/pause  ·  [←→] seek  ·  [[]]] speed  ·  [a] add  ·  [m] move  ·  [/] search  ·  [N] playlist  ·  [q] quit"
-        }
-        (InputMode::Normal, Focus::Settings) => {
-            " [↑↓] select  ·  [←→] change  ·  [esc/tab] back"
-        }
-    };
+    let width = area.width as usize;
+
+    let left = footer_left_message(app);
+    let center = footer_center_context(app);
+    let right = footer_right_counters(app);
+
+    let fixed = [(0, left.chars().count() + 2), (2, right.chars().count() + 2)];
+    let widths = calculate_distributed_widths(width, 3, &fixed);
+    let center_width = widths[1];
+
+    let center_trunc = truncate(&center, center_width.saturating_sub(2));
+    let center_len = center_trunc.chars().count();
+    let pad_total = center_width.saturating_sub(center_len);
+    let left_pad = pad_total / 2;
+    let right_pad = pad_total - left_pad;
+
+    let line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(truncate(&left, widths[0].saturating_sub(2)), Style::new().fg(Color::White)),
+        Span::raw(" ".repeat(left_pad)),
+        Span::styled(center_trunc, Style::new().fg(TEXT_DIM)),
+        Span::raw(" ".repeat(right_pad)),
+        Span::styled(truncate(&right, widths[2].saturating_sub(2)), Style::new().fg(Color::White)),
+        Span::raw(" "),
+    ]);
+
     frame.render_widget(
-        Paragraph::new(text).style(Style::new().fg(TEXT_DIM)),
+        Paragraph::new(line).style(Style::new().fg(Color::White).bg(FOOTER_BG)),
         area,
     );
+}
+
+fn footer_left_message(app: &App) -> String {
+    // Always show explicit modal prompts when in an input/confirm mode.
+    match (&app.input_mode, &app.focus) {
+        (InputMode::UrlInput, _) => return "Add track: Enter URL · [enter] confirm · [esc] cancel".to_string(),
+        (InputMode::NewPlaylist, _) => {
+            return "New playlist: Enter name · [enter] confirm · [esc] cancel".to_string();
+        }
+        (InputMode::SearchInput, _) => return "Search: type to filter · [enter] done · [esc] clear".to_string(),
+        (InputMode::ConfirmDelete, _) => return "Delete track? · [y] confirm · [n/esc] cancel".to_string(),
+        (InputMode::TrackContextMenu, _) => {
+            return "Move track: [↑↓] select · [enter] move · [esc] cancel".to_string();
+        }
+        (InputMode::PlaylistRename, _) => {
+            return "Rename playlist: Enter name · [enter] confirm · [esc] cancel".to_string();
+        }
+        (InputMode::PlaylistDelete, _) => {
+            return "Delete playlist? · [y/enter] confirm · [n/esc] cancel".to_string();
+        }
+        (InputMode::Help, _) => return "Help open · [?]/[esc] close".to_string(),
+        _ => {}
+    }
+
+    // Otherwise, show a transient status message if present and fresh.
+    if let Some((msg, at)) = &app.status_message {
+        if at.elapsed() <= Duration::from_secs(4) {
+            return msg.clone();
+        }
+    }
+
+    // Default: context hint.
+    match app.focus {
+        Focus::Sidebar => "Sidebar".to_string(),
+        Focus::TrackList => "Tracks".to_string(),
+        Focus::Settings => "Settings".to_string(),
+    }
+}
+
+fn footer_center_context(app: &App) -> String {
+    let focus = match app.focus {
+        Focus::Sidebar => "Sidebar",
+        Focus::TrackList => "Tracks",
+        Focus::Settings => "Settings",
+    };
+
+    let mode: String = match app.input_mode {
+        InputMode::Normal => "Normal".to_string(),
+        InputMode::UrlInput => "Add URL".to_string(),
+        InputMode::NewPlaylist => "New playlist".to_string(),
+        InputMode::ConfirmDelete => "Confirm delete".to_string(),
+        InputMode::SearchInput => {
+            if app.input_buf.trim().is_empty() {
+                "Search".to_string()
+            } else {
+                format!("Search: {}", truncate(app.input_buf.trim(), 24))
+            }
+        }
+        InputMode::TrackContextMenu => "Move track".to_string(),
+        InputMode::PlaylistRename => "Rename playlist".to_string(),
+        InputMode::PlaylistDelete => "Delete playlist".to_string(),
+        InputMode::Help => "Help".to_string(),
+    };
+
+    if matches!(app.input_mode, InputMode::SearchInput) {
+        // In SearchInput, show match counts if possible.
+        let visible = app.visible_track_count();
+        let total = app.playlist.tracks.len();
+        return format!("{focus} · {mode} · {visible}/{total}");
+    }
+
+    format!("{focus} · {mode}")
+}
+
+fn footer_right_counters(app: &App) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if app.pending_fetches > 0 {
+        parts.push(format!("⏳{}", app.pending_fetches));
+    }
+
+    let dl = app.downloading.len();
+    if dl > 0 {
+        parts.push(format!("↓{}", dl));
+    }
+
+    if !app.filtered_indices.is_empty() {
+        parts.push("Filter".to_string());
+    }
+
+    if parts.is_empty() {
+        "? Help".to_string()
+    } else {
+        parts.join("  ")
+    }
 }
 
 // ── Input overlay ─────────────────────────────────────────────────────────
@@ -859,6 +952,74 @@ fn render_track_context_menu(frame: &mut Frame, app: &App, area: Rect) {
             rows[i + 1],
         );
     }
+}
+
+// ── Help overlay ──────────────────────────────────────────────────────────
+
+fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
+    let width = area.width.min(84).max(44);
+    let height = area.height.min(22).max(12);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Help ")
+        .title_style(Style::new().fg(ACCENT).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // Render as simple lines for stability across terminals.
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::styled(" Global", Style::new().fg(GOLD).bold()),
+        Span::raw("  "),
+        Span::styled("[?]", Style::new().fg(ACCENT)),
+        Span::raw(" help  "),
+        Span::styled("[tab]", Style::new().fg(ACCENT)),
+        Span::raw(" focus  "),
+        Span::styled("[q]", Style::new().fg(ACCENT)),
+        Span::raw(" quit"),
+    ]));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![Span::styled(
+        " Track list",
+        Style::new().fg(GOLD).bold(),
+    )]));
+    lines.push(Line::raw("  [↑↓/jk] navigate   [enter] play   [spc] play/pause"));
+    lines.push(Line::raw("  [←→] seek ±10s     [shift+←→] seek ±60s"));
+    lines.push(Line::raw("  Speed: '[' slower   ']' faster"));
+    lines.push(Line::raw("  [a] add URL        [m] move track   [d] delete   [/] search"));
+    lines.push(Line::raw("  [n] next           [b] previous    [N] new playlist"));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![Span::styled(
+        " Sidebar",
+        Style::new().fg(GOLD).bold(),
+    )]));
+    lines.push(Line::raw("  [↑↓] navigate   [enter] select/toggle   [r] rename   [d] delete"));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Close", Style::new().fg(GOLD).bold()),
+        Span::raw("  "),
+        Span::styled("[esc]", Style::new().fg(ACCENT)),
+        Span::raw(" or "),
+        Span::styled("[?]", Style::new().fg(ACCENT)),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::new().fg(Color::White)),
+        inner,
+    );
 }
 
 // ── Playlist rename overlay ───────────────────────────────────────────────
