@@ -145,8 +145,8 @@ pub struct App {
     // Async channels
     pub pos_tx: watch::Sender<f64>,
     pub position_rx: watch::Receiver<f64>,
-    pub download_tx: watch::Sender<f32>,
-    pub download_rx: watch::Receiver<f32>,
+    pub download_tx: watch::Sender<(String, f32)>,
+    pub download_rx: watch::Receiver<(String, f32)>,
     pub task_tx: mpsc::UnboundedSender<TaskMsg>,
     pub task_rx: mpsc::UnboundedReceiver<TaskMsg>,
 
@@ -172,7 +172,11 @@ pub struct App {
 
     // Playback state
     pub position: f64,
-    pub download_progress: f32,
+    /// Per-track download progress percentage (0.0-100.0), keyed by
+    /// `video_id`. A `HashMap` (rather than a single global `f32`) so
+    /// multiple concurrent downloads never cross-contaminate each other's
+    /// displayed percentage.
+    pub download_progress: HashMap<String, f32>,
     pub is_paused: bool,
 
     // Footer status message (toast-style)
@@ -200,7 +204,7 @@ impl App {
         playlist_path: PathBuf,
     ) -> Self {
         let (pos_tx, position_rx) = watch::channel(0.0f64);
-        let (download_tx, download_rx) = watch::channel(0.0f32);
+        let (download_tx, download_rx) = watch::channel((String::new(), 0.0f32));
         let (task_tx, task_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
@@ -228,7 +232,7 @@ impl App {
             available_playlists,
             settings_selected: 0,
             position: 0.0,
-            download_progress: 0.0,
+            download_progress: HashMap::new(),
             is_paused: false,
             status_message: None,
             downloading: HashSet::new(),
@@ -476,7 +480,8 @@ impl App {
             self.position = *self.position_rx.borrow_and_update();
         }
         if self.download_rx.has_changed().unwrap_or(false) {
-            self.download_progress = *self.download_rx.borrow_and_update();
+            let (video_id, pct) = self.download_rx.borrow_and_update().clone();
+            self.download_progress.insert(video_id, pct);
         }
         while let Ok(msg) = self.task_rx.try_recv() {
             self.handle_task_msg(msg);
@@ -577,7 +582,7 @@ impl App {
             TaskMsg::DownloadDone { video_id, file } => {
                 info!(video_id = %video_id, path = %file.display(), "download complete");
                 self.downloading.remove(&video_id);
-                let _ = self.download_tx.send(0.0);
+                self.download_progress.remove(&video_id);
                 self.set_status("Download complete");
 
                 // `download_targets` is always populated at add-time (see
@@ -607,6 +612,7 @@ impl App {
             TaskMsg::DownloadError { video_id, err } => {
                 error!(video_id = %video_id, err = %err, "download failed");
                 self.downloading.remove(&video_id);
+                self.download_progress.remove(&video_id);
                 self.set_status("Download failed");
             }
 
@@ -779,6 +785,43 @@ impl App {
     pub fn save_playlist(&self) {
         if let Err(e) = self.playlist.save(&self.playlist_path) {
             error!(err = %e, "failed to auto-save playlist");
+        }
+    }
+
+    /// Persist the currently playing track's live position into
+    /// `last_position` and save it to disk. Called right before quitting so
+    /// resume-on-launch (Task 6) has an up-to-date value — previously
+    /// `last_position` was only ever updated when switching *away* from a
+    /// track mid-session (in `request_playback`), never on quit, so whatever
+    /// track was playing when the user pressed `q` always resumed from 0:00.
+    ///
+    /// No-op if nothing is playing. Routes the write through the same
+    /// in-memory-vs-disk identity rule as the rest of this module: if the
+    /// playing session's playlist file is the one currently displayed, the
+    /// mutation goes through `self.playlist` (and `save_playlist`) so an
+    /// in-progress edit to the displayed playlist isn't clobbered by a stale
+    /// on-disk write; otherwise it's written directly to the playing
+    /// session's own playlist file.
+    pub fn flush_playing_position(&mut self) {
+        if self.playing.is_none() {
+            return;
+        }
+        let pos = self.position as u64;
+        let path_matches = self.playing.as_ref().unwrap().path == self.playlist_path;
+
+        if path_matches {
+            if let Some(track) = self.playing_track_mut() {
+                track.last_position = pos;
+            }
+            self.save_playlist();
+        } else {
+            let path = self.playing.as_ref().unwrap().path.clone();
+            if let Some(track) = self.playing_track_mut() {
+                track.last_position = pos;
+            }
+            if let Err(e) = self.playing.as_ref().unwrap().playlist.save(&path) {
+                error!(err = %e, path = %path.display(), "failed to flush playing position on quit");
+            }
         }
     }
 
@@ -1003,6 +1046,8 @@ pub async fn run(app: &mut App) -> Result<()> {
             break;
         }
     }
+
+    app.flush_playing_position();
 
     ratatui::restore();
     Ok(())

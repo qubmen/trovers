@@ -3898,4 +3898,168 @@ tracks = []
             "space fallback-to-play on a track with nonzero last_position must resume (Some), not reset app.position"
         );
     }
+
+    // ── Task 7: per-track download progress ─────────────────────────────────
+
+    #[test]
+    fn download_progress_is_tracked_per_video_id() {
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+
+        app.download_progress.insert("vid1".to_string(), 10.0);
+        app.download_progress.insert("vid2".to_string(), 90.0);
+
+        // Sending progress for vid1 must not affect vid2's stored percentage.
+        app.download_progress.insert("vid1".to_string(), 35.0);
+
+        assert_eq!(app.download_progress.get("vid1"), Some(&35.0));
+        assert_eq!(
+            app.download_progress.get("vid2"),
+            Some(&90.0),
+            "unrelated track's progress must remain untouched"
+        );
+    }
+
+    #[test]
+    fn download_done_removes_only_its_own_progress_entry() {
+        use crate::tui::{App, TaskMsg};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_path = dir.path().join("Source.toml");
+        let mut source_pl = make_playlist("Source");
+        source_pl.add_track(make_track("vid1", "Track One"));
+        source_pl.add_track(make_track("vid2", "Track Two"));
+        source_pl.save(&source_path).expect("save source");
+
+        let config = crate::config::Config::default();
+        let available = vec![("Source".to_string(), source_path.clone())];
+        let mut app = App::new(source_pl, config, available, source_path.clone());
+
+        // Two concurrent downloads in flight.
+        app.downloading.insert("vid1".to_string());
+        app.downloading.insert("vid2".to_string());
+        app.download_progress.insert("vid1".to_string(), 40.0);
+        app.download_progress.insert("vid2".to_string(), 70.0);
+
+        let fake_file = dir.path().join("vid1.m4a");
+        std::fs::write(&fake_file, b"audio data").expect("write fake audio");
+        app.handle_task_msg(TaskMsg::DownloadDone {
+            video_id: "vid1".to_string(),
+            file: fake_file.clone(),
+        });
+
+        assert!(
+            !app.download_progress.contains_key("vid1"),
+            "completed download's progress entry must be removed"
+        );
+        assert_eq!(
+            app.download_progress.get("vid2"),
+            Some(&70.0),
+            "completing vid1's download must not reset vid2's still-running percentage"
+        );
+    }
+
+    #[test]
+    fn download_error_removes_only_its_own_progress_entry() {
+        use crate::tui::{App, TaskMsg};
+
+        let mut app = make_app_with_playlists("Source", &["Source"]);
+        app.playlist.tracks.push(make_track("vid1", "Track One"));
+        app.playlist.tracks.push(make_track("vid2", "Track Two"));
+
+        app.downloading.insert("vid1".to_string());
+        app.downloading.insert("vid2".to_string());
+        app.download_progress.insert("vid1".to_string(), 20.0);
+        app.download_progress.insert("vid2".to_string(), 60.0);
+
+        app.handle_task_msg(TaskMsg::DownloadError {
+            video_id: "vid1".to_string(),
+            err: "boom".to_string(),
+        });
+
+        assert!(
+            !app.download_progress.contains_key("vid1"),
+            "failed download's progress entry must be removed"
+        );
+        assert_eq!(
+            app.download_progress.get("vid2"),
+            Some(&60.0),
+            "vid1's failure must not affect vid2's progress"
+        );
+    }
+
+    // ── Task 7: flush position on quit ──────────────────────────────────────
+
+    #[test]
+    fn flush_playing_position_persists_to_disk_for_displayed_playlist() {
+        use crate::tui::PlayingSession;
+
+        let mut pl = make_playlist("Active");
+        pl.tracks.push(make_track("vid1", "Track One"));
+        let (_dir, path) = write_temp_playlist(&pl);
+
+        let config = crate::config::Config::default();
+        let available = vec![("Active".to_string(), path.clone())];
+        let mut app = crate::tui::App::new(pl.clone(), config, available, path.clone());
+
+        app.playing = Some(PlayingSession {
+            path: path.clone(),
+            playlist: pl,
+            track_idx: 0,
+        });
+        app.position = 123.0;
+
+        app.flush_playing_position();
+
+        // In-memory displayed playlist must be updated too.
+        assert_eq!(app.playlist.tracks[0].last_position, 123);
+
+        let reloaded = crate::playlist::Playlist::load(&path).expect("reload");
+        assert_eq!(
+            reloaded.tracks[0].last_position, 123,
+            "last_position must be flushed to disk on quit"
+        );
+    }
+
+    #[test]
+    fn flush_playing_position_persists_to_disk_for_unrelated_playlist() {
+        use crate::tui::PlayingSession;
+
+        // App is displaying "Browsing", but the actually playing track lives
+        // in a different playlist file entirely.
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+
+        let mut playing_pl = make_playlist("Elsewhere");
+        playing_pl.tracks.push(make_track("vid1", "Elsewhere Track"));
+        let (_dir, playing_path) = write_temp_playlist(&playing_pl);
+
+        app.playing = Some(PlayingSession {
+            path: playing_path.clone(),
+            playlist: playing_pl,
+            track_idx: 0,
+        });
+        app.position = 77.0;
+
+        app.flush_playing_position();
+
+        // Displayed playlist must be untouched.
+        assert!(app.playlist.tracks.is_empty());
+
+        let reloaded = crate::playlist::Playlist::load(&playing_path).expect("reload");
+        assert_eq!(
+            reloaded.tracks[0].last_position, 77,
+            "last_position must be flushed to the playing session's own playlist file"
+        );
+    }
+
+    #[test]
+    fn flush_playing_position_is_noop_when_nothing_playing() {
+        let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
+        app.playlist.tracks.push(make_track("vid1", "Track One"));
+        app.position = 55.0;
+
+        // Should not panic and should leave the displayed playlist untouched.
+        app.flush_playing_position();
+
+        assert_eq!(app.playlist.tracks[0].last_position, 0);
+    }
 }

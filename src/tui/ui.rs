@@ -525,13 +525,21 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
     let dur_str = format_duration(track.duration);
     let vol_str = format!("♪ {}%", app.config.default_volume);
 
+    let track_progress = || {
+        app.download_progress
+            .get(&track.video_id)
+            .copied()
+            .unwrap_or(0.0) as f64
+            / 100.0
+    };
+
     let cache_state = if app.downloading.contains(&track.video_id) {
-        CacheState::Downloading(app.download_progress as f64 / 100.0)
+        CacheState::Downloading(track_progress())
     } else {
         match track.cache_status {
             CacheStatus::Cached => CacheState::Cached,
             CacheStatus::Streaming => CacheState::Streaming,
-            CacheStatus::Downloading => CacheState::Downloading(app.download_progress as f64 / 100.0),
+            CacheStatus::Downloading => CacheState::Downloading(track_progress()),
         }
     };
 
