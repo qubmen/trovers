@@ -3060,4 +3060,329 @@ tracks = []
         assert_eq!(track_b.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track_b.file.as_deref(), Some(fake_file.as_path()));
     }
+
+    // ── Task 3: patch_and_save_playlist ─────────────────────────────────────
+
+    #[test]
+    fn patch_and_save_playlist_mutates_displayed_playlist_in_memory_and_on_disk() {
+        use crate::tui::App;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Active.toml");
+
+        let mut pl = make_playlist("Active");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.save(&path).expect("save");
+
+        let config = crate::config::Config::default();
+        let available = vec![("Active".to_string(), path.clone())];
+        let mut app = App::new(pl, config, available, path.clone());
+
+        // Note: cache_status must be paired with an existing `file` — otherwise
+        // Playlist::load's file-existence check resets Cached back to Streaming
+        // on reload (unrelated to patch_and_save_playlist itself, so use
+        // user_title as the primary marker and file/status as a secondary one).
+        let fake_file = dir.path().join("vid1.m4a");
+        std::fs::write(&fake_file, b"audio data").expect("write fake audio");
+        app.patch_and_save_playlist(&path, "vid1", |t| {
+            t.cache_status = crate::playlist::CacheStatus::Cached;
+            t.file = Some(fake_file.clone());
+            t.user_title = Some("Patched".to_string());
+        });
+
+        // In-memory displayed playlist reflects the patch immediately.
+        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
+        assert_eq!(track.user_title.as_deref(), Some("Patched"));
+
+        // And it was persisted to disk.
+        let reloaded = crate::playlist::Playlist::load(&path).expect("reload");
+        let track = reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
+        assert_eq!(track.user_title.as_deref(), Some("Patched"));
+    }
+
+    #[test]
+    fn patch_and_save_playlist_round_trips_through_disk_for_other_playlist() {
+        use crate::tui::App;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let active_path = dir.path().join("Active.toml");
+        let other_path = dir.path().join("Other.toml");
+
+        let active_pl = make_playlist("Active");
+        active_pl.save(&active_path).expect("save active");
+
+        let mut other_pl = make_playlist("Other");
+        other_pl.add_track(make_track("vid1", "Track One"));
+        other_pl.save(&other_path).expect("save other");
+
+        let config = crate::config::Config::default();
+        let available = vec![
+            ("Active".to_string(), active_path.clone()),
+            ("Other".to_string(), other_path.clone()),
+        ];
+        let mut app = App::new(active_pl, config, available, active_path.clone());
+
+        let fake_file = dir.path().join("vid1.m4a");
+        std::fs::write(&fake_file, b"audio data").expect("write fake audio");
+        app.patch_and_save_playlist(&other_path, "vid1", |t| {
+            t.cache_status = crate::playlist::CacheStatus::Cached;
+            t.file = Some(fake_file.clone());
+        });
+
+        // Displayed (active) playlist must remain untouched.
+        assert!(app.playlist.tracks.is_empty(), "displayed playlist must not be mutated");
+
+        // Other playlist's file on disk was patched.
+        let reloaded = crate::playlist::Playlist::load(&other_path).expect("reload other");
+        let track = reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
+    }
+
+    #[test]
+    fn patch_and_save_playlist_missing_video_id_is_noop() {
+        use crate::tui::App;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Active.toml");
+
+        let mut pl = make_playlist("Active");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.save(&path).expect("save");
+
+        let config = crate::config::Config::default();
+        let available = vec![("Active".to_string(), path.clone())];
+        let mut app = App::new(pl, config, available, path.clone());
+
+        // Patch a video_id that doesn't exist — must be a silent no-op, no panic.
+        app.patch_and_save_playlist(&path, "does-not-exist", |t| {
+            t.cache_status = crate::playlist::CacheStatus::Cached;
+        });
+
+        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(
+            track.cache_status,
+            crate::playlist::CacheStatus::Streaming,
+            "existing track must be untouched when the patched video_id doesn't exist"
+        );
+    }
+
+    #[test]
+    fn patch_and_save_playlist_missing_video_id_in_other_playlist_is_noop() {
+        use crate::tui::App;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let active_path = dir.path().join("Active.toml");
+        let other_path = dir.path().join("Other.toml");
+
+        let active_pl = make_playlist("Active");
+        active_pl.save(&active_path).expect("save active");
+
+        let mut other_pl = make_playlist("Other");
+        other_pl.add_track(make_track("vid1", "Track One"));
+        other_pl.save(&other_path).expect("save other");
+
+        let config = crate::config::Config::default();
+        let available = vec![
+            ("Active".to_string(), active_path.clone()),
+            ("Other".to_string(), other_path.clone()),
+        ];
+        let mut app = App::new(active_pl, config, available, active_path.clone());
+
+        app.patch_and_save_playlist(&other_path, "does-not-exist", |t| {
+            t.cache_status = crate::playlist::CacheStatus::Cached;
+        });
+
+        let reloaded = crate::playlist::Playlist::load(&other_path).expect("reload other");
+        let track = reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(
+            track.cache_status,
+            crate::playlist::CacheStatus::Streaming,
+            "existing track in the other playlist must be untouched"
+        );
+    }
+
+    // ── Task 3: DownloadDone hot-switch survives browsing elsewhere ─────────
+
+    #[tokio::test]
+    async fn download_done_hot_switches_playing_track_even_when_browsing_elsewhere() {
+        use crate::tui::{App, PlayingSession, TaskMsg};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // The playing track lives in "Playing.toml".
+        let playing_path = dir.path().join("Playing.toml");
+        let mut playing_pl = make_playlist("Playing");
+        playing_pl.add_track(make_track("vid1", "Track One"));
+        playing_pl.save(&playing_path).expect("save playing");
+
+        // The user is currently browsing a *different* playlist.
+        let browsing_path = dir.path().join("Browsing.toml");
+        let browsing_pl = make_playlist("Browsing");
+        browsing_pl.save(&browsing_path).expect("save browsing");
+
+        let config = crate::config::Config::default();
+        let available = vec![
+            ("Playing".to_string(), playing_path.clone()),
+            ("Browsing".to_string(), browsing_path.clone()),
+        ];
+        let mut app = App::new(browsing_pl, config, available, browsing_path.clone());
+
+        // Simulate vid1 actually playing (mpv running) from the Playing playlist,
+        // while the displayed playlist is Browsing.
+        app.playing = Some(PlayingSession {
+            path: playing_path.clone(),
+            playlist: crate::playlist::Playlist::load(&playing_path).expect("load playing"),
+            track_idx: 0,
+        });
+        app.download_targets.insert("vid1".to_string(), playing_path.clone());
+        app.position = 42.0;
+
+        let fake_file = dir.path().join("vid1.m4a");
+        std::fs::write(&fake_file, b"audio data").expect("write fake audio");
+
+        // No real mpv process is spawned in tests, but the hot-switch logic
+        // requires `app.player` to be `Some` to decide to hot-switch at all —
+        // exercise it via a real (unstarted) child process handle isn't
+        // available without spawning mpv, so we instead verify the decision
+        // surface directly: patch_and_save_playlist must have updated the
+        // right file, and `playing_track()` must reflect it via the session's
+        // own copy (since paths differ), proving the hot-switch's "is this
+        // the currently playing track" check is based on `app.playing`, not
+        // `app.playlist.current_track` (which points at nothing relevant to
+        // Playing.toml since the displayed playlist is Browsing).
+        app.handle_task_msg(TaskMsg::DownloadDone {
+            video_id: "vid1".to_string(),
+            file: fake_file.clone(),
+        });
+
+        // The Playing playlist's file on disk was patched, even though it's
+        // not the displayed playlist.
+        let reloaded = crate::playlist::Playlist::load(&playing_path).expect("reload playing");
+        let track = reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
+
+        // The displayed (Browsing) playlist must remain untouched.
+        assert!(app.playlist.tracks.is_empty(), "displayed playlist must not be mutated");
+
+        // The playing session's own track copy must also reflect the update
+        // (this is what `playing_track()`/Now Playing would render).
+        let playing_track = app.playing_track().expect("playing track should resolve");
+        assert_eq!(playing_track.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(playing_track.file.as_deref(), Some(fake_file.as_path()));
+    }
+
+    // ── Task 3: speed handlers operate on the playing track, not the displayed cursor ──
+
+    #[tokio::test]
+    async fn adjust_playing_track_speed_mutates_playing_track_in_different_playlist() {
+        use crate::tui::input::adjust_playing_track_speed;
+        use crate::tui::{App, PlayingSession};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // The playing track lives in "Playing.toml"...
+        let playing_path = dir.path().join("Playing.toml");
+        let mut playing_pl = make_playlist("Playing");
+        playing_pl.add_track(make_track("vid1", "Track One"));
+        playing_pl.save(&playing_path).expect("save playing");
+
+        // ...but the user is browsing a *different* playlist with a
+        // coincidentally-matching video_id at the cursor, to prove speed
+        // adjustment is not keyed off the displayed playlist's cursor.
+        let browsing_path = dir.path().join("Browsing.toml");
+        let mut browsing_pl = make_playlist("Browsing");
+        browsing_pl.add_track(make_track("vid1", "Unrelated Track"));
+        browsing_pl.save(&browsing_path).expect("save browsing");
+
+        let config = crate::config::Config::default();
+        let available = vec![
+            ("Playing".to_string(), playing_path.clone()),
+            ("Browsing".to_string(), browsing_path.clone()),
+        ];
+        let mut app = App::new(browsing_pl, config, available, browsing_path.clone());
+        app.selected = 0; // cursor sits on Browsing's own vid1 track
+
+        app.playing = Some(PlayingSession {
+            path: playing_path.clone(),
+            playlist: crate::playlist::Playlist::load(&playing_path).expect("load playing"),
+            track_idx: 0,
+        });
+
+        adjust_playing_track_speed(&mut app, 0.1).await.expect("adjust speed");
+
+        // The displayed (Browsing) playlist's track must be untouched.
+        let displayed_track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(displayed_track.speed, None, "displayed playlist's track must not be touched");
+
+        // The playing track (from Playing.toml) must have its speed bumped by
+        // 0.1 relative to the default speed (1.0), since neither the track nor
+        // its playlist set an explicit speed.
+        let playing_track = app.playing_track().expect("playing track should resolve");
+        assert_eq!(
+            playing_track.speed,
+            Some(1.1),
+            "playing track's speed must be bumped from the default"
+        );
+
+        // Persisted to the *playing* session's own file, not Browsing.toml.
+        let reloaded_playing = crate::playlist::Playlist::load(&playing_path).expect("reload playing");
+        let track = reloaded_playing.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert!(track.speed.is_some(), "speed change must be persisted to the playing playlist's file");
+
+        let reloaded_browsing = crate::playlist::Playlist::load(&browsing_path).expect("reload browsing");
+        let track = reloaded_browsing.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(track.speed, None, "browsing playlist's file must not be touched");
+    }
+
+    #[tokio::test]
+    async fn adjust_playing_track_speed_is_noop_when_nothing_playing() {
+        use crate::tui::input::adjust_playing_track_speed;
+        use crate::tui::App;
+
+        let mut pl = make_playlist("Active");
+        pl.add_track(make_track("vid1", "Track One"));
+        let config = crate::config::Config::default();
+        let available = vec![("Active".to_string(), std::path::PathBuf::from("/fake/Active.toml"))];
+        let mut app = App::new(pl, config, available, std::path::PathBuf::from("/fake/Active.toml"));
+
+        adjust_playing_track_speed(&mut app, 0.1).await.expect("adjust speed");
+
+        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(track.speed, None, "no track should be touched when nothing is playing");
+    }
+
+    #[tokio::test]
+    async fn adjust_playing_track_speed_clamps_to_max() {
+        use crate::tui::input::adjust_playing_track_speed;
+        use crate::tui::{App, PlayingSession};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Active.toml");
+        let mut pl = make_playlist("Active");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.save(&path).expect("save");
+
+        let config = crate::config::Config::default();
+        let available = vec![("Active".to_string(), path.clone())];
+        let mut app = App::new(pl, config, available, path.clone());
+
+        app.playing = Some(PlayingSession {
+            path: path.clone(),
+            playlist: crate::playlist::Playlist::load(&path).expect("load"),
+            track_idx: 0,
+        });
+        // Same path as displayed → mutation goes through app.playlist directly.
+        app.playlist.tracks[0].speed = Some(2.95);
+
+        adjust_playing_track_speed(&mut app, 0.5).await.expect("adjust speed");
+
+        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        assert_eq!(track.speed, Some(3.0), "speed must clamp at 3.0");
+    }
 }

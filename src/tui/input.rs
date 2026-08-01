@@ -267,32 +267,15 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
             }
         }
 
-        // Speed: [ = slower, ] = faster
+        // Speed: [ = slower, ] = faster. Adjusts the speed of the *playing*
+        // track (which may live in a playlist other than the one displayed),
+        // not whatever track happens to sit at `current_track_index()` in
+        // the displayed playlist.
         KeyCode::Char(']') => {
-            if let Some(idx) = app.current_track_index() {
-                let base = app.playlist.tracks[idx].speed
-                    .or(app.playlist.default_speed)
-                    .unwrap_or(app.config.default_speed);
-                let speed = (base + 0.1).min(3.0);
-                app.playlist.tracks[idx].speed = Some(speed);
-                if let Some(player) = &app.player {
-                    player.set_speed(speed).await?;
-                }
-                app.save_playlist();
-            }
+            adjust_playing_track_speed(app, 0.1).await?;
         }
         KeyCode::Char('[') => {
-            if let Some(idx) = app.current_track_index() {
-                let base = app.playlist.tracks[idx].speed
-                    .or(app.playlist.default_speed)
-                    .unwrap_or(app.config.default_speed);
-                let speed = (base - 0.1).max(0.25);
-                app.playlist.tracks[idx].speed = Some(speed);
-                if let Some(player) = &app.player {
-                    player.set_speed(speed).await?;
-                }
-                app.save_playlist();
-            }
+            adjust_playing_track_speed(app, -0.1).await?;
         }
 
         // Volume
@@ -382,6 +365,48 @@ async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Action> {
     }
 
     Ok(Action::Continue)
+}
+
+/// Adjust the speed of the track actually driving playback right now (per
+/// `app.playing`), not whatever the displayed playlist's cursor happens to
+/// point at — the playing track may live in a different playlist entirely.
+/// No-op if nothing is playing. `delta` is added to the track's current
+/// effective speed and clamped to mpv's supported range.
+pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) -> Result<()> {
+    if app.playing.is_none() {
+        return Ok(());
+    }
+    let default_speed = app.config.default_speed;
+    let playlist_default_speed = app.playing.as_ref().and_then(|p| p.playlist.default_speed);
+
+    let speed = {
+        let Some(track) = app.playing_track_mut() else {
+            return Ok(());
+        };
+        let base = track.speed.or(playlist_default_speed).unwrap_or(default_speed);
+        let new_speed = (base + delta).clamp(0.25, 3.0);
+        track.speed = Some(new_speed);
+        new_speed
+    };
+
+    if let Some(player) = &app.player {
+        player.set_speed(speed).await?;
+    }
+
+    // Persist through whichever copy is the source of truth for the playing
+    // track's identity: the displayed playlist (already the case when paths
+    // match, since `playing_track_mut` mutated it directly) or the playing
+    // session's own playlist file.
+    let session_path = app.playing.as_ref().map(|p| p.path.clone());
+    if session_path.as_deref() == Some(app.playlist_path.as_path()) {
+        app.save_playlist();
+    } else if let Some(session) = app.playing.as_ref() {
+        if let Err(e) = session.playlist.save(&session.path) {
+            error!(err = %e, "failed to save playing session's playlist after speed change");
+        }
+    }
+
+    Ok(())
 }
 
 // ── Settings panel ────────────────────────────────────────────────────────
