@@ -500,14 +500,27 @@ line is often absent entirely and only the `[ExtractAudio]` one names the file
 that survives conversion.
 
 ### player.rs — IPC over Unix socket
-- Socket path: `/tmp/trovers-<pid>.sock` (pid = current process id, avoids conflicts
-  when multiple instances run simultaneously)
+- Socket path: `/tmp/trovers-<pid>-<seq>.sock` (pid = current process id, `seq` a
+  per-process counter — the pid alone collides between successive players in one
+  session, the counter alone between concurrent instances)
 - On play: send `seek <last_position> absolute` immediately after mpv starts
 - On speed change: send `set_property speed <value>` + save to TOML
 - Poll `get_property time-pos` every second → update `last_position` in memory
 - On quit or track change: flush `last_position` to TOML
 - **Socket connection:** retry up to 20 times with 50ms delay — the socket is not
   available immediately after mpv spawns
+- **Every exchange is bounded** by `IPC_TIMEOUT` (2s), connect *and* reply. Key
+  handling awaits IPC inline on the render loop, so an mpv that accepted the
+  connection and then wedged used to freeze the entire UI with no way out; and a
+  position poller parked on such a read never reported `PlayerGone` either, so
+  the app kept a dead `Player` indefinitely. A timeout says nothing about
+  whether mpv is alive, so it is classified `Transient` and the next tick retries.
+- **Replies are told apart from events.** mpv pushes events
+  (`{"event":"playback-restart"}` and friends) to every connected client,
+  unprompted and interleaved with command replies. `read_reply` skips lines with
+  no `error` field — mpv puts one on every reply — because taking the first line
+  as the answer meant an event arriving in the window between writing a command
+  and reading its answer was parsed as that answer.
 
 ### playlist.rs — TOML persistence
 - Read playlist on startup with `toml` crate + `serde`
@@ -711,9 +724,18 @@ When building multi-section rows in the now-playing area:
   *playing* track's speed via `playing_track_mut()` (not the displayed
   playlist's cursor track — they may differ), sends the new speed to mpv if a
   player is running, then persists via `save_playing_session_playlist()`.
+- `step_track(app, forward)` — the `n`/`b` handler. Steps the cursor within the
+  *displayed* playlist and plays what it lands on, wrapping at both bounds,
+  following `shuffle_order` when shuffle is on and no filter is active.
 - `handle_confirm_delete` / `move_track_to_playlist` — stop playback only when
   the track being removed/moved is identity-checked as the one actually
   playing (`is_playing_track(path, video_id)`), not merely a `video_id` match.
+  Deleting the playing track also resets `App::position` to 0 (and publishes
+  that on the position channel): with nothing playing, the elapsed time belongs
+  to no track, and left as it was it counted against whatever played next.
+- Adding a track does **not** move the cursor. It used to jump to the new row,
+  which moved the selection out from under `Enter`/`d` while browsing — and
+  under a search filter it jumped to a row index the filter does not display.
 - `handle_playlist_rename` — if the renamed playlist file is the one
   `app.playing` points at, re-points the playing session's `path` at the new
   file so later saves don't resurrect the deleted old file.
@@ -721,6 +743,54 @@ When building multi-section rows in the now-playing area:
   playlist being deleted is instead the one `app.playing` points at (even
   though it isn't displayed), stops playback before removing the file, for
   the same reason as the rename case above.
+
+### End of track: auto-advance, loop mode and shuffle
+
+mpv runs without `--idle`/`--keep-open`, so it exits by itself when a track
+ends. The position poller notices the socket refusing connections and raises
+`TaskMsg::PlayerGone { generation }` — that, not an `eof-reached` property poll,
+is the end-of-track signal (`real_mpv_exiting_at_end_of_track_is_reported_as_gone`
+covers it against a real mpv).
+
+`PlayerGone` only means "mpv is no longer there", which also covers a broken
+stream, a codec mpv could not handle, or an external kill. `reached_end_of_track()`
+distinguishes the two: the exit counts as EOF when the last polled position is
+within `EOF_SLACK_SECS` (10s, since the poller samples once a second) of the
+track's duration, or when the duration is unknown (`0`) and there is nothing to
+compare against. An exit well short of the end stops playback and says so —
+advancing there would walk the whole playlist in seconds, respawning mpv and
+yt-dlp for every track on the way.
+
+On a real end of track, `handle_track_ended()`:
+
+1. Rewinds the finished track's `last_position` to 0 and persists it. Left at
+   the end, replaying the track would open on top of EOF — and now that
+   finishing advances, skip straight past it.
+2. Picks the next track via `next_after_end()`, honouring the **playing**
+   playlist's `loop_mode` and `shuffle` — never the displayed playlist's, which
+   can be a different file entirely:
+   - `none` — play through and stop at the end. "None" turns *looping* off, not
+     advancing.
+   - `track` — repeat the same track, from the beginning.
+   - `playlist` — advance, wrapping from the end back to the start.
+3. Starts it via `play_session_track()`, which routes through `request_playback`
+   when the playing session is the displayed playlist (so the cursor and
+   `current_track` stay in step) and drives the session's own playlist copy
+   otherwise.
+
+Shuffle (`r`, per-playlist, persisted as `shuffle` in the TOML) is a stored
+permutation of the playlist's indices (`App::shuffle_order`, built by
+`playlist::shuffled_indices`), not a fresh random pick per step. That is what
+makes a shuffled walk visit every track exactly once before repeating and gives
+`b` a meaningful answer. The order is rebuilt when shuffle is toggled (either
+way, so toggling off and on reshuffles) and whenever it no longer matches the
+playlist file or its track count.
+
+**Shuffle applies only when no search filter is active.** The visible rows under
+a filter are a deliberate subset in a deliberate order, so `n`/`b` step through
+them sequentially and shuffle resumes once the filter is cleared. Both loop mode
+and shuffle show as badges in the footer's right-hand counters — without them,
+`l` and `r` gave no feedback that they had done anything.
 
 ### Concurrency model
 - Main thread: ratatui event loop (non-blocking via `event::poll` with 100ms timeout)

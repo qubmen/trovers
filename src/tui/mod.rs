@@ -7,7 +7,7 @@ mod ui_test;
 use crate::cache;
 use crate::config::{AudioQuality, Config};
 use crate::player::{self, Player};
-use crate::playlist::{CacheStatus, Playlist, Track};
+use crate::playlist::{self, CacheStatus, LoopMode, Playlist, Track};
 use crate::ytdlp::{self, TrackMeta};
 use anyhow::Result;
 use chrono::Utc;
@@ -117,6 +117,12 @@ pub const SETTINGS_ITEMS: &[SettingsItem] = &[
 /// periodic flush at all a hard kill discarded the entire session's progress.
 const POSITION_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
 
+/// How far short of a track's duration mpv may exit and still count as having
+/// reached the end. The position poller samples once a second, so the last
+/// reading always lags a little behind where mpv actually got to — and a stream
+/// whose reported duration is slightly optimistic lags further still.
+const EOF_SLACK_SECS: f64 = 10.0;
+
 // ── PlayingSession ────────────────────────────────────────────────────────
 
 /// Snapshot of the playlist/track that is actually driving playback right
@@ -212,6 +218,15 @@ pub struct App {
     /// `maybe_flush_position`.
     pub last_position_flush: Instant,
 
+    /// Shuffled traversal order over the tracks of `shuffle_order_path`, as
+    /// indices into that playlist's `tracks`. A stored permutation rather than a
+    /// random pick per step, so a shuffled walk hits every track once before
+    /// repeating and `b` can step back through it. Empty when shuffle is off.
+    pub shuffle_order: Vec<usize>,
+    /// The playlist `shuffle_order` was built for. An order is only valid for
+    /// one playlist file at one length; anything else forces a rebuild.
+    pub shuffle_order_path: Option<PathBuf>,
+
     // Context menu
     pub context_menu_selected: usize,
 
@@ -263,6 +278,8 @@ impl App {
             download_targets: HashMap::new(),
             pending_fetches: 0,
             last_position_flush: Instant::now(),
+            shuffle_order: Vec::new(),
+            shuffle_order_path: None,
             context_menu_selected: 0,
             target_playlist_for_url: None,
         };
@@ -453,6 +470,194 @@ impl App {
         self.player_generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    // ── Traversal order (shuffle) ─────────────────────────────────────────
+
+    /// Throw away the current shuffle order and build a fresh one for the
+    /// displayed playlist — or none at all if shuffle is off.
+    ///
+    /// Called when shuffle is toggled. Rebuilding on *both* edges means
+    /// toggling off and on again gives a new walk rather than resuming the old
+    /// one, which is what "shuffle again" is expected to do.
+    pub fn rebuild_shuffle_order(&mut self) {
+        if !self.playlist.shuffle {
+            self.shuffle_order.clear();
+            self.shuffle_order_path = None;
+            return;
+        }
+        self.shuffle_order =
+            playlist::shuffled_indices(self.playlist.tracks.len(), playlist::shuffle_seed());
+        self.shuffle_order_path = Some(self.playlist_path.clone());
+    }
+
+    /// Make sure `shuffle_order` is a usable permutation of `0..len` for the
+    /// playlist at `path`, building one if it is missing or was built for a
+    /// different playlist or a different track count (a track was added or
+    /// deleted, so the old order no longer covers it).
+    fn ensure_shuffle_order(&mut self, path: &Path, len: usize) {
+        let stale = self.shuffle_order_path.as_deref() != Some(path) || self.shuffle_order.len() != len;
+        if !stale {
+            return;
+        }
+        self.shuffle_order = playlist::shuffled_indices(len, playlist::shuffle_seed());
+        self.shuffle_order_path = Some(path.to_path_buf());
+    }
+
+    /// The track index that comes after (or before) `from` in the playlist at
+    /// `path`, following the shuffled order when `shuffle` is set and the plain
+    /// index order otherwise. Wraps at both ends; `None` only for an empty
+    /// playlist.
+    ///
+    /// Whether wrapping is *wanted* is the caller's business — `n`/`b` always
+    /// wrap, auto-advance consults `loop_mode` (see `next_after_end`).
+    pub fn step_index(
+        &mut self,
+        path: &Path,
+        len: usize,
+        shuffle: bool,
+        from: usize,
+        forward: bool,
+    ) -> Option<usize> {
+        if len == 0 {
+            return None;
+        }
+        let step = |pos: usize| {
+            if forward {
+                (pos + 1) % len
+            } else {
+                pos.checked_sub(1).unwrap_or(len - 1)
+            }
+        };
+
+        if !shuffle {
+            return Some(step(from.min(len - 1)));
+        }
+
+        self.ensure_shuffle_order(path, len);
+        // `from` outside the order means the caller is stepping from a track
+        // this order does not describe; plain index order is the safe answer.
+        let Some(pos) = self.shuffle_order.iter().position(|&i| i == from) else {
+            return Some(step(from.min(len - 1)));
+        };
+        self.shuffle_order.get(step(pos)).copied()
+    }
+
+    /// The track to play once the current one has finished, per `loop_mode`.
+    /// `None` means "stop here".
+    fn next_after_end(
+        &mut self,
+        path: &Path,
+        len: usize,
+        shuffle: bool,
+        from: usize,
+        loop_mode: &LoopMode,
+    ) -> Option<usize> {
+        match loop_mode {
+            LoopMode::Track => Some(from),
+            LoopMode::Playlist => self.step_index(path, len, shuffle, from, true),
+            LoopMode::None => {
+                // Play through and stop at the end — "none" turns *looping* off,
+                // not advancing. The end is the end of the shuffled walk when
+                // shuffle is on, which is not the last track by index.
+                let next = self.step_index(path, len, shuffle, from, true)?;
+                let wrapped = if shuffle {
+                    self.shuffle_order.first().copied() == Some(next)
+                } else {
+                    next == 0
+                };
+                if wrapped {
+                    None
+                } else {
+                    Some(next)
+                }
+            }
+        }
+    }
+
+    /// Whether the playing track had effectively reached its end at the point
+    /// mpv exited, and so whether that exit should be read as "track finished"
+    /// rather than "player died".
+    ///
+    /// A track whose duration is unknown (yt-dlp reported none) counts as
+    /// finished: there is nothing to compare against, and refusing to advance
+    /// would make auto-advance silently not work for those tracks.
+    fn reached_end_of_track(&self) -> bool {
+        let Some(track) = self.playing_track() else {
+            return false;
+        };
+        track.duration == 0 || self.position + EOF_SLACK_SECS >= track.duration as f64
+    }
+
+    /// The playing track reached its end. Rewind its resume point, then advance
+    /// per the **playing** playlist's `loop_mode` and `shuffle` — never the
+    /// displayed playlist's, since the two can be different files entirely.
+    pub fn handle_track_ended(&mut self) {
+        let Some(session) = self.playing.as_ref() else {
+            self.set_status("Playback finished");
+            return;
+        };
+        let path = session.path.clone();
+        let len = session.playlist.tracks.len();
+        let from = session.track_idx;
+        let loop_mode = session.playlist.loop_mode.clone();
+        let shuffle = session.playlist.shuffle;
+
+        // A track that ran to its end resumes from the start, not the end.
+        // Leaving `last_position` at the end would make a later replay open on
+        // top of EOF — and now that finishing a track advances, skip past it.
+        if let Some(track) = self.playing_track_mut() {
+            track.last_position = 0;
+        }
+        self.position = 0.0;
+        let _ = self.pos_tx.send(0.0);
+        self.save_playing_session_playlist();
+
+        match self.next_after_end(&path, len, shuffle, from, &loop_mode) {
+            Some(next) => self.play_session_track(next),
+            None => self.set_status("Playback finished"),
+        }
+    }
+
+    /// Start playback of index `idx` within the playlist that is *already*
+    /// driving playback, rather than the displayed one — auto-advance has to
+    /// follow the playing playlist even while the user browses another.
+    fn play_session_track(&mut self, idx: usize) {
+        let Some(session) = self.playing.as_ref() else {
+            return;
+        };
+
+        // Same file as the one on screen: go through the normal path so the
+        // displayed copy, its `current_track` and the cursor stay in step.
+        if session.path == self.playlist_path {
+            let start_pos = self.playlist.tracks.get(idx).and_then(input::resume_start_pos);
+            self.request_playback(idx, start_pos);
+            return;
+        }
+
+        let Some(track) = session.playlist.tracks.get(idx) else {
+            return;
+        };
+        let video_id = track.video_id.clone();
+        let start_pos = input::resume_start_pos(track);
+        let speed = track
+            .speed
+            .or(session.playlist.default_speed)
+            .unwrap_or(self.config.default_speed);
+        let source = match (&track.cache_status, &track.file) {
+            (CacheStatus::Cached, Some(file)) => PlaySource::File(file.clone()),
+            _ => PlaySource::Stream(track.url.clone()),
+        };
+
+        if let Some(session) = self.playing.as_mut() {
+            session.track_idx = idx;
+            session.playlist.current_track = Some(video_id.clone());
+        }
+        self.is_paused = false;
+        self.position = start_pos.unwrap_or(0.0);
+        let _ = self.pos_tx.send(self.position);
+        self.save_playing_session_playlist();
+        self.spawn_player_for(video_id, source, speed, start_pos);
+    }
+
     /// Start playback of the track at Vec index `idx` within the displayed
     /// playlist (`self.playlist`).
     /// `start_pos`: resume at this position in seconds (used when switching
@@ -480,8 +685,13 @@ impl App {
         // was browsing elsewhere while it played) — route the write through
         // whichever copy is the source of truth for that track's identity.
         if let Some(session) = self.playing.as_ref() {
-            let leaving_id = session.track().video_id.clone();
-            if leaving_id != video_id {
+            // Identity is `(path, video_id)`, not `video_id` alone: the same
+            // track can sit in two playlists, and starting playlist B's copy
+            // while playlist A's copy plays *is* leaving a track, so its
+            // position still has to be written. Comparing ids alone silently
+            // dropped that position.
+            let leaving = (session.path.clone(), session.track().video_id.clone());
+            if leaving != (self.playlist_path.clone(), video_id.clone()) {
                 let pos = self.position as u64;
                 if let Some(t) = self.playing_track_mut() {
                     t.last_position = pos;
@@ -763,9 +973,14 @@ impl App {
                         self.set_status(format!("Already in playlist: {status_title}"));
                         return;
                     }
-                    // Default: add to the active (displayed) playlist
+                    // Default: add to the active (displayed) playlist.
+                    //
+                    // The cursor deliberately stays where the user left it. It
+                    // used to jump to the new row, which meant adding a track
+                    // while browsing moved the selection out from under `Enter`
+                    // and `d` — and with a search filter active it jumped to a
+                    // row index that the filter does not even display.
                     self.playlist.tracks.push(track);
-                    self.selected = self.playlist.tracks.len() - 1;
                     self.save_playlist();
                     self.set_status(format!("Added: {status_title}"));
                 }
@@ -882,7 +1097,16 @@ impl App {
                 info!(generation, "mpv exited on its own");
                 self.player = None;
                 self.is_paused = false;
-                self.set_status("Playback finished");
+                if self.reached_end_of_track() {
+                    self.handle_track_ended();
+                } else {
+                    // mpv died well short of the end: a broken stream, a codec
+                    // it could not handle, an external kill. Advancing here
+                    // would walk the whole playlist in seconds, respawning mpv
+                    // and yt-dlp for every track on the way.
+                    warn!(position = self.position, "mpv exited before the end of the track");
+                    self.set_status("Playback stopped unexpectedly");
+                }
             }
         }
     }

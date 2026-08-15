@@ -43,6 +43,10 @@ pub struct Playlist {
     pub name: String,
     pub created: DateTime<Utc>,
     pub loop_mode: LoopMode,
+    /// Whether next/previous and auto-advance walk this playlist in a shuffled
+    /// order. `default` so playlists written before shuffle existed still load.
+    #[serde(default)]
+    pub shuffle: bool,
     pub default_speed: Option<f32>,
     pub tracks: Vec<Track>,
     pub current_track: Option<String>,
@@ -107,6 +111,7 @@ impl Playlist {
             name: name.to_string(),
             created: Utc::now(),
             loop_mode: LoopMode::None,
+            shuffle: false,
             default_speed: None,
             tracks: Vec::new(),
             current_track: None,
@@ -163,4 +168,36 @@ impl Playlist {
             None
         }
     }
+}
+
+/// A shuffled traversal order over `0..len`.
+///
+/// A permutation rather than a random pick per step: it is what makes a
+/// shuffled walk visit every track exactly once before repeating any, and what
+/// gives "previous" a meaningful answer. Reproducible from `seed`, which is
+/// what makes it testable — callers pass `shuffle_seed()` for a real shuffle.
+pub fn shuffled_indices(len: usize, seed: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..len).collect();
+    // Fisher-Yates. `xorshift64*` is plenty for deciding play order and saves a
+    // dependency; nothing here is security-sensitive.
+    let mut state = seed | 1;
+    let mut next = move || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    };
+    for i in (1..len).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        order.swap(i, j);
+    }
+    order
+}
+
+/// A seed for `shuffled_indices` taken from the clock.
+pub fn shuffle_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
 }

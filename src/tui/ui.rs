@@ -1,7 +1,7 @@
 use super::{effective_speed, App, Focus, InputMode, SidebarItem, SettingsItem, SETTINGS_ITEMS};
 use crate::tui::input::validate_playlist_name;
 use crate::config::AudioQuality;
-use crate::playlist::CacheStatus;
+use crate::playlist::{CacheStatus, LoopMode};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
@@ -790,7 +790,7 @@ fn footer_center_context(app: &App) -> String {
     format!("{focus} · {mode}")
 }
 
-fn footer_right_counters(app: &App) -> String {
+pub(crate) fn footer_right_counters(app: &App) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     if app.pending_fetches > 0 {
@@ -800,6 +800,19 @@ fn footer_right_counters(app: &App) -> String {
     let dl = app.downloading.len();
     if dl > 0 {
         parts.push(format!("↓{}", dl));
+    }
+
+    // Loop mode and shuffle both change what happens when a track ends, which
+    // is otherwise invisible until it happens — and `l`/`r` gave no feedback at
+    // all that they had done anything.
+    match app.playlist.loop_mode {
+        LoopMode::None => {}
+        LoopMode::Track => parts.push("↻ Track".to_string()),
+        LoopMode::Playlist => parts.push("↻ All".to_string()),
+    }
+
+    if app.playlist.shuffle {
+        parts.push("⇄ Shuffle".to_string());
     }
 
     if !app.filtered_indices.is_empty() {

@@ -15,6 +15,7 @@ mod tests {
             name: name.to_string(),
             created: chrono::Utc::now(),
             loop_mode: crate::playlist::LoopMode::None,
+            shuffle: false,
             default_speed: None,
             tracks: Vec::new(),
             current_track: None,
@@ -4685,6 +4686,14 @@ tracks = []
     /// needs nothing but mpv itself — no fixture file, no audible output.
     const SHORT_SILENT_SOURCE: &str = "av://lavfi:aevalsrc=0:d=1";
 
+    /// The real-mpv tests below share global state that cargo's test harness
+    /// knows nothing about: `/tmp` and this process's own pid. `live_own_sockets`
+    /// cannot tell *its* mpv from one another test happens to be running, and
+    /// `Player::drop` removes a socket file a concurrent test may be asserting
+    /// about. Run them one at a time.
+    static REAL_MPV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     /// Proves the whole symptom-1 chain is broken at the root: mpv runs without
     /// `--idle`, so it exits when the track ends, and the poller must notice and
     /// report it. Detection cannot key off the socket file — mpv leaves that on
@@ -4698,6 +4707,8 @@ tracks = []
     async fn real_mpv_exiting_at_end_of_track_is_reported_as_gone() {
         use std::sync::atomic::AtomicU64;
         use std::sync::Arc;
+
+        let _serial = REAL_MPV_LOCK.lock().await;
 
         let player = crate::player::Player::spawn(SHORT_SILENT_SOURCE, None)
             .await
@@ -4742,6 +4753,8 @@ tracks = []
     async fn real_mpv_poller_stops_without_publishing_when_superseded() {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
+
+        let _serial = REAL_MPV_LOCK.lock().await;
 
         let player = crate::player::Player::spawn(SHORT_SILENT_SOURCE, None)
             .await
@@ -4809,6 +4822,8 @@ tracks = []
     #[tokio::test]
     #[ignore = "spawns a real mpv process"]
     async fn real_mpv_is_killed_when_spawn_is_cancelled_midway() {
+        let _serial = REAL_MPV_LOCK.lock().await;
+
         let before = live_own_sockets().await;
 
         // Give the spawn long enough to fork mpv, but nowhere near long enough
@@ -5475,5 +5490,643 @@ tracks = []
             "read_dir order must not decide which file gets recorded"
         );
         assert_eq!(find_downloaded_file(dir.path(), "missing"), None);
+    }
+
+    // ── Phase 3: cursor, position and identity ──────────────────────────────
+
+    /// A playlist of `n` tracks named `A`, `B`, `C`, … saved to a tempdir.
+    fn app_with_tracks(n: usize) -> (tempfile::TempDir, std::path::PathBuf, crate::tui::App) {
+        let mut pl = make_playlist("Active");
+        for i in 0..n {
+            let id = ((b'A' + i as u8) as char).to_string();
+            pl.add_track(make_track(&id, &format!("Track {id}")));
+        }
+        app_on_disk(pl)
+    }
+
+    /// Drive the app to the state it is in while a track plays, without a real
+    /// mpv: the playing session is set, the position is wherever we say, and the
+    /// generation matches so `PlayerGone` is not discarded as stale.
+    fn pretend_playing(app: &mut crate::tui::App, idx: usize, position: f64) -> u64 {
+        app.playing = Some(crate::tui::PlayingSession {
+            path: app.playlist_path.clone(),
+            playlist: app.playlist.clone(),
+            track_idx: idx,
+        });
+        app.position = position;
+        app.player = Some(make_dead_player(dead_player_socket(&format!("phase3-{idx}"))));
+        app.player_generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn adding_a_track_leaves_the_cursor_where_the_user_put_it() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, _path, mut app) = app_with_tracks(3);
+        app.selected = 1;
+
+        app.handle_task_msg(TaskMsg::MetaReady {
+            url: "https://example.com/D".to_string(),
+            meta: meta_for("D", "Track D"),
+            target_path: None,
+        });
+
+        assert_eq!(app.playlist.tracks.len(), 4, "the track must still be added");
+        assert_eq!(
+            app.selected, 1,
+            "adding a track must not move the selection out from under the user"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_the_playing_track_resets_the_position() {
+        use crate::tui::input::handle_confirm_delete;
+
+        let (_dir, _path, mut app) = app_with_tracks(2);
+        pretend_playing(&mut app, 0, 95.0);
+        app.selected = 0;
+
+        handle_confirm_delete(&mut app, key(crossterm::event::KeyCode::Char('y'))).unwrap();
+
+        assert!(app.playing.is_none(), "playback must stop with the track gone");
+        assert_eq!(
+            app.position, 0.0,
+            "the deleted track's elapsed time must not carry over to the next one"
+        );
+        assert_eq!(*app.position_rx.borrow(), 0.0, "and the reset must reach the channel");
+    }
+
+    #[tokio::test]
+    async fn leaving_a_tracks_twin_in_another_playlist_still_saves_its_position() {
+        // The same track can live in two playlists. Starting playlist B's copy
+        // while playlist A's copy plays *is* leaving a track, so A's row has to
+        // record where it got to — comparing `video_id` alone said "same track,
+        // nothing to save" and silently dropped it.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let other_path = dir.path().join("Other.toml");
+        let mut other = make_playlist("Other");
+        other.add_track(make_track("shared", "Shared Track"));
+        other.save(&other_path).expect("save other");
+
+        let mut active = make_playlist("Active");
+        active.add_track(make_track("shared", "Shared Track"));
+        let active_path = dir.path().join("Active.toml");
+        active.save(&active_path).expect("save active");
+
+        let mut app = crate::tui::App::new(
+            active,
+            crate::config::Config::default(),
+            vec![
+                ("Active".to_string(), active_path.clone()),
+                ("Other".to_string(), other_path.clone()),
+            ],
+            active_path.clone(),
+        );
+
+        // `Other`'s copy is playing, 70s in, while `Active` is on screen.
+        app.playing = Some(crate::tui::PlayingSession {
+            path: other_path.clone(),
+            playlist: crate::playlist::Playlist::load(&other_path).expect("load other"),
+            track_idx: 0,
+        });
+        app.position = 70.0;
+
+        // Start the displayed playlist's own copy of the same track.
+        app.request_playback(0, None);
+
+        let saved = crate::playlist::Playlist::load(&other_path).expect("reload other");
+        assert_eq!(
+            saved.tracks[0].last_position, 70,
+            "the outgoing playlist's row must keep the position it reached"
+        );
+    }
+
+    // ── Phase 3: auto-advance at end of track ───────────────────────────────
+
+    #[tokio::test]
+    async fn finishing_a_track_advances_to_the_next_one() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, _path, mut app) = app_with_tracks(3);
+        let generation = pretend_playing(&mut app, 0, 180.0);
+
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(1),
+            "reaching the end of a track must start the next one — `l` cycled loop \
+             modes but nothing ever read them, so playback just stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn finishing_a_track_rewinds_its_resume_position() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, path, mut app) = app_with_tracks(2);
+        let generation = pretend_playing(&mut app, 0, 178.0);
+
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        let saved = crate::playlist::Playlist::load(&path).expect("load");
+        assert_eq!(
+            saved.tracks[0].last_position, 0,
+            "a track that played to its end must resume from the start, not sit at \
+             EOF where replaying it would end instantly"
+        );
+    }
+
+    #[tokio::test]
+    async fn finishing_the_last_track_stops_when_not_looping() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, _path, mut app) = app_with_tracks(3);
+        let generation = pretend_playing(&mut app, 2, 180.0);
+
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(2),
+            "loop mode `none` plays through and stops at the end rather than wrapping"
+        );
+        assert!(app.player.is_none(), "and no new player is started");
+    }
+
+    #[tokio::test]
+    async fn finishing_the_last_track_wraps_when_looping_the_playlist() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, _path, mut app) = app_with_tracks(3);
+        app.playlist.loop_mode = crate::playlist::LoopMode::Playlist;
+        let generation = pretend_playing(&mut app, 2, 180.0);
+
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(0),
+            "loop mode `playlist` wraps from the last track to the first"
+        );
+    }
+
+    #[tokio::test]
+    async fn finishing_a_track_replays_it_when_looping_the_track() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, _path, mut app) = app_with_tracks(3);
+        app.playlist.loop_mode = crate::playlist::LoopMode::Track;
+        let generation = pretend_playing(&mut app, 1, 180.0);
+
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(1),
+            "loop mode `track` repeats the same track"
+        );
+        assert_eq!(app.position, 0.0, "and restarts it from the beginning");
+    }
+
+    #[tokio::test]
+    async fn mpv_dying_mid_track_does_not_advance() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, _path, mut app) = app_with_tracks(3);
+        app.playlist.loop_mode = crate::playlist::LoopMode::Playlist;
+        // 3s into a 180s track: whatever killed mpv, it was not the end.
+        let generation = pretend_playing(&mut app, 0, 3.0);
+
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(0),
+            "treating an unexpected exit as EOF would walk the whole playlist in \
+             seconds, respawning mpv and yt-dlp for every track on the way"
+        );
+        assert!(app.player.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_track_of_unknown_duration_still_advances_at_its_end() {
+        use crate::tui::TaskMsg;
+
+        let mut pl = make_playlist("Active");
+        let mut first = make_track("A", "Track A");
+        // yt-dlp reports no duration for some sources, e.g. live streams.
+        first.duration = 0;
+        pl.add_track(first);
+        pl.add_track(make_track("B", "Track B"));
+        let (_dir, _path, mut app) = app_on_disk(pl);
+
+        let generation = pretend_playing(&mut app, 0, 12.0);
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(1),
+            "with no duration to compare against there is nothing to be suspicious \
+             of, and refusing to advance would break auto-advance for these tracks"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_advance_follows_the_playing_playlist_not_the_displayed_one() {
+        use crate::tui::TaskMsg;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // The playlist that is playing: two tracks, looping.
+        let other_path = dir.path().join("Other.toml");
+        let mut other = make_playlist("Other");
+        other.add_track(make_track("O1", "Other One"));
+        other.add_track(make_track("O2", "Other Two"));
+        other.loop_mode = crate::playlist::LoopMode::Playlist;
+        other.save(&other_path).expect("save other");
+
+        // The playlist on screen, with loop off — it must have no say here.
+        let (_d, active_path, mut app) = app_with_tracks(3);
+        app.available_playlists.push(("Other".to_string(), other_path.clone()));
+
+        app.playing = Some(crate::tui::PlayingSession {
+            path: other_path.clone(),
+            playlist: crate::playlist::Playlist::load(&other_path).expect("load other"),
+            track_idx: 0,
+        });
+        app.position = 180.0;
+        app.player = Some(make_dead_player(dead_player_socket("phase3-elsewhere")));
+        let generation = app.player_generation.load(std::sync::atomic::Ordering::SeqCst);
+
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        let session = app.playing.as_ref().expect("still playing");
+        assert_eq!(session.path, other_path, "playback must stay in its own playlist");
+        assert_eq!(
+            session.track_idx, 1,
+            "the next track must come from the playing playlist, not the displayed one"
+        );
+        assert_eq!(
+            app.playlist_path, active_path,
+            "and the displayed playlist must not change under the user"
+        );
+    }
+
+    // ── Phase 3: shuffle ────────────────────────────────────────────────────
+
+    #[test]
+    fn shuffled_indices_is_a_permutation() {
+        use crate::playlist::shuffled_indices;
+
+        for seed in [1u64, 42, 9_999, u64::MAX] {
+            let order = shuffled_indices(7, seed);
+            let mut sorted = order.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                sorted,
+                (0..7).collect::<Vec<_>>(),
+                "every track must appear exactly once (seed {seed}), else a shuffled \
+                 walk drops or repeats tracks"
+            );
+        }
+        assert_eq!(shuffled_indices(0, 1), Vec::<usize>::new());
+        assert_eq!(shuffled_indices(1, 1), vec![0]);
+    }
+
+    #[test]
+    fn shuffled_indices_actually_reorders() {
+        use crate::playlist::shuffled_indices;
+
+        let identity: Vec<usize> = (0..12).collect();
+        let shuffled_any = [1u64, 2, 3, 4, 5]
+            .iter()
+            .any(|&seed| shuffled_indices(12, seed) != identity);
+        assert!(
+            shuffled_any,
+            "a shuffle that returns the input order for every seed is not a shuffle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shuffled_walk_visits_every_track_once_before_repeating() {
+        let (_dir, path, mut app) = app_with_tracks(6);
+        app.playlist.shuffle = true;
+        app.rebuild_shuffle_order();
+
+        let mut visited = vec![0usize];
+        let mut at = 0usize;
+        for _ in 0..5 {
+            at = app.step_index(&path, 6, true, at, true).expect("a next track");
+            visited.push(at);
+        }
+
+        let mut sorted = visited.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            6,
+            "a shuffled walk must cover the playlist before repeating, got {visited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stepping_back_through_the_shuffled_order_returns_the_previous_track() {
+        let (_dir, path, mut app) = app_with_tracks(6);
+        app.playlist.shuffle = true;
+        app.rebuild_shuffle_order();
+
+        let next = app.step_index(&path, 6, true, 0, true).expect("next");
+        let back = app.step_index(&path, 6, true, next, false).expect("previous");
+
+        assert_eq!(
+            back, 0,
+            "`b` has to undo `n`, which is why the order is a stored permutation \
+             rather than a fresh random pick each step"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_shuffle_order_is_rebuilt_when_the_track_count_changes() {
+        let (_dir, path, mut app) = app_with_tracks(4);
+        app.playlist.shuffle = true;
+        app.rebuild_shuffle_order();
+        assert_eq!(app.shuffle_order.len(), 4);
+
+        // A track arrives while shuffle is on.
+        app.playlist.add_track(make_track("E", "Track E"));
+        let next = app.step_index(&path, 5, true, 0, true).expect("next");
+
+        assert_eq!(
+            app.shuffle_order.len(),
+            5,
+            "an order built for 4 tracks can never reach the 5th"
+        );
+        assert!(next < 5);
+    }
+
+    #[tokio::test]
+    async fn toggling_shuffle_saves_it_to_the_playlist() {
+        use crate::tui::input::handle_tracklist;
+
+        let (_dir, path, mut app) = app_with_tracks(4);
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('r')))
+            .await
+            .unwrap();
+        assert!(app.playlist.shuffle, "`r` must toggle shuffle on");
+        assert_eq!(app.shuffle_order.len(), 4, "and build an order to walk");
+        assert!(
+            crate::playlist::Playlist::load(&path).expect("load").shuffle,
+            "shuffle must survive a restart, like loop mode"
+        );
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('r')))
+            .await
+            .unwrap();
+        assert!(!app.playlist.shuffle, "`r` must toggle shuffle back off");
+        assert!(app.shuffle_order.is_empty());
+        assert!(!crate::playlist::Playlist::load(&path).expect("load").shuffle);
+    }
+
+    #[tokio::test]
+    async fn shuffle_is_ignored_while_a_search_filter_is_active() {
+        use crate::tui::input::handle_tracklist;
+
+        let (_dir, _path, mut app) = app_with_tracks(6);
+        app.playlist.shuffle = true;
+        app.rebuild_shuffle_order();
+        // Rows 1, 3 and 5 of the playlist, in that order.
+        app.filtered_indices = vec![1, 3, 5];
+        app.selected = 0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('n')))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.selected, 1,
+            "under a filter, `n` steps through what is shown; a shuffled hop inside \
+             a deliberate subset reads as a bug"
+        );
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(3),
+            "and plays the playlist row that cursor position maps to"
+        );
+    }
+
+    /// Pin the shuffled order to a known permutation, so a test asserting that
+    /// traversal *follows* it cannot pass by coincidence — a random order whose
+    /// successor of 0 happens to be 1 is indistinguishable from shuffle being
+    /// ignored entirely.
+    fn pin_shuffle_order(app: &mut crate::tui::App, order: Vec<usize>) {
+        app.playlist.shuffle = true;
+        app.shuffle_order = order;
+        app.shuffle_order_path = Some(app.playlist_path.clone());
+    }
+
+    #[tokio::test]
+    async fn next_follows_the_shuffled_order_when_unfiltered() {
+        use crate::tui::input::handle_tracklist;
+
+        let (_dir, _path, mut app) = app_with_tracks(8);
+        pin_shuffle_order(&mut app, vec![0, 5, 2, 7, 1, 4, 3, 6]);
+        app.selected = 0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('n')))
+            .await
+            .unwrap();
+
+        assert_eq!(app.selected, 5, "`n` must follow the shuffled order, not the index order");
+        assert_eq!(app.playing.as_ref().map(|p| p.track_idx), Some(5));
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('b')))
+            .await
+            .unwrap();
+        assert_eq!(app.selected, 0, "and `b` must walk back along it");
+    }
+
+    #[tokio::test]
+    async fn finishing_a_track_advances_along_the_shuffled_order() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, _path, mut app) = app_with_tracks(6);
+        app.playlist.loop_mode = crate::playlist::LoopMode::Playlist;
+        pin_shuffle_order(&mut app, vec![0, 4, 1, 5, 2, 3]);
+
+        let generation = pretend_playing(&mut app, 0, 180.0);
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(4),
+            "auto-advance must follow the same order `n` does"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shuffled_playlist_stops_at_the_end_of_its_walk_when_not_looping() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, _path, mut app) = app_with_tracks(5);
+        // The walk ends on track 2, which is neither the last track by index nor
+        // adjacent to it — so "stopped at the end" cannot be index arithmetic
+        // getting lucky.
+        pin_shuffle_order(&mut app, vec![4, 0, 3, 1, 2]);
+
+        let generation = pretend_playing(&mut app, 2, 180.0);
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(2),
+            "loop mode `none` stops at the end of the shuffled walk, not at the last \
+             track by index"
+        );
+        assert!(app.player.is_none(), "and starts no new player");
+    }
+
+    #[tokio::test]
+    async fn a_shuffled_playlist_wraps_to_the_start_of_its_walk_when_looping() {
+        use crate::tui::TaskMsg;
+
+        let (_dir, _path, mut app) = app_with_tracks(5);
+        app.playlist.loop_mode = crate::playlist::LoopMode::Playlist;
+        pin_shuffle_order(&mut app, vec![4, 0, 3, 1, 2]);
+
+        let generation = pretend_playing(&mut app, 2, 180.0);
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_idx),
+            Some(4),
+            "looping a shuffled playlist returns to the start of the walk"
+        );
+    }
+
+    // ── Phase 3: mpv IPC must not be able to hang the UI ────────────────────
+
+    /// Stand in for mpv on a real Unix socket: accept one connection, then send
+    /// each of `lines` (newline-terminated) — or nothing at all, to imitate an
+    /// mpv that has wedged. Returns the socket path; the listener task ends with
+    /// the test.
+    async fn fake_mpv_socket(tag: &str, lines: Vec<String>) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("trovers-test-ipc-{tag}.sock"));
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind fake mpv socket");
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            // Wait for the command before answering, like mpv does.
+            let mut byte = [0u8; 1];
+            loop {
+                match tokio::io::AsyncReadExt::read_exact(&mut stream, &mut byte).await {
+                    Ok(_) if byte[0] == b'\n' => break,
+                    Ok(_) => {}
+                    Err(_) => return,
+                }
+            }
+            for line in lines {
+                let payload = format!("{line}\n");
+                if tokio::io::AsyncWriteExt::write_all(&mut stream, payload.as_bytes())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // Hold the connection open so a caller expecting more gets silence
+            // rather than EOF.
+            std::future::pending::<()>().await;
+        });
+        path
+    }
+
+    #[tokio::test]
+    async fn ipc_gives_up_on_an_mpv_that_never_answers() {
+        let path = fake_mpv_socket("hung", Vec::new()).await;
+        let player = make_dead_player(path.clone());
+
+        let started = std::time::Instant::now();
+        let result = player
+            .send_command_with_timeout(
+                serde_json::json!({"command": ["get_property", "time-pos"]}),
+                std::time::Duration::from_millis(120),
+            )
+            .await;
+
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            result.is_err(),
+            "an mpv that accepts the connection and then goes quiet must not park \
+             the future forever — key handling awaits this inline on the render \
+             loop, so that was the whole UI frozen with no way out"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "and it must give up at the deadline, not eventually"
+        );
+    }
+
+    #[tokio::test]
+    async fn ipc_skips_the_events_mpv_pushes_unprompted() {
+        // mpv forwards events to every connected client, interleaved with command
+        // replies. Reading the first line as the reply meant an event arriving in
+        // the window between writing a command and reading its answer was parsed
+        // as that answer.
+        let path = fake_mpv_socket(
+            "events",
+            vec![
+                r#"{"event":"playback-restart"}"#.to_string(),
+                r#"{"event":"audio-reconfig"}"#.to_string(),
+                r#"{"data":41.5,"error":"success"}"#.to_string(),
+            ],
+        )
+        .await;
+        let player = make_dead_player(path.clone());
+
+        let resp = player
+            .send_command_with_timeout(
+                serde_json::json!({"command": ["get_property", "time-pos"]}),
+                std::time::Duration::from_secs(2),
+            )
+            .await
+            .expect("the reply must be found past the events");
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            resp["data"].as_f64(),
+            Some(41.5),
+            "the position must come from mpv's reply, not from whichever event \
+             happened to arrive first"
+        );
+    }
+
+    #[test]
+    fn the_footer_shows_loop_mode_and_shuffle() {
+        use crate::tui::ui::footer_right_counters;
+
+        let mut app = make_app_with_playlists("Active", &["Active"]);
+        assert!(
+            !footer_right_counters(&app).contains('↻'),
+            "loop mode `none` is the default and needs no badge"
+        );
+
+        app.playlist.loop_mode = crate::playlist::LoopMode::Track;
+        assert!(footer_right_counters(&app).contains("↻ Track"));
+
+        app.playlist.loop_mode = crate::playlist::LoopMode::Playlist;
+        assert!(footer_right_counters(&app).contains("↻ All"));
+
+        app.playlist.shuffle = true;
+        let footer = footer_right_counters(&app);
+        assert!(
+            footer.contains("⇄ Shuffle") && footer.contains("↻ All"),
+            "both states have to be visible at once, got {footer:?}"
+        );
     }
 }

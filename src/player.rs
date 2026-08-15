@@ -16,6 +16,15 @@ static SOCKET_SEQ: AtomicU32 = AtomicU32::new(0);
 const SOCKET_DIR: &str = "/tmp";
 const SOCKET_PREFIX: &str = "trovers-";
 
+/// How long any single mpv IPC exchange may take before it is abandoned.
+/// Generous for a local socket, and short enough that a wedged mpv costs one
+/// noticeable pause rather than a permanently frozen UI.
+const IPC_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How many unsolicited event lines to skip while looking for a command reply
+/// before giving up. A bound, not an expectation — mpv normally sends none.
+const MAX_IPC_EVENT_LINES: usize = 32;
+
 pub struct Player {
     pub process: Child,
     pub socket_path: PathBuf,
@@ -80,28 +89,33 @@ impl Player {
 
     /// Send a raw JSON command over the IPC socket and return the response value.
     pub async fn send_command(&self, cmd: serde_json::Value) -> Result<serde_json::Value> {
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .await
-            .context("failed to connect to mpv IPC socket")?;
+        self.send_command_with_timeout(cmd, IPC_TIMEOUT).await
+    }
 
-        let mut payload = cmd.to_string();
-        payload.push('\n');
-        stream.write_all(payload.as_bytes()).await?;
+    /// `send_command` with an explicit deadline, so tests do not have to wait out
+    /// the real one.
+    pub async fn send_command_with_timeout(
+        &self,
+        cmd: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value> {
+        // The whole exchange is bounded, not just the connect. An mpv that
+        // accepts the connection and then never answers used to park this future
+        // forever — and since key handling awaits it inline on the render loop,
+        // that was the entire UI frozen with no way out.
+        tokio::time::timeout(timeout, async {
+            let mut stream = UnixStream::connect(&self.socket_path)
+                .await
+                .context("failed to connect to mpv IPC socket")?;
 
-        // Read response (terminated by newline)
-        let mut buf = Vec::new();
-        let mut byte = [0u8; 1];
-        loop {
-            stream.read_exact(&mut byte).await?;
-            if byte[0] == b'\n' {
-                break;
-            }
-            buf.push(byte[0]);
-        }
+            let mut payload = cmd.to_string();
+            payload.push('\n');
+            stream.write_all(payload.as_bytes()).await?;
 
-        let response: serde_json::Value =
-            serde_json::from_slice(&buf).context("failed to parse mpv IPC response")?;
-        Ok(response)
+            read_reply(&mut stream).await
+        })
+        .await
+        .with_context(|| format!("mpv IPC timed out after {timeout:?}"))?
     }
 
     pub async fn pause(&self) -> Result<()> {
@@ -224,13 +238,18 @@ async fn poll_time_pos(socket_path: &Path) -> PollOutcome {
         }
     };
 
-    match query_time_pos(&mut stream).await {
-        Ok(Some(pos)) => PollOutcome::Position(pos),
-        Ok(None) => PollOutcome::NotReady,
+    // Bounded: an mpv that accepts the connection and then goes quiet would
+    // otherwise park this poller forever, and a poller that never returns never
+    // reports `Gone` either — so the app would keep a dead `Player` for good.
+    // A timeout says nothing about whether mpv is alive, so it is `Transient`
+    // and the next tick tries again.
+    match tokio::time::timeout(IPC_TIMEOUT, query_time_pos(&mut stream)).await {
+        Ok(Ok(Some(pos))) => PollOutcome::Position(pos),
+        Ok(Ok(None)) => PollOutcome::NotReady,
         // Connected, then the exchange broke — most likely mpv shutting down
         // mid-request. The next poll will see the refused connection and report
         // it properly.
-        Err(_) => PollOutcome::Transient,
+        Ok(Err(_)) | Err(_) => PollOutcome::Transient,
     }
 }
 
@@ -241,18 +260,41 @@ async fn query_time_pos(stream: &mut UnixStream) -> Result<Option<f64>> {
     payload.push('\n');
     stream.write_all(payload.as_bytes()).await?;
 
+    let resp = read_reply(stream).await?;
+    Ok(resp["data"].as_f64())
+}
+
+/// Read one line from the socket.
+async fn read_line(stream: &mut UnixStream) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     loop {
         stream.read_exact(&mut byte).await?;
         if byte[0] == b'\n' {
-            break;
+            return Ok(buf);
         }
         buf.push(byte[0]);
     }
+}
 
-    let resp: serde_json::Value = serde_json::from_slice(&buf)?;
-    Ok(resp["data"].as_f64())
+/// Read mpv's reply to a command, skipping event lines.
+///
+/// mpv pushes events (`{"event":"playback-restart"}` and friends) to every
+/// connected client, unprompted and interleaved with command replies. Taking the
+/// first line as the reply meant an event arriving in the window between writing
+/// a command and reading its answer was parsed as that answer — a `time-pos`
+/// poll silently lost, or a command reported as failed when it had succeeded.
+/// Replies are distinguishable: mpv puts an `error` field on every one.
+async fn read_reply(stream: &mut UnixStream) -> Result<serde_json::Value> {
+    for _ in 0..MAX_IPC_EVENT_LINES {
+        let line = read_line(stream).await?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&line).context("failed to parse mpv IPC response")?;
+        if value.get("error").is_some() {
+            return Ok(value);
+        }
+    }
+    bail!("mpv sent only events, no reply, in {MAX_IPC_EVENT_LINES} lines")
 }
 
 /// Quit and unlink mpv IPC sockets left behind by trovers instances that died

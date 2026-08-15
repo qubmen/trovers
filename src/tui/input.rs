@@ -313,36 +313,20 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             app.save_playlist();
         }
 
-        // Next / Previous: always step relative to the cursor position in
-        // the *displayed* playlist (`app.selected`), wrapping at its bounds,
-        // and play the resulting displayed-playlist track — regardless of
-        // where the currently-playing track (if any) actually lives. This
-        // matches "browsing playlist X and pressing n/b walks X's tracks"
-        // even while something else plays in the background.
-        KeyCode::Char('n') => {
-            let count = app.visible_track_count();
-            if count > 0 {
-                let next_cursor = (app.selected + 1) % count;
-                app.selected = next_cursor;
-                app.clamp_scroll();
-                if let Some(idx) = app.track_index_at(next_cursor) {
-                    let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
-                    app.request_playback(idx, start_pos);
-                }
-            }
+        // Toggle shuffle for the displayed playlist.
+        KeyCode::Char('r') => {
+            app.playlist.shuffle = !app.playlist.shuffle;
+            app.rebuild_shuffle_order();
+            app.save_playlist();
+            app.set_status(if app.playlist.shuffle {
+                "Shuffle on"
+            } else {
+                "Shuffle off"
+            });
         }
-        KeyCode::Char('b') => {
-            let count = app.visible_track_count();
-            if count > 0 {
-                let prev_cursor = app.selected.checked_sub(1).unwrap_or(count - 1);
-                app.selected = prev_cursor;
-                app.clamp_scroll();
-                if let Some(idx) = app.track_index_at(prev_cursor) {
-                    let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
-                    app.request_playback(idx, start_pos);
-                }
-            }
-        }
+
+        KeyCode::Char('n') => step_track(app, true),
+        KeyCode::Char('b') => step_track(app, false),
 
         // Add URL
         KeyCode::Char('a') => {
@@ -384,6 +368,47 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
     }
 
     Ok(Action::Continue)
+}
+
+/// `n` / `b`: step to the next/previous track of the *displayed* playlist and
+/// play it, moving the cursor with it — regardless of where the currently
+/// playing track (if any) actually lives. This is what makes "browsing playlist
+/// X and pressing n/b walks X's tracks" hold even while something else plays in
+/// the background. Both directions wrap at the bounds.
+///
+/// Shuffle applies only when no search filter is active. The visible rows under
+/// a filter are already a deliberate subset in a deliberate order, and hopping
+/// around inside it at random reads as a bug rather than a feature — so a filter
+/// steps sequentially through what it shows, and shuffle resumes once cleared.
+fn step_track(app: &mut App, forward: bool) {
+    let count = app.visible_track_count();
+    if count == 0 {
+        return;
+    }
+
+    let filtered = !app.filtered_indices.is_empty();
+    let next_cursor = if filtered || !app.playlist.shuffle {
+        if forward {
+            (app.selected + 1) % count
+        } else {
+            app.selected.checked_sub(1).unwrap_or(count - 1)
+        }
+    } else {
+        // Unfiltered, so cursor position and track index are the same thing and
+        // the shuffled step is directly usable as a cursor position.
+        let path = app.playlist_path.clone();
+        match app.step_index(&path, count, true, app.selected, forward) {
+            Some(idx) => idx,
+            None => return,
+        }
+    };
+
+    app.selected = next_cursor;
+    app.clamp_scroll();
+    if let Some(idx) = app.track_index_at(next_cursor) {
+        let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+        app.request_playback(idx, start_pos);
+    }
 }
 
 /// Adjust the speed of the track actually driving playback right now (per
@@ -624,6 +649,12 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
                 app.playing = None;
                 app.playlist.current_track = None;
                 app.is_paused = false;
+                // Nothing is playing any more, so the elapsed time belongs to
+                // no track. Left as it was, it kept counting against whatever
+                // was played next — and the playback bar showed a position for
+                // a track that had been deleted.
+                app.position = 0.0;
+                let _ = app.pos_tx.send(0.0);
             }
 
             let file_to_delete = app.playlist.tracks[idx].file.clone();
