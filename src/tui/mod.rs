@@ -374,6 +374,64 @@ impl App {
         }
     }
 
+    /// Kick off a background download for `video_id` and record which
+    /// playlist file it belongs to, so `DownloadDone`/`DownloadError` patch
+    /// the right row even if the user has since switched to browsing a
+    /// different playlist. Shared by the add-track flow and the manual
+    /// recache key (`c`) — both need identical bookkeeping, just triggered
+    /// differently and (for recache) regardless of the track's current
+    /// `cache_status`.
+    ///
+    /// Retries on failure (`ytdlp::download_with_retries`), so a track only
+    /// reaches `Failed` after every attempt has been exhausted.
+    fn start_download(&mut self, owning_path: PathBuf, video_id: String, url: String) {
+        self.downloading.insert(video_id.clone());
+        self.download_targets.insert(video_id.clone(), owning_path);
+
+        let task_tx = self.task_tx.clone();
+        let dl_tx = self.download_tx.clone();
+        let quality = self.config.audio_quality.clone();
+        let audio_dir = cache::audio_dir();
+        let vid = video_id.clone();
+        tokio::spawn(async move {
+            match ytdlp::download_with_retries(&url, &audio_dir, &vid, &quality, dl_tx).await {
+                Ok(file) => {
+                    let _ = task_tx.send(TaskMsg::DownloadDone { video_id: vid, file });
+                }
+                Err(e) => {
+                    let _ = task_tx.send(TaskMsg::DownloadError {
+                        video_id: vid,
+                        err: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Force a fresh download of the track at `idx` in the displayed playlist,
+    /// regardless of its current `cache_status` — `cached` (overwrites the
+    /// existing file), `streaming`, or `failed` all go through the same path.
+    /// A no-op, with a status message, if a download for it is already running.
+    pub fn recache_track(&mut self, idx: usize) {
+        let Some(track) = self.playlist.tracks.get(idx) else {
+            return;
+        };
+        let video_id = track.video_id.clone();
+        if self.downloading.contains(&video_id) {
+            self.set_status("Already downloading");
+            return;
+        }
+        let url = track.url.clone();
+        let title = track.title.clone();
+        let owning_path = self.playlist_path.clone();
+
+        self.patch_and_save_playlist(&owning_path, &video_id, |t| {
+            t.cache_status = CacheStatus::Downloading;
+        });
+        self.start_download(owning_path, video_id, url);
+        self.set_status(format!("Recaching: {title}"));
+    }
+
     /// Forget every trace of an in-flight download for `video_id`.
     ///
     /// Called when the row the download was going to fill disappears (track
@@ -984,30 +1042,7 @@ impl App {
                     self.save_playlist();
                     self.set_status(format!("Added: {status_title}"));
                 }
-                self.downloading.insert(video_id.clone());
-                // Remember which playlist file this download belongs to so
-                // `DownloadDone` can patch the correct file on disk, even if the
-                // user has since switched to browsing a different playlist.
-                self.download_targets.insert(video_id.clone(), owning_path.clone());
-
-                let task_tx = self.task_tx.clone();
-                let dl_tx = self.download_tx.clone();
-                let quality = self.config.audio_quality.clone();
-                let audio_dir = cache::audio_dir();
-                let vid = video_id.clone();
-                tokio::spawn(async move {
-                    match ytdlp::spawn_download(&url, &audio_dir, &vid, &quality, dl_tx).await {
-                        Ok(file) => {
-                            let _ = task_tx.send(TaskMsg::DownloadDone { video_id: vid, file });
-                        }
-                        Err(e) => {
-                            let _ = task_tx.send(TaskMsg::DownloadError {
-                                video_id: vid,
-                                err: e.to_string(),
-                            });
-                        }
-                    }
-                });
+                self.start_download(owning_path, video_id, url);
             }
 
             TaskMsg::MetaError { url, err } => {
@@ -1047,17 +1082,23 @@ impl App {
             }
 
             TaskMsg::DownloadError { video_id, err } => {
-                error!(video_id = %video_id, err = %err, "download failed");
+                error!(video_id = %video_id, err = %err, "download failed after all retries");
                 // Roll the row back off `downloading`, otherwise it keeps
                 // claiming a download is in progress until the next
                 // `Playlist::load` happens to reset it.
+                //
+                // `Failed`, not `Streaming`: streaming still works fine, but the
+                // track was tried and given up on, which is worth surfacing —
+                // unlike a track nobody has ever attempted to cache. Recoverable
+                // with the recache key (`c`), which does not care what state it
+                // finds the row in.
                 let owning_path = self
                     .download_targets
                     .get(&video_id)
                     .cloned()
                     .unwrap_or_else(|| self.playlist_path.clone());
                 self.patch_and_save_playlist(&owning_path, &video_id, |track| {
-                    track.cache_status = CacheStatus::Streaming;
+                    track.cache_status = CacheStatus::Failed;
                 });
                 self.clear_download_state(&video_id);
                 self.set_status("Download failed");

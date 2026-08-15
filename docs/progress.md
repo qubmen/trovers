@@ -37,6 +37,7 @@ Legend: ✅ done · 🚧 stub/partial · ⬜ not started
 | `ytdlp::fetch_metadata()` | ✅ | all fields optional with fallbacks |
 | `ytdlp::get_stream_url()` | ✅ | first line of `--get-url` output only |
 | `ytdlp::spawn_download()` | ✅ | parses **stdout** progress (`--newline`), watch channel; scratch files removed on failure |
+| `ytdlp::download_with_retries()` | ✅ | 3 attempts total, 15s/60s backoff; row goes to `failed` only once every attempt is spent |
 | `player::Player::spawn()` | ✅ | retry socket up to 20×50ms, `kill_on_drop` |
 | `player::Player::send_command()` | ✅ | JSON over Unix socket, 2s timeout, skips mpv's unsolicited events |
 | `player` pause/resume/seek/speed/volume | ✅ | all IPC wrappers implemented; never `?`-propagated into the event loop |
@@ -73,6 +74,7 @@ Legend: ✅ done · 🚧 stub/partial · ⬜ not started
 | Loop / shuffle (l, r) | ✅ | both take effect at end of track; badges in the footer |
 | Search mode (/) | ✅ | live filter |
 | Delete with confirm (d → y/n) | ✅ | |
+| Recache (c) | ✅ | forces a fresh, retrying download regardless of current status; `downloading`/`failed` get their own icon color (yellow/red) in the track table and Now Playing |
 
 ---
 

@@ -102,13 +102,21 @@ trovers [<URL>]
                ├─ mpv spawned with IPC socket /tmp/trovers-<pid>.sock
                │       └─ resume from last_position if > 0
                │
-               ├─ yt-dlp download progress parsed from stderr → caching bar in TUI
+               ├─ yt-dlp download progress parsed from stdout → caching bar in TUI
                │
-               └─ on download complete:
-                       ├─ set cache_status: cached, file: <path> in playlist TOML
-                       └─ if this track is the one actually playing: kill the
-                          streaming mpv process and respawn it against the local
-                          file, resuming at the current live position (hot-switch)
+               ├─ on download success:
+               │       ├─ set cache_status: cached, file: <path> in playlist TOML
+               │       └─ if this track is the one actually playing: kill the
+               │          streaming mpv process and respawn it against the local
+               │          file, resuming at the current live position (hot-switch)
+               │
+               └─ on download failure: retry up to 3 attempts total, with a
+                  delay between them (15s, then 60s) — most failures are a
+                  transient HTTP 403 from YouTube's throttling, gone by the
+                  next try. Only after every attempt is exhausted does the row
+                  go to cache_status: failed. Recoverable any time with `c`
+                  (recache), which forces a fresh download regardless of the
+                  row's current status.
 ```
 
 ---
@@ -216,10 +224,16 @@ domains, just take whatever host the URL contains.
 ### cache_status values
 - `cached` — audio file exists on disk, play locally
 - `streaming` — no local file, will stream via mpv + download in background
-- `downloading` — currently being downloaded (transient state, set while yt-dlp runs)
+- `downloading` — currently being downloaded, including any retry attempts and
+  the delay between them (transient state, set while `ytdlp::download_with_retries` runs)
+- `failed` — every retry attempt was exhausted. Unlike `downloading`, this is a
+  real terminal state, not a crash artifact — it is not reset on load, and
+  playback still works fine via streaming. Cleared only by a fresh download,
+  automatic (re-adding the same URL) or manual (`c`, recache).
 
 **Startup recovery:** on `Playlist::load()`, any track with `cache_status = "downloading"`
 must be reset to `"streaming"`. This handles the case where the app crashed mid-download.
+`"failed"` is left untouched — see above.
 
 ### Per-track speed
 Speed is stored per-track and persisted between sessions. When a track is played,
@@ -251,7 +265,8 @@ Built with **ratatui**. Full-screen, keyboard-driven, no mouse support.
 | `ACCENT`        | `#CE412B` | Rust Orange — focused borders, selection bg              |
 | `ACCENT_DIM`    | `#642015` | Dimmed ACCENT — selection background in track table rows |
 | `SEA_GREEN`     | `#20B288` | Playback progress bar, currently-playing row             |
-| `GOLD`          | `#D4AF37` | 🎵 Now Playing header label, caching progress bar        |
+| `GOLD`          | `#D4AF37` | 🎵 Now Playing header label, caching progress bar, `downloading` status icon |
+| `ERROR_RED`     | `#DC3C3C` | `failed` cache status icon (track table + Now Playing)   |
 | `TEXT_DIM`      | `#828282` | Secondary text, disabled items                           |
 | `BORDER_IDLE`   | `#464646` | Unfocused panel borders                                  |
 | `ITEM_DISABLED` | `#5A5A5A` | Non-interactive sidebar items (Music / Video labels)     |
@@ -398,6 +413,7 @@ route flushes state and kills mpv.
 | `a`              | Add track: open URL input prompt                |
 | `/`              | Search/filter tracks (live, case-insensitive)   |
 | `d`              | Delete selected track (confirm prompt)          |
+| `c`              | Recache: force a fresh download of the selected track, regardless of its current cache status (overwrites an existing file; no-op if a download for it is already running) |
 | `N`              | Create new playlist (name prompt)               |
 
 ### Sidebar focus
@@ -505,6 +521,23 @@ and `.temp` intermediates are removed. A finished `<video_id>.opus` is
 deliberately **not** touched — a download is spawned even when the track is
 already cached from another playlist, so deleting every `<video_id>.*` on failure
 would destroy a file other playlists still play.
+
+### ytdlp.rs — retrying a failed download
+`download_with_retries` wraps `spawn_download` in up to 3 attempts total, with a
+delay between failures (`RETRY_DELAYS`: 15s, then 60s — quick retry first in
+case it was a one-off blip, longer wait for the second in case it's a
+short-lived block). Most download failures observed in practice are an HTTP 403
+from YouTube's anti-bot throttling, which is transient: the same URL that fails
+once often succeeds moments later. The retry loop itself
+(`retry_with_backoff`) is generic over the attempt closure specifically so it
+can be unit-tested without shelling out to yt-dlp.
+
+`cache_status` stays `downloading` for the whole sequence — attempts and the
+waits between them — and only changes at the very end: `cached` on success,
+`failed` once every attempt is spent. This is also why the caching bar in Now
+Playing (which reads `cache_status`/`downloading`) does not need to know
+anything about retries — it just keeps showing "downloading" until there is a
+real answer.
 
 ### ytdlp.rs — stream URL
 `get_stream_url` takes the **first non-blank line** of `--get-url` output. A

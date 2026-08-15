@@ -1,15 +1,24 @@
 use crate::config::AudioQuality;
 use anyhow::{bail, Context, Result};
 use regex::Regex;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
+use tokio::time::{sleep, Duration};
+use tracing::warn;
 
 /// How many trailing stderr lines to keep as the reason for a failed download.
 /// yt-dlp is chatty; the tail is where the actual `ERROR:` line lands.
 const STDERR_TAIL_LINES: usize = 10;
+
+/// Delay before each retry of a failed download. A quick retry first, in case
+/// the failure (commonly an HTTP 403 from YouTube's anti-bot throttling) was a
+/// one-off blip; a longer wait for the second, in case it's a short-lived block.
+/// Three attempts total, ~75s worst case before giving up.
+const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(15), Duration::from_secs(60)];
 
 static PROGRESS_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[download\]\s+([\d.]+)%").unwrap());
@@ -102,6 +111,48 @@ pub async fn get_stream_url(url: &str, quality: &AudioQuality) -> Result<String>
     let stream_url = first_url_line(&stdout).context("yt-dlp returned an empty stream URL")?;
 
     Ok(stream_url)
+}
+
+/// Retry `attempt` up to `delays.len() + 1` times, sleeping `delays[i]` between
+/// the `i`th failure and the next try. Returns the last error if every attempt
+/// fails. Generic over the attempt itself so the backoff logic is testable
+/// without shelling out to yt-dlp.
+pub(crate) async fn retry_with_backoff<F, Fut, T>(delays: &[Duration], mut attempt: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut i = 0;
+    loop {
+        match attempt().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if i >= delays.len() {
+                    return Err(e);
+                }
+                warn!(attempt = i + 1, err = %e, "attempt failed, retrying");
+                sleep(delays[i]).await;
+                i += 1;
+            }
+        }
+    }
+}
+
+/// `spawn_download`, retried on failure per `RETRY_DELAYS`. This is what the
+/// caller should use for a download that should recover from a transient
+/// failure (an HTTP 403 that goes away on its own) on its own, rather than
+/// leaving the track stuck at `streaming` after the first hiccup.
+pub async fn download_with_retries(
+    url: &str,
+    audio_dir: &Path,
+    video_id: &str,
+    quality: &AudioQuality,
+    progress_tx: watch::Sender<(String, f32)>,
+) -> Result<PathBuf> {
+    retry_with_backoff(&RETRY_DELAYS, || {
+        spawn_download(url, audio_dir, video_id, quality, progress_tx.clone())
+    })
+    .await
 }
 
 /// Spawn a yt-dlp download, reporting progress via watch channel.

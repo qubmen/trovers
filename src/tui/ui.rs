@@ -20,6 +20,8 @@ const ACCENT: Color = Color::Rgb(206, 65, 43);
 const ACCENT_DIM: Color = Color::Rgb(100, 32, 21);
 const SEA_GREEN: Color = Color::Rgb(32, 178, 136);
 const GOLD: Color = Color::Rgb(212, 175, 55);
+/// A download that exhausted every retry attempt.
+const ERROR_RED: Color = Color::Rgb(220, 60, 60);
 const TEXT_DIM: Color = Color::Rgb(130, 130, 130);
 const BORDER_IDLE: Color = Color::Rgb(70, 70, 70);
 /// Color for non-interactive / disabled sidebar items.
@@ -232,14 +234,24 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_selected = cursor == app.selected;
 
             let play_icon = if is_playing { "▶" } else { " " };
-            let status_icon = if app.downloading.contains(&track.video_id) {
-                "⟳"
+            // `None` means "no distinct color" — the icon just takes whatever
+            // the row's own style is (selected/playing/default), same as
+            // every other cell in the row. `Cached`/`Streaming` stay that way
+            // since neither is actionable; `Downloading` and `Failed` get a
+            // fixed color so they read as a status regardless of selection.
+            let (status_icon, status_color) = if app.downloading.contains(&track.video_id) {
+                ("⟳", Some(GOLD))
             } else {
                 match track.cache_status {
-                    CacheStatus::Cached => "◈",
-                    CacheStatus::Streaming => "◌",
-                    CacheStatus::Downloading => "⟳",
+                    CacheStatus::Cached => ("◈", None),
+                    CacheStatus::Streaming => ("◌", None),
+                    CacheStatus::Downloading => ("⟳", Some(GOLD)),
+                    CacheStatus::Failed => ("✕", Some(ERROR_RED)),
                 }
+            };
+            let status_span = match status_color {
+                Some(color) => Span::styled(status_icon, Style::new().fg(color)),
+                None => Span::raw(status_icon),
             };
 
             let row_style = if is_playing && is_selected {
@@ -265,7 +277,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
             Some(
                 Row::new(vec![
-                    Cell::from(format!("{play_icon} {status_icon}")),
+                    Cell::from(Line::from(vec![Span::raw(format!("{play_icon} ")), status_span])),
                     Cell::from(Span::styled(num_str, Style::new().fg(TEXT_DIM))),
                     Cell::from(title_str),
                     Cell::from(Span::styled(artist_str, Style::new().fg(TEXT_DIM))),
@@ -540,6 +552,7 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
             CacheStatus::Cached => CacheState::Cached,
             CacheStatus::Streaming => CacheState::Streaming,
             CacheStatus::Downloading => CacheState::Downloading(track_progress()),
+            CacheStatus::Failed => CacheState::Failed,
         }
     };
 
@@ -569,6 +582,8 @@ pub(crate) enum CacheState {
     Streaming,
     /// Track is currently downloading; ratio is 0.0–1.0.
     Downloading(f64),
+    /// Every retry attempt was exhausted. Recoverable with the recache key.
+    Failed,
 }
 
 /// Build the integrated playback bar line for row 3 of the now-playing area.
@@ -586,10 +601,11 @@ pub(crate) fn build_playback_bar_line<'a>(
         return build_downloading_bar_line(width, pos_str, ratio, dur_str, dl_ratio);
     }
 
-    // At this point cache_state is Cached or Streaming
+    // At this point cache_state is Cached, Streaming, or Failed
     let (cache_str, cache_color) = match &cache_state {
         CacheState::Cached => ("◈ Cached", SEA_GREEN),
         CacheState::Streaming => ("◌ Stream", TEXT_DIM),
+        CacheState::Failed => ("✕ Failed", ERROR_RED),
         CacheState::Downloading(_) => unreachable!("Downloading handled above"),
     };
 

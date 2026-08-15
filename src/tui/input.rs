@@ -311,6 +311,14 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             }
         }
 
+        // Recache: force a fresh download of the selected track, whatever its
+        // current cache status.
+        KeyCode::Char('c') => {
+            if let Some(idx) = app.track_index_at(app.selected) {
+                app.recache_track(idx);
+            }
+        }
+
         // Search
         KeyCode::Char('/') => {
             app.input_mode = InputMode::SearchInput;

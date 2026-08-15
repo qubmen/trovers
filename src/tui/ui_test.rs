@@ -796,6 +796,13 @@ mod tests {
     }
 
     #[test]
+    fn playback_bar_failed_shows_failed_indicator() {
+        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Failed);
+        let text = line_to_string(&line);
+        assert!(text.contains("✕ Failed"), "should contain failed indicator: {text:?}");
+    }
+
+    #[test]
     fn playback_bar_downloading_shows_caching_indicator() {
         let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Downloading(0.45));
         let text = line_to_string(&line);
@@ -831,6 +838,7 @@ mod tests {
             let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Cached);
             let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Streaming);
             let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Downloading(0.3));
+            let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Failed);
         }
     }
 
@@ -888,7 +896,9 @@ mod tests {
     fn cache_state_equality() {
         assert_eq!(CacheState::Cached, CacheState::Cached);
         assert_eq!(CacheState::Streaming, CacheState::Streaming);
+        assert_eq!(CacheState::Failed, CacheState::Failed);
         assert_ne!(CacheState::Cached, CacheState::Streaming);
+        assert_ne!(CacheState::Streaming, CacheState::Failed);
     }
 
     #[test]
@@ -5033,7 +5043,7 @@ tracks = []
     }
 
     #[tokio::test]
-    async fn download_error_rolls_the_row_back_to_streaming() {
+    async fn download_error_rolls_the_row_to_failed() {
         use crate::tui::TaskMsg;
 
         let (_dir, path, mut app) = app_on_disk(make_playlist("Active"));
@@ -5050,8 +5060,9 @@ tracks = []
 
         assert_eq!(
             app.playlist.tracks[0].cache_status,
-            crate::playlist::CacheStatus::Streaming,
-            "a failed download must not leave the row claiming to be downloading"
+            crate::playlist::CacheStatus::Failed,
+            "a failed download must not leave the row claiming to be downloading, \
+             and must be distinguishable from a track nobody ever tried to cache"
         );
         // Read the raw TOML: `Playlist::load` rewrites `downloading` to
         // `streaming` on the way in, so loading it back would pass either way.
@@ -5060,9 +5071,139 @@ tracks = []
             !raw.contains("cache_status = \"downloading\""),
             "the rollback must reach disk too, got:\n{raw}"
         );
+        assert!(raw.contains("cache_status = \"failed\""));
         assert!(!app.is_downloading());
         assert!(app.download_targets.is_empty());
         assert!(app.download_progress.is_empty());
+    }
+
+    #[test]
+    fn playlist_load_does_not_reset_a_failed_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pl = make_playlist("Active");
+        let mut track = make_track("A", "Track A");
+        track.cache_status = crate::playlist::CacheStatus::Failed;
+        pl.add_track(track);
+        let path = dir.path().join("Active.toml");
+        pl.save(&path).expect("save");
+
+        let loaded = crate::playlist::Playlist::load(&path).expect("load");
+        assert_eq!(
+            loaded.tracks[0].cache_status,
+            crate::playlist::CacheStatus::Failed,
+            "unlike `downloading`, `failed` is a real terminal state and must survive a reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_succeeds_without_retrying_when_the_first_attempt_works() {
+        use crate::ytdlp::retry_with_backoff;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a = attempts.clone();
+        let result: anyhow::Result<u32> = retry_with_backoff(&[], move || {
+            let a = a.clone();
+            async move {
+                a.fetch_add(1, Ordering::SeqCst);
+                Ok(42)
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "a working first attempt must not retry");
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_retries_on_failure_and_returns_the_eventual_success() {
+        use crate::ytdlp::retry_with_backoff;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a = attempts.clone();
+        let delays = [Duration::from_millis(1), Duration::from_millis(1)];
+        let result: anyhow::Result<&str> = retry_with_backoff(&delays, move || {
+            let a = a.clone();
+            async move {
+                let n = a.fetch_add(1, Ordering::SeqCst);
+                if n < 1 {
+                    anyhow::bail!("transient failure");
+                }
+                Ok("ok")
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), "ok");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "must stop retrying as soon as an attempt succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_gives_up_after_exhausting_every_delay() {
+        use crate::ytdlp::retry_with_backoff;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a = attempts.clone();
+        let delays = [Duration::from_millis(1), Duration::from_millis(1)];
+        let result: anyhow::Result<()> = retry_with_backoff(&delays, move || {
+            let a = a.clone();
+            async move {
+                a.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("still failing")
+            }
+        })
+        .await;
+
+        assert!(result.is_err(), "must surface the failure once every attempt is spent");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "must try exactly delays.len() + 1 times (3, for the real download policy) before giving up"
+        );
+    }
+
+    #[tokio::test]
+    async fn recache_forces_a_fresh_download_regardless_of_current_status() {
+        let mut pl = make_playlist("Active");
+        let mut track = make_track("A", "Track A");
+        track.cache_status = crate::playlist::CacheStatus::Cached;
+        track.file = Some(std::path::PathBuf::from("/fake/A.opus"));
+        pl.add_track(track);
+        let (_dir, _path, mut app) = app_on_disk(pl);
+
+        app.recache_track(0);
+
+        assert!(app.downloading.contains("A"), "recache must start a real download");
+        assert_eq!(
+            app.playlist.tracks[0].cache_status,
+            crate::playlist::CacheStatus::Downloading,
+            "must show as downloading immediately, even though it was already cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn recaching_a_track_already_downloading_is_a_no_op() {
+        let (_dir, _path, mut app) = app_with_tracks(1);
+        app.downloading.insert("A".to_string());
+
+        app.recache_track(0);
+
+        assert_eq!(
+            app.status_message.as_ref().map(|(m, _)| m.as_str()),
+            Some("Already downloading"),
+            "must not start a second, overlapping download for the same track"
+        );
     }
 
     // ── Phase 2: download state follows its row ─────────────────────────────

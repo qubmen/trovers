@@ -10,6 +10,12 @@ pub enum CacheStatus {
     Cached,
     Streaming,
     Downloading,
+    /// All download attempts (see `ytdlp::download_with_retries`) were
+    /// exhausted. Unlike `Downloading`, this is a real terminal state and
+    /// survives restarts — `Playlist::load`'s crash recovery only resets
+    /// `Downloading`, never `Failed`. Cleared only by a fresh download,
+    /// automatic (re-adding the track) or manual (the recache hotkey).
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
