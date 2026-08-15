@@ -86,13 +86,26 @@ pub async fn fetch_metadata(url: &str) -> Result<TrackMeta> {
 
     let duration = json["duration"].as_f64().unwrap_or(0.0) as u64;
 
-    Ok(TrackMeta { title, artist, channel, duration, video_id, source })
+    Ok(TrackMeta {
+        title,
+        artist,
+        channel,
+        duration,
+        video_id,
+        source,
+    })
 }
 
 /// Run `yt-dlp -f <quality> --get-url --no-playlist <url>` and return the direct stream URL.
 pub async fn get_stream_url(url: &str, quality: &AudioQuality) -> Result<String> {
     let output = Command::new("yt-dlp")
-        .args(["-f", quality.to_format_str(), "--get-url", "--no-playlist", url])
+        .args([
+            "-f",
+            quality.to_format_str(),
+            "--get-url",
+            "--no-playlist",
+            url,
+        ])
         .kill_on_drop(true)
         .output()
         .await
@@ -246,7 +259,10 @@ async fn run_download(
         }
     }
 
-    let status = child.wait().await.context("yt-dlp download process failed")?;
+    let status = child
+        .wait()
+        .await
+        .context("yt-dlp download process failed")?;
     let reason = stderr_tail.await.unwrap_or_default().join(" | ");
     if !status.success() {
         bail!("yt-dlp download exited with status {status}: {reason}");

@@ -27,7 +27,27 @@ Stop drowning in folders. Start ruling your media seas.
 ⌨️ Ghost Navigation: Full Vim-like keybindings because a true captain never leaves the wheel (or the home row).
 
 ## 🛠 Arming the Crew (Installation)
-Required Cannons: ffmpeg and mpv (for the heavy lifting).
+
+**Installing trovers itself:**
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/qubmen/trovers/releases/latest/download/trovers-installer.sh | sh
+```
+
+Or via Homebrew:
+
+```sh
+brew install qubmen/trovers/trovers
+```
+
+Or grab a prebuilt binary directly from the [Releases page](https://github.com/qubmen/trovers/releases).
+
+**Required Cannons:** ffmpeg, mpv, and [yt-dlp](https://github.com/yt-dlp/yt-dlp) (for the heavy lifting) — trovers shells out to these rather than bundling them, so install them separately:
+
+```sh
+brew install ffmpeg mpv     # macOS
+pip install yt-dlp
+```
 
 ## 🧭 Navigating the Waters
 Key	Action

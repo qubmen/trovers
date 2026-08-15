@@ -148,8 +148,12 @@ impl Playlist {
         self.save(&new_path)?;
         // Remove old file
         if old_path != new_path {
-            std::fs::remove_file(old_path)
-                .with_context(|| format!("failed to remove old playlist file at {}", old_path.display()))?;
+            std::fs::remove_file(old_path).with_context(|| {
+                format!(
+                    "failed to remove old playlist file at {}",
+                    old_path.display()
+                )
+            })?;
         }
         Ok(new_path)
     }

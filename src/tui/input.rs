@@ -144,7 +144,10 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
         // Delete selected playlist (sidebar must be on a Playlist item)
         KeyCode::Char('d') => {
             let items = app.sidebar_items();
-            if matches!(items.get(app.sidebar_selected), Some(SidebarItem::Playlist { .. })) {
+            if matches!(
+                items.get(app.sidebar_selected),
+                Some(SidebarItem::Playlist { .. })
+            ) {
                 app.input_mode = InputMode::PlaylistDelete;
             }
         }
@@ -220,9 +223,11 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                 app.is_paused = !app.is_paused;
                 let pausing = app.is_paused;
                 let res = match &app.player {
-                    Some(player) => {
-                        Some(if pausing { player.pause().await } else { player.resume().await })
-                    }
+                    Some(player) => Some(if pausing {
+                        player.pause().await
+                    } else {
+                        player.resume().await
+                    }),
                     None => None,
                 };
                 note_ipc_result(app, "pause", res);
@@ -234,7 +239,11 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
 
         // Seek
         KeyCode::Left => {
-            let secs = if key.modifiers.contains(KeyModifiers::SHIFT) { -60 } else { -10 };
+            let secs = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                -60
+            } else {
+                -10
+            };
             let res = match &app.player {
                 Some(player) => Some(player.seek(secs, "relative").await),
                 None => None,
@@ -242,7 +251,11 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             note_ipc_result(app, "seek", res);
         }
         KeyCode::Right => {
-            let secs = if key.modifiers.contains(KeyModifiers::SHIFT) { 60 } else { 10 };
+            let secs = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                60
+            } else {
+                10
+            };
             let res = match &app.player {
                 Some(player) => Some(player.seek(secs, "relative").await),
                 None => None,
@@ -406,7 +419,10 @@ pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) {
         let Some(track) = app.playing_track_mut() else {
             return;
         };
-        let base = track.speed.or(playlist_default_speed).unwrap_or(default_speed);
+        let base = track
+            .speed
+            .or(playlist_default_speed)
+            .unwrap_or(default_speed);
         let new_speed = (base + delta).clamp(0.25, 3.0);
         track.speed = Some(new_speed);
         new_speed
@@ -530,19 +546,16 @@ async fn handle_url_input(app: &mut App, key: KeyEvent) -> Result<Action> {
             if !url.is_empty() {
                 // Determine the target playlist path from target_playlist_for_url.
                 // If it matches the active playlist (or is not set), use the default flow.
-                let target_path = app
-                    .target_playlist_for_url
-                    .as_deref()
-                    .and_then(|name| {
-                        if name == app.playlist.name {
-                            None // Same as active – use default path
-                        } else {
-                            app.available_playlists
-                                .iter()
-                                .find(|(n, _)| n == name)
-                                .map(|(_, p)| p.clone())
-                        }
-                    });
+                let target_path = app.target_playlist_for_url.as_deref().and_then(|name| {
+                    if name == app.playlist.name {
+                        None // Same as active – use default path
+                    } else {
+                        app.available_playlists
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, p)| p.clone())
+                    }
+                });
                 app.fetch_url_to(url, target_path);
             }
             // Reset target to current playlist for next invocation
@@ -710,9 +723,15 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
             // Find which playlist is selected in the sidebar
             let items = app.sidebar_items();
             let selected_item = items.get(app.sidebar_selected).cloned();
-            if let Some(SidebarItem::Playlist { name: old_name, path: old_path }) = selected_item {
+            if let Some(SidebarItem::Playlist {
+                name: old_name,
+                path: old_path,
+            }) = selected_item
+            {
                 // Validate: no duplicate name
-                if let Err(msg) = validate_playlist_name(&new_name, &app.available_playlists, Some(&old_name)) {
+                if let Err(msg) =
+                    validate_playlist_name(&new_name, &app.available_playlists, Some(&old_name))
+                {
                     warn!(msg = %msg, "invalid playlist name");
                     return Ok(Action::Continue);
                 }
@@ -740,7 +759,11 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
                         // Re-anchor sidebar_selected to the renamed playlist's new position.
                         // sidebar_items() starts with PlaylistsHeader at index 0, so playlist
                         // entries begin at index 1 when expanded.
-                        if let Some(new_pos) = app.available_playlists.iter().position(|(n, _)| n == &new_name) {
+                        if let Some(new_pos) = app
+                            .available_playlists
+                            .iter()
+                            .position(|(n, _)| n == &new_name)
+                        {
                             app.sidebar_selected = 1 + new_pos; // +1 for PlaylistsHeader
                         }
 
@@ -804,7 +827,8 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
                 // first — otherwise the file gets removed out from under a live
                 // session, and a later save (flush_playing_position, etc.) would
                 // resurrect the just-deleted file with a stale snapshot.
-                let deleting_playing_playlist = app.playing.as_ref().is_some_and(|p| p.path == path);
+                let deleting_playing_playlist =
+                    app.playing.as_ref().is_some_and(|p| p.path == path);
                 if deleting_playing_playlist {
                     app.stop_player(); // kills mpv and retires its position poller
                     app.playing = None;
@@ -825,19 +849,17 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
                         // Ensure selection lands on a selectable item.
                         // Prefer the nearest item at-or-before the cursor; if none exists,
                         // fall forward to the first selectable item after the cursor.
-                        let at_or_before = new_items
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .find(|(i, item)| *i <= app.sidebar_selected && item.is_selectable());
+                        let at_or_before =
+                            new_items.iter().enumerate().rev().find(|(i, item)| {
+                                *i <= app.sidebar_selected && item.is_selectable()
+                            });
                         if let Some((i, _)) = at_or_before {
                             app.sidebar_selected = i;
                         } else {
                             // Nothing selectable before cursor — find the first one after.
-                            let after = new_items
-                                .iter()
-                                .enumerate()
-                                .find(|(i, item)| *i > app.sidebar_selected && item.is_selectable());
+                            let after = new_items.iter().enumerate().find(|(i, item)| {
+                                *i > app.sidebar_selected && item.is_selectable()
+                            });
                             app.sidebar_selected = after.map(|(i, _)| i).unwrap_or(0);
                         }
                     }

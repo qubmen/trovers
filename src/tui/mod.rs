@@ -73,19 +73,41 @@ impl SidebarItem {
 // ── Task messages (async → event loop) ───────────────────────────────────
 
 pub enum TaskMsg {
-    MetaReady { url: String, meta: TrackMeta, target_path: Option<PathBuf> },
-    MetaError { url: String, err: String },
-    DownloadDone { video_id: String, file: PathBuf },
-    DownloadError { video_id: String, err: String },
+    MetaReady {
+        url: String,
+        meta: TrackMeta,
+        target_path: Option<PathBuf>,
+    },
+    MetaError {
+        url: String,
+        err: String,
+    },
+    DownloadDone {
+        video_id: String,
+        file: PathBuf,
+    },
+    DownloadError {
+        video_id: String,
+        err: String,
+    },
     /// A freshly spawned mpv is ready. `generation` identifies which playback
     /// request it belongs to, so a player that finished starting *after* the
     /// user already moved on is discarded instead of hijacking the new track.
-    PlayerReady { video_id: String, player: Box<Player>, generation: u64 },
-    PlayerError { video_id: String, err: String },
+    PlayerReady {
+        video_id: String,
+        player: Box<Player>,
+        generation: u64,
+    },
+    PlayerError {
+        video_id: String,
+        err: String,
+    },
     /// mpv exited on its own — it reached the end of the track, or crashed.
     /// Without this the app kept a `Player` pointing at a dead socket, showed
     /// "▶ Playing", and then died the moment any key sent an IPC command.
-    PlayerGone { generation: u64 },
+    PlayerGone {
+        generation: u64,
+    },
 }
 
 // ── Speed resolution ──────────────────────────────────────────────────────
@@ -356,7 +378,10 @@ impl App {
         let session = self.playing.as_ref()?;
         if session.path == self.playlist_path {
             let video_id = &session.track().video_id;
-            self.playlist.tracks.iter().find(|t| t.video_id == *video_id)
+            self.playlist
+                .tracks
+                .iter()
+                .find(|t| t.video_id == *video_id)
         } else {
             Some(session.track())
         }
@@ -368,7 +393,10 @@ impl App {
         let path_matches = self.playing.as_ref()?.path == self.playlist_path;
         if path_matches {
             let video_id = self.playing.as_ref().unwrap().track().video_id.clone();
-            self.playlist.tracks.iter_mut().find(|t| t.video_id == video_id)
+            self.playlist
+                .tracks
+                .iter_mut()
+                .find(|t| t.video_id == video_id)
         } else {
             self.playing.as_mut().map(|p| p.track_mut())
         }
@@ -396,7 +424,10 @@ impl App {
         tokio::spawn(async move {
             match ytdlp::download_with_retries(&url, &audio_dir, &vid, &quality, dl_tx).await {
                 Ok(file) => {
-                    let _ = task_tx.send(TaskMsg::DownloadDone { video_id: vid, file });
+                    let _ = task_tx.send(TaskMsg::DownloadDone {
+                        video_id: vid,
+                        file,
+                    });
                 }
                 Err(e) => {
                     let _ = task_tx.send(TaskMsg::DownloadError {
@@ -552,7 +583,8 @@ impl App {
     /// different playlist or a different track count (a track was added or
     /// deleted, so the old order no longer covers it).
     fn ensure_shuffle_order(&mut self, path: &Path, len: usize) {
-        let stale = self.shuffle_order_path.as_deref() != Some(path) || self.shuffle_order.len() != len;
+        let stale =
+            self.shuffle_order_path.as_deref() != Some(path) || self.shuffle_order.len() != len;
         if !stale {
             return;
         }
@@ -686,7 +718,11 @@ impl App {
         // Same file as the one on screen: go through the normal path so the
         // displayed copy, its `current_track` and the cursor stay in step.
         if session.path == self.playlist_path {
-            let start_pos = self.playlist.tracks.get(idx).and_then(input::resume_start_pos);
+            let start_pos = self
+                .playlist
+                .tracks
+                .get(idx)
+                .and_then(input::resume_start_pos);
             self.request_playback(idx, start_pos);
             return;
         }
@@ -727,7 +763,8 @@ impl App {
                 return;
             };
             let video_id = track.video_id.clone();
-            let speed = track.speed
+            let speed = track
+                .speed
                 .or(self.playlist.default_speed)
                 .unwrap_or(self.config.default_speed);
             let source = match (&track.cache_status, &track.file) {
@@ -837,7 +874,12 @@ impl App {
         let pos = self.position;
         info!(video_id = %video_id, pos = pos, "switching stream → local file");
         self.is_paused = false;
-        self.spawn_player_for(video_id.to_string(), PlaySource::File(file), speed, Some(pos));
+        self.spawn_player_for(
+            video_id.to_string(),
+            PlaySource::File(file),
+            speed,
+            Some(pos),
+        );
     }
 
     /// Resolve the stream/local-file source and spawn mpv, wiring up position
@@ -848,7 +890,13 @@ impl App {
     /// Always stops the previous player first (via `stop_player`), so no two mpv
     /// processes are ever audible at once and the outgoing player's poller is
     /// retired before the new one starts reporting positions.
-    fn spawn_player_for(&mut self, video_id: String, source: PlaySource, speed: f32, start_pos: Option<f64>) {
+    fn spawn_player_for(
+        &mut self,
+        video_id: String,
+        source: PlaySource,
+        speed: f32,
+        start_pos: Option<f64>,
+    ) {
         let generation = self.stop_player();
         let volume = self.config.default_volume;
         let quality = self.config.audio_quality.clone();
@@ -859,18 +907,16 @@ impl App {
         tokio::spawn(async move {
             let resolved_source = match source {
                 PlaySource::File(path) => path.to_string_lossy().into_owned(),
-                PlaySource::Stream(url) => {
-                    match ytdlp::get_stream_url(&url, &quality).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            let _ = task_tx.send(TaskMsg::PlayerError {
-                                video_id,
-                                err: e.to_string(),
-                            });
-                            return;
-                        }
+                PlaySource::Stream(url) => match ytdlp::get_stream_url(&url, &quality).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = task_tx.send(TaskMsg::PlayerError {
+                            video_id,
+                            err: e.to_string(),
+                        });
+                        return;
                     }
-                }
+                },
             };
 
             // Resolving the stream URL above can take seconds; bail out rather
@@ -958,7 +1004,11 @@ impl App {
 
     pub(crate) fn handle_task_msg(&mut self, msg: TaskMsg) {
         match msg {
-            TaskMsg::MetaReady { url, meta, target_path } => {
+            TaskMsg::MetaReady {
+                url,
+                meta,
+                target_path,
+            } => {
                 self.pending_fetches = self.pending_fetches.saturating_sub(1);
                 let video_id = meta.video_id.clone();
                 info!(video_id = %video_id, title = %meta.title, "metadata ready, starting download");
@@ -1104,7 +1154,11 @@ impl App {
                 self.set_status("Download failed");
             }
 
-            TaskMsg::PlayerReady { video_id, player, generation } => {
+            TaskMsg::PlayerReady {
+                video_id,
+                player,
+                generation,
+            } => {
                 // Discard a player that finished starting after the user already
                 // moved on. Comparing generations (rather than video ids) also
                 // covers replaying the *same* track and the stream→local-file
@@ -1145,7 +1199,10 @@ impl App {
                     // it could not handle, an external kill. Advancing here
                     // would walk the whole playlist in seconds, respawning mpv
                     // and yt-dlp for every track on the way.
-                    warn!(position = self.position, "mpv exited before the end of the track");
+                    warn!(
+                        position = self.position,
+                        "mpv exited before the end of the track"
+                    );
                     self.set_status("Playback stopped unexpectedly");
                 }
             }
@@ -1258,10 +1315,17 @@ impl App {
         tokio::spawn(async move {
             match ytdlp::fetch_metadata(&url).await {
                 Ok(meta) => {
-                    let _ = task_tx.send(TaskMsg::MetaReady { url, meta, target_path });
+                    let _ = task_tx.send(TaskMsg::MetaReady {
+                        url,
+                        meta,
+                        target_path,
+                    });
                 }
                 Err(e) => {
-                    let _ = task_tx.send(TaskMsg::MetaError { url, err: e.to_string() });
+                    let _ = task_tx.send(TaskMsg::MetaError {
+                        url,
+                        err: e.to_string(),
+                    });
                 }
             }
         });
@@ -1359,9 +1423,19 @@ impl App {
     ///   a no-op (logged, not an error) — matches the existing style used by
     ///   the target-playlist branch this replaces.
     /// - Load/save errors are logged and cause an early return.
-    pub fn patch_and_save_playlist(&mut self, path: &Path, video_id: &str, f: impl FnOnce(&mut Track)) {
+    pub fn patch_and_save_playlist(
+        &mut self,
+        path: &Path,
+        video_id: &str,
+        f: impl FnOnce(&mut Track),
+    ) {
         if path == self.playlist_path.as_path() {
-            match self.playlist.tracks.iter_mut().find(|t| t.video_id == video_id) {
+            match self
+                .playlist
+                .tracks
+                .iter_mut()
+                .find(|t| t.video_id == video_id)
+            {
                 Some(track) => f(track),
                 None => {
                     warn!(video_id = %video_id, path = %path.display(), "patch_and_save_playlist: track not found in displayed playlist");
@@ -1482,7 +1556,9 @@ impl App {
             .iter()
             .find(|(n, _)| n == target_name)
             .map(|(_, p)| p.clone())
-            .with_context(|| format!("target playlist '{target_name}' not found in available_playlists"))?;
+            .with_context(|| {
+                format!("target playlist '{target_name}' not found in available_playlists")
+            })?;
 
         // Load or create the target playlist from disk
         let mut target_playlist = if target_path.exists() {

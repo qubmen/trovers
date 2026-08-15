@@ -1,14 +1,14 @@
-use super::{effective_speed, App, Focus, InputMode, SidebarItem, SettingsItem, SETTINGS_ITEMS};
-use crate::tui::input::validate_playlist_name;
+use super::{effective_speed, App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
 use crate::config::AudioQuality;
 use crate::playlist::{CacheStatus, LoopMode};
+use crate::tui::input::validate_playlist_name;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row,
-        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState,
+        Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Table, TableState,
     },
     Frame,
 };
@@ -103,11 +103,7 @@ fn render_header(frame: &mut Frame, _app: &App, area: Rect) {
 // ── Main area ─────────────────────────────────────────────────────────────
 
 fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
-    let cols = Layout::horizontal([
-        Constraint::Length(22),
-        Constraint::Min(0),
-    ])
-    .split(area);
+    let cols = Layout::horizontal([Constraint::Length(22), Constraint::Min(0)]).split(area);
 
     render_sidebar(frame, app, cols[0]);
 
@@ -207,13 +203,19 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = if total == 0 {
         format!(" {} ", app.playlist.name)
     } else {
-        format!(" {}  [ {}–{} / {} ] ", app.playlist.name, first, last, total)
+        format!(
+            " {}  [ {}–{} / {} ] ",
+            app.playlist.name, first, last, total
+        )
     };
 
     let block = make_panel_block(&title, app.focus == Focus::TrackList);
 
     let inner = block.inner(area);
-    let table_area = Rect { width: inner.width.saturating_sub(1), ..inner };
+    let table_area = Rect {
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
     let scrollbar_area = Rect {
         x: inner.x + inner.width.saturating_sub(1),
         width: 1,
@@ -223,8 +225,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
     app.track_list_height = table_area.height;
 
     // icons(2) + num(4) + sep(1) + artist(16) + sep(1) + dur(7) + padding(3)
-    let title_width =
-        table_area.width.saturating_sub(2 + 4 + 1 + 16 + 1 + 7 + 3) as usize;
+    let title_width = table_area.width.saturating_sub(2 + 4 + 1 + 16 + 1 + 7 + 3) as usize;
 
     let rows: Vec<Row> = (app.track_offset..app.track_offset + app.track_list_height as usize)
         .filter_map(|cursor| {
@@ -269,15 +270,15 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 track.user_title.as_deref().unwrap_or(&track.title),
                 title_width,
             );
-            let artist_str = truncate(
-                track.user_artist.as_deref().unwrap_or(&track.artist),
-                15,
-            );
+            let artist_str = truncate(track.user_artist.as_deref().unwrap_or(&track.artist), 15);
             let dur_str = format_duration(track.duration);
 
             Some(
                 Row::new(vec![
-                    Cell::from(Line::from(vec![Span::raw(format!("{play_icon} ")), status_span])),
+                    Cell::from(Line::from(vec![
+                        Span::raw(format!("{play_icon} ")),
+                        status_span,
+                    ])),
                     Cell::from(Span::styled(num_str, Style::new().fg(TEXT_DIM))),
                     Cell::from(title_str),
                     Cell::from(Span::styled(artist_str, Style::new().fg(TEXT_DIM))),
@@ -367,14 +368,12 @@ fn settings_item_display(item: &SettingsItem, app: &App) -> (&'static str, Strin
             };
             ("Audio quality", val.to_string())
         }
-        SettingsItem::DefaultSpeed => (
-            "Default speed",
-            format!("{:.1}×", app.config.default_speed),
-        ),
-        SettingsItem::DefaultVolume => (
-            "Default volume",
-            format!("{}%", app.config.default_volume),
-        ),
+        SettingsItem::DefaultSpeed => {
+            ("Default speed", format!("{:.1}×", app.config.default_speed))
+        }
+        SettingsItem::DefaultVolume => {
+            ("Default volume", format!("{}%", app.config.default_volume))
+        }
     }
 }
 
@@ -507,11 +506,7 @@ pub(crate) fn build_track_info_line<'a>(
     // Use 1-char left margin, so effective text width is width - 1 (for leading space)
     let text_width = width.saturating_sub(1);
 
-    let segments = [
-        (title, true),
-        (artist, false),
-        (source, false),
-    ];
+    let segments = [(title, true), (artist, false), (source, false)];
 
     let parts = build_separated_line(&segments, text_width);
 
@@ -674,7 +669,15 @@ fn build_downloading_bar_line<'a>(
     let play_bar_width = (total_bar_budget * 2 / 3).max(1);
     let dl_bar_width = total_bar_budget.saturating_sub(play_bar_width).max(1);
 
-    let play_bar = build_progress_bar(play_bar_width, play_ratio, '━', '─', '◉', SEA_GREEN, BORDER_IDLE);
+    let play_bar = build_progress_bar(
+        play_bar_width,
+        play_ratio,
+        '━',
+        '─',
+        '◉',
+        SEA_GREEN,
+        BORDER_IDLE,
+    );
     let dl_bar = build_progress_bar(dl_bar_width, dl_ratio, '▓', '░', '\0', GOLD, TEXT_DIM);
 
     let mut spans: Vec<Span<'static>> = vec![
@@ -708,7 +711,10 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let center = footer_center_context(app);
     let right = footer_right_counters(app);
 
-    let fixed = [(0, left.chars().count() + 2), (2, right.chars().count() + 2)];
+    let fixed = [
+        (0, left.chars().count() + 2),
+        (2, right.chars().count() + 2),
+    ];
     let widths = calculate_distributed_widths(width, 3, &fixed);
     let center_width = widths[1];
 
@@ -720,11 +726,17 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 
     let line = Line::from(vec![
         Span::raw(" "),
-        Span::styled(truncate(&left, widths[0].saturating_sub(2)), Style::new().fg(Color::White)),
+        Span::styled(
+            truncate(&left, widths[0].saturating_sub(2)),
+            Style::new().fg(Color::White),
+        ),
         Span::raw(" ".repeat(left_pad)),
         Span::styled(center_trunc, Style::new().fg(TEXT_DIM)),
         Span::raw(" ".repeat(right_pad)),
-        Span::styled(truncate(&right, widths[2].saturating_sub(2)), Style::new().fg(Color::White)),
+        Span::styled(
+            truncate(&right, widths[2].saturating_sub(2)),
+            Style::new().fg(Color::White),
+        ),
         Span::raw(" "),
     ]);
 
@@ -737,12 +749,18 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 fn footer_left_message(app: &App) -> String {
     // Always show explicit modal prompts when in an input/confirm mode.
     match (&app.input_mode, &app.focus) {
-        (InputMode::UrlInput, _) => return "Add track: Enter URL · [enter] confirm · [esc] cancel".to_string(),
+        (InputMode::UrlInput, _) => {
+            return "Add track: Enter URL · [enter] confirm · [esc] cancel".to_string()
+        }
         (InputMode::NewPlaylist, _) => {
             return "New playlist: Enter name · [enter] confirm · [esc] cancel".to_string();
         }
-        (InputMode::SearchInput, _) => return "Search: type to filter · [enter] done · [esc] clear".to_string(),
-        (InputMode::ConfirmDelete, _) => return "Delete track? · [y] confirm · [n/esc] cancel".to_string(),
+        (InputMode::SearchInput, _) => {
+            return "Search: type to filter · [enter] done · [esc] clear".to_string()
+        }
+        (InputMode::ConfirmDelete, _) => {
+            return "Delete track? · [y] confirm · [n/esc] cancel".to_string()
+        }
         (InputMode::TrackContextMenu, _) => {
             return "Move track: [↑↓] select · [enter] move · [esc] cancel".to_string();
         }
@@ -1027,18 +1045,26 @@ fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
         " Track list",
         Style::new().fg(GOLD).bold(),
     )]));
-    lines.push(Line::raw("  [↑↓/jk] navigate   [enter] play   [spc] play/pause"));
+    lines.push(Line::raw(
+        "  [↑↓/jk] navigate   [enter] play   [spc] play/pause",
+    ));
     lines.push(Line::raw("  [←→] seek ±10s     [shift+←→] seek ±60s"));
     lines.push(Line::raw("  Speed: '[' slower   ']' faster"));
-    lines.push(Line::raw("  [a] add URL        [m] move track   [d] delete   [/] search"));
-    lines.push(Line::raw("  [n] next           [b] previous    [N] new playlist"));
+    lines.push(Line::raw(
+        "  [a] add URL        [m] move track   [d] delete   [/] search",
+    ));
+    lines.push(Line::raw(
+        "  [n] next           [b] previous    [N] new playlist",
+    ));
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![Span::styled(
         " Sidebar",
         Style::new().fg(GOLD).bold(),
     )]));
-    lines.push(Line::raw("  [↑↓] navigate   [enter] select/toggle   [r] rename   [d] delete"));
+    lines.push(Line::raw(
+        "  [↑↓] navigate   [enter] select/toggle   [r] rename   [d] delete",
+    ));
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
@@ -1234,7 +1260,9 @@ pub(crate) fn calculate_distributed_widths(
 
     let remaining = total_width.saturating_sub(used);
     // Give remaining width to the first flexible (not fixed) section
-    if let Some(flex_idx) = (0..section_count).find(|i| !fixed_widths.iter().any(|&(fi, _)| fi == *i)) {
+    if let Some(flex_idx) =
+        (0..section_count).find(|i| !fixed_widths.iter().any(|&(fi, _)| fi == *i))
+    {
         widths[flex_idx] = remaining;
     }
 

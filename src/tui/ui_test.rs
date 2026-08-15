@@ -2,9 +2,8 @@
 mod tests {
     use crate::tui::ui::{
         build_now_playing_header_line, build_playback_bar_line, build_progress_bar,
-        build_separated_line, build_track_info_line, calculate_distributed_widths,
-        format_duration, format_playback_state, make_panel_block, truncate,
-        url_input_target_display, CacheState,
+        build_separated_line, build_track_info_line, calculate_distributed_widths, format_duration,
+        format_playback_state, make_panel_block, truncate, url_input_target_display, CacheState,
     };
     use ratatui::style::Color;
 
@@ -22,10 +21,7 @@ mod tests {
         }
     }
 
-    fn make_app_with_playlists(
-        active: &str,
-        playlists: &[&str],
-    ) -> crate::tui::App {
+    fn make_app_with_playlists(active: &str, playlists: &[&str]) -> crate::tui::App {
         use std::path::PathBuf;
         let playlist = make_playlist(active);
         let config = crate::config::Config::default();
@@ -33,7 +29,12 @@ mod tests {
             .iter()
             .map(|n| (n.to_string(), PathBuf::from(format!("/fake/{}.toml", n))))
             .collect();
-        crate::tui::App::new(playlist, config, available, PathBuf::from("/fake/active.toml"))
+        crate::tui::App::new(
+            playlist,
+            config,
+            available,
+            PathBuf::from("/fake/active.toml"),
+        )
     }
 
     // ── format_duration tests ─────────────────────────────────────────────
@@ -221,7 +222,7 @@ mod tests {
     fn progress_bar_filled_spans_use_fill_color() {
         // filled section must use fill_color
         let fill_color = Color::Rgb(32, 178, 136); // SEA_GREEN
-        let empty_color = Color::Rgb(70, 70, 70);   // BORDER_IDLE
+        let empty_color = Color::Rgb(70, 70, 70); // BORDER_IDLE
         let spans = build_progress_bar(10, 0.5, '━', '─', '◉', fill_color, empty_color);
 
         // The fill and thumb spans should use fill_color
@@ -230,23 +231,28 @@ mod tests {
             .iter()
             .filter(|s| s.content.contains('━') || s.content.contains('◉'))
             .collect();
-        let empty_spans: Vec<_> = spans
-            .iter()
-            .filter(|s| s.content.contains('─'))
-            .collect();
+        let empty_spans: Vec<_> = spans.iter().filter(|s| s.content.contains('─')).collect();
 
         for s in &fill_spans {
-            assert_eq!(s.style.fg, Some(fill_color), "fill/thumb span should have fill_color");
+            assert_eq!(
+                s.style.fg,
+                Some(fill_color),
+                "fill/thumb span should have fill_color"
+            );
         }
         for s in &empty_spans {
-            assert_eq!(s.style.fg, Some(empty_color), "empty span should have empty_color");
+            assert_eq!(
+                s.style.fg,
+                Some(empty_color),
+                "empty span should have empty_color"
+            );
         }
     }
 
     #[test]
     fn progress_bar_no_thumb_colors() {
         // No-thumb mode: filled uses fill_color, empty uses empty_color
-        let fill_color = Color::Rgb(212, 175, 55);  // GOLD
+        let fill_color = Color::Rgb(212, 175, 55); // GOLD
         let empty_color = Color::Rgb(130, 130, 130); // TEXT_DIM
         let spans = build_progress_bar(10, 0.4, '▓', '░', '\0', fill_color, empty_color);
 
@@ -254,10 +260,18 @@ mod tests {
         let empty_spans: Vec<_> = spans.iter().filter(|s| s.content.contains('░')).collect();
 
         for s in &fill_spans {
-            assert_eq!(s.style.fg, Some(fill_color), "fill span should have fill_color");
+            assert_eq!(
+                s.style.fg,
+                Some(fill_color),
+                "fill span should have fill_color"
+            );
         }
         for s in &empty_spans {
-            assert_eq!(s.style.fg, Some(empty_color), "empty span should have empty_color");
+            assert_eq!(
+                s.style.fg,
+                Some(empty_color),
+                "empty span should have empty_color"
+            );
         }
     }
 
@@ -345,7 +359,7 @@ mod tests {
         let result = calculate_distributed_widths(80, 3, &[(1, 10), (2, 8)]);
         assert_eq!(result[0], 62); // flexible
         assert_eq!(result[1], 10); // fixed
-        assert_eq!(result[2], 8);  // fixed
+        assert_eq!(result[2], 8); // fixed
     }
 
     #[test]
@@ -436,13 +450,14 @@ mod tests {
         // "Hello World" (11) + " • " (3) + "Artist Name" (11) = 25
         // Force truncation with max_width=15: text_budget=15-3=12
         // primary gets min(11,12)=11, secondary gets 12-11=1
-        let result = build_separated_line(
-            &[("Hello World", true), ("Artist Name", false)],
-            15,
-        );
+        let result = build_separated_line(&[("Hello World", true), ("Artist Name", false)], 15);
         // Result: "Hello World" + sep + 1-char truncated artist
         let texts: Vec<&str> = result.iter().map(|r| r.0.as_str()).collect();
-        assert!(texts.contains(&"Hello World"), "primary should be preserved: {:?}", texts);
+        assert!(
+            texts.contains(&"Hello World"),
+            "primary should be preserved: {:?}",
+            texts
+        );
     }
 
     #[test]
@@ -457,10 +472,8 @@ mod tests {
 
     #[test]
     fn separated_line_bold_flags_preserved() {
-        let result = build_separated_line(
-            &[("Track", true), ("Artist", false), ("Source", false)],
-            80,
-        );
+        let result =
+            build_separated_line(&[("Track", true), ("Artist", false), ("Source", false)], 80);
         // indices: 0=Track(bold), 1=sep, 2=Artist(not bold), 3=sep, 4=Source(not bold)
         assert!(result[0].1, "first segment should be bold");
         assert!(!result[1].1, "separator should not be bold");
@@ -525,8 +538,14 @@ mod tests {
     fn header_no_track_contains_label_and_status() {
         let line = build_now_playing_header_line(80, None, None);
         let text = line_to_string(&line);
-        assert!(text.contains("🎵 Now Playing"), "should contain label: {text:?}");
-        assert!(text.contains("No track selected"), "should contain no-track status: {text:?}");
+        assert!(
+            text.contains("🎵 Now Playing"),
+            "should contain label: {text:?}"
+        );
+        assert!(
+            text.contains("No track selected"),
+            "should contain no-track status: {text:?}"
+        );
     }
 
     #[test]
@@ -536,15 +555,24 @@ mod tests {
         let text = line_to_string(&line);
         let char_count: usize = text.chars().count();
         // Should not exceed the width (may be less due to saturation)
-        assert!(char_count <= width + 5, "header too wide: {char_count} chars for width={width}");
+        assert!(
+            char_count <= width + 5,
+            "header too wide: {char_count} chars for width={width}"
+        );
     }
 
     #[test]
     fn header_playing_state_contains_all_three_sections() {
         let line = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.4×"));
         let text = line_to_string(&line);
-        assert!(text.contains("🎵 Now Playing"), "should contain label: {text:?}");
-        assert!(text.contains("▶ Playing"), "should contain playback status: {text:?}");
+        assert!(
+            text.contains("🎵 Now Playing"),
+            "should contain label: {text:?}"
+        );
+        assert!(
+            text.contains("▶ Playing"),
+            "should contain playback status: {text:?}"
+        );
         assert!(text.contains("1.4×"), "should contain speed: {text:?}");
     }
 
@@ -552,7 +580,10 @@ mod tests {
     fn header_paused_state() {
         let line = build_now_playing_header_line(80, Some("⏸ Paused"), Some("1.0×"));
         let text = line_to_string(&line);
-        assert!(text.contains("⏸ Paused"), "should contain paused status: {text:?}");
+        assert!(
+            text.contains("⏸ Paused"),
+            "should contain paused status: {text:?}"
+        );
         assert!(text.contains("1.0×"), "should contain speed: {text:?}");
     }
 
@@ -561,7 +592,10 @@ mod tests {
         let gold = Color::Rgb(212, 175, 55);
         let line = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.4×"));
         // The label span should have GOLD color
-        let label_span = line.spans.iter().find(|s| s.content.contains("🎵 Now Playing"));
+        let label_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("🎵 Now Playing"));
         assert!(label_span.is_some(), "label span should exist");
         assert_eq!(
             label_span.unwrap().style.fg,
@@ -629,7 +663,10 @@ mod tests {
         for speed in ["0.5×", "1.0×", "1.5×", "2.0×"] {
             let line = build_now_playing_header_line(80, Some("▶ Playing"), Some(speed));
             let text = line_to_string(&line);
-            assert!(text.contains(speed), "should contain speed {speed}: {text:?}");
+            assert!(
+                text.contains(speed),
+                "should contain speed {speed}: {text:?}"
+            );
         }
     }
 
@@ -639,9 +676,18 @@ mod tests {
     fn track_info_line_contains_all_three_parts() {
         let line = build_track_info_line(80, "My Track Title", "Some Artist", "youtube.com/watch");
         let text = line_to_string(&line);
-        assert!(text.contains("My Track Title"), "should contain title: {text:?}");
-        assert!(text.contains("Some Artist"), "should contain artist: {text:?}");
-        assert!(text.contains("youtube.com/watch"), "should contain source: {text:?}");
+        assert!(
+            text.contains("My Track Title"),
+            "should contain title: {text:?}"
+        );
+        assert!(
+            text.contains("Some Artist"),
+            "should contain artist: {text:?}"
+        );
+        assert!(
+            text.contains("youtube.com/watch"),
+            "should contain source: {text:?}"
+        );
     }
 
     #[test]
@@ -649,7 +695,10 @@ mod tests {
         let line = build_track_info_line(80, "Track", "Artist", "source.com");
         let text = line_to_string(&line);
         // Should have bullet separators between sections
-        assert!(text.contains(" • "), "should contain bullet separator: {text:?}");
+        assert!(
+            text.contains(" • "),
+            "should contain bullet separator: {text:?}"
+        );
     }
 
     #[test]
@@ -683,7 +732,10 @@ mod tests {
     fn track_info_line_source_is_dim() {
         let text_dim = ratatui::style::Color::Rgb(130, 130, 130);
         let line = build_track_info_line(80, "Track", "Artist", "my-source.com");
-        let source_span = line.spans.iter().find(|s| s.content.contains("my-source.com"));
+        let source_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("my-source.com"));
         assert!(source_span.is_some(), "source span should exist");
         assert_eq!(
             source_span.unwrap().style.fg,
@@ -697,7 +749,10 @@ mod tests {
         let line = build_track_info_line(80, "Track", "Artist", "source.com");
         // First span should be a leading space for margin
         assert!(!line.spans.is_empty(), "line should have spans");
-        assert_eq!(line.spans[0].content, " ", "should start with a space for margin");
+        assert_eq!(
+            line.spans[0].content, " ",
+            "should start with a space for margin"
+        );
     }
 
     #[test]
@@ -715,7 +770,12 @@ mod tests {
     fn track_info_line_narrow_terminal_no_panic() {
         // Very narrow: should not panic
         for w in [1, 5, 10, 15, 20] {
-            let line = build_track_info_line(w, "Track Title That Is Very Long Indeed", "Artist", "source.com");
+            let line = build_track_info_line(
+                w,
+                "Track Title That Is Very Long Indeed",
+                "Artist",
+                "source.com",
+            );
             let text = line_to_string(&line);
             // Just checking no panic - content may be very short
             let _ = text;
@@ -725,7 +785,12 @@ mod tests {
     #[test]
     fn track_info_line_total_width_respects_bounds() {
         let width = 60;
-        let line = build_track_info_line(width, "My Track Title", "Great Artist", "youtube.com/watch?v=abc123");
+        let line = build_track_info_line(
+            width,
+            "My Track Title",
+            "Great Artist",
+            "youtube.com/watch?v=abc123",
+        );
         let text = line_to_string(&line);
         // Total chars should not greatly exceed available width
         // (allow some slack for unicode multi-byte but char count should be ≤ width)
@@ -741,15 +806,24 @@ mod tests {
         // Empty artist should still render title and source
         let line = build_track_info_line(80, "Track Title", "", "source.com");
         let text = line_to_string(&line);
-        assert!(text.contains("Track Title"), "should contain title: {text:?}");
+        assert!(
+            text.contains("Track Title"),
+            "should contain title: {text:?}"
+        );
     }
 
     #[test]
     fn track_info_line_empty_source_still_works() {
         let line = build_track_info_line(80, "Track Title", "Artist Name", "");
         let text = line_to_string(&line);
-        assert!(text.contains("Track Title"), "should contain title: {text:?}");
-        assert!(text.contains("Artist Name"), "should contain artist: {text:?}");
+        assert!(
+            text.contains("Track Title"),
+            "should contain title: {text:?}"
+        );
+        assert!(
+            text.contains("Artist Name"),
+            "should contain artist: {text:?}"
+        );
     }
 
     #[test]
@@ -760,8 +834,14 @@ mod tests {
         let user_artist = "Custom Artist Override";
         let line = build_track_info_line(120, user_title, user_artist, "source.com");
         let text = line_to_string(&line);
-        assert!(text.contains(user_title), "user title override should appear: {text:?}");
-        assert!(text.contains(user_artist), "user artist override should appear: {text:?}");
+        assert!(
+            text.contains(user_title),
+            "user title override should appear: {text:?}"
+        );
+        assert!(
+            text.contains(user_artist),
+            "user artist override should appear: {text:?}"
+        );
     }
 
     // ── build_playback_bar_line tests ─────────────────────────────────────────
@@ -785,60 +865,114 @@ mod tests {
     fn playback_bar_cached_shows_cache_indicator() {
         let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
         let text = line_to_string(&line);
-        assert!(text.contains("◈ Cached"), "should contain cached indicator: {text:?}");
+        assert!(
+            text.contains("◈ Cached"),
+            "should contain cached indicator: {text:?}"
+        );
     }
 
     #[test]
     fn playback_bar_streaming_shows_stream_indicator() {
-        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Streaming);
+        let line =
+            build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Streaming);
         let text = line_to_string(&line);
-        assert!(text.contains("◌ Stream"), "should contain streaming indicator: {text:?}");
+        assert!(
+            text.contains("◌ Stream"),
+            "should contain streaming indicator: {text:?}"
+        );
     }
 
     #[test]
     fn playback_bar_failed_shows_failed_indicator() {
         let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Failed);
         let text = line_to_string(&line);
-        assert!(text.contains("✕ Failed"), "should contain failed indicator: {text:?}");
+        assert!(
+            text.contains("✕ Failed"),
+            "should contain failed indicator: {text:?}"
+        );
     }
 
     #[test]
     fn playback_bar_downloading_shows_caching_indicator() {
-        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Downloading(0.45));
+        let line = build_playback_bar_line(
+            80,
+            "00:03",
+            0.1,
+            "55:34",
+            "♪ 85%",
+            CacheState::Downloading(0.45),
+        );
         let text = line_to_string(&line);
-        assert!(text.contains("⟳ Caching"), "should contain caching indicator: {text:?}");
+        assert!(
+            text.contains("⟳ Caching"),
+            "should contain caching indicator: {text:?}"
+        );
     }
 
     #[test]
     fn playback_bar_downloading_shows_percentage() {
-        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Downloading(0.45));
+        let line = build_playback_bar_line(
+            80,
+            "00:03",
+            0.1,
+            "55:34",
+            "♪ 85%",
+            CacheState::Downloading(0.45),
+        );
         let text = line_to_string(&line);
-        assert!(text.contains("45%"), "should contain download percentage: {text:?}");
+        assert!(
+            text.contains("45%"),
+            "should contain download percentage: {text:?}"
+        );
     }
 
     #[test]
     fn playback_bar_downloading_shows_position_and_duration() {
-        let line = build_playback_bar_line(80, "01:23", 0.3, "04:56", "♪ 70%", CacheState::Downloading(0.6));
+        let line = build_playback_bar_line(
+            80,
+            "01:23",
+            0.3,
+            "04:56",
+            "♪ 70%",
+            CacheState::Downloading(0.6),
+        );
         let text = line_to_string(&line);
-        assert!(text.contains("01:23"), "should contain position in download mode: {text:?}");
-        assert!(text.contains("04:56"), "should contain duration in download mode: {text:?}");
+        assert!(
+            text.contains("01:23"),
+            "should contain position in download mode: {text:?}"
+        );
+        assert!(
+            text.contains("04:56"),
+            "should contain duration in download mode: {text:?}"
+        );
     }
 
     #[test]
     fn playback_bar_no_panic_on_zero_width() {
         // Should not panic with very small widths
         for w in [0, 1, 5, 10] {
-            let _line = build_playback_bar_line(w, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
+            let _line =
+                build_playback_bar_line(w, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
         }
     }
 
     #[test]
     fn playback_bar_no_panic_on_narrow_terminal() {
         for w in [20, 30, 40] {
-            let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Cached);
-            let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Streaming);
-            let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Downloading(0.3));
-            let _line = build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Failed);
+            let _line =
+                build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Cached);
+            let _line =
+                build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Streaming);
+            let _line = build_playback_bar_line(
+                w,
+                "00:03",
+                0.5,
+                "55:34",
+                "♪ 85%",
+                CacheState::Downloading(0.3),
+            );
+            let _line =
+                build_playback_bar_line(w, "00:03", 0.5, "55:34", "♪ 85%", CacheState::Failed);
         }
     }
 
@@ -866,7 +1000,8 @@ mod tests {
     #[test]
     fn playback_bar_streaming_color_dim_on_cache_span() {
         let text_dim = Color::Rgb(130, 130, 130);
-        let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Streaming);
+        let line =
+            build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Streaming);
         let stream_span = line.spans.iter().find(|s| s.content.contains("◌ Stream"));
         assert!(stream_span.is_some(), "streaming span should exist");
         assert_eq!(
@@ -879,17 +1014,37 @@ mod tests {
     #[test]
     fn playback_bar_downloading_0_percent() {
         // dl_ratio = 0.0 → "0%"
-        let line = build_playback_bar_line(80, "00:00", 0.0, "10:00", "♪ 80%", CacheState::Downloading(0.0));
+        let line = build_playback_bar_line(
+            80,
+            "00:00",
+            0.0,
+            "10:00",
+            "♪ 80%",
+            CacheState::Downloading(0.0),
+        );
         let text = line_to_string(&line);
-        assert!(text.contains("0%"), "should show 0% when download just started: {text:?}");
+        assert!(
+            text.contains("0%"),
+            "should show 0% when download just started: {text:?}"
+        );
     }
 
     #[test]
     fn playback_bar_downloading_100_percent() {
         // dl_ratio = 1.0 → "100%"
-        let line = build_playback_bar_line(80, "05:00", 0.5, "10:00", "♪ 80%", CacheState::Downloading(1.0));
+        let line = build_playback_bar_line(
+            80,
+            "05:00",
+            0.5,
+            "10:00",
+            "♪ 80%",
+            CacheState::Downloading(1.0),
+        );
         let text = line_to_string(&line);
-        assert!(text.contains("100%"), "should show 100% when download complete: {text:?}");
+        assert!(
+            text.contains("100%"),
+            "should show 100% when download complete: {text:?}"
+        );
     }
 
     #[test]
@@ -905,7 +1060,10 @@ mod tests {
     fn playback_bar_starts_with_space() {
         let line = build_playback_bar_line(80, "00:03", 0.1, "55:34", "♪ 85%", CacheState::Cached);
         assert!(!line.spans.is_empty(), "should have spans");
-        assert_eq!(line.spans[0].content, " ", "should start with leading space");
+        assert_eq!(
+            line.spans[0].content, " ",
+            "should start with leading space"
+        );
     }
 
     #[test]
@@ -940,13 +1098,22 @@ mod tests {
         let bar_text = line_to_string(&bar);
 
         // Each row should have distinct primary content
-        assert!(header_text.contains("🎵 Now Playing"), "header row missing label");
+        assert!(
+            header_text.contains("🎵 Now Playing"),
+            "header row missing label"
+        );
         assert!(track_text.contains("My Song"), "track row missing title");
         assert!(bar_text.contains("00:30"), "playback row missing position");
 
         // Content should not cross between rows
-        assert!(!track_text.contains("🎵 Now Playing"), "track row should not contain header label");
-        assert!(!header_text.contains("My Song"), "header row should not contain track title");
+        assert!(
+            !track_text.contains("🎵 Now Playing"),
+            "track row should not contain header label"
+        );
+        assert!(
+            !header_text.contains("My Song"),
+            "header row should not contain track title"
+        );
     }
 
     #[test]
@@ -976,7 +1143,8 @@ mod tests {
     #[test]
     fn now_playing_row3_playback_bar_structure() {
         // Row 3: integrated position + progress + duration + volume + cache
-        let line = build_playback_bar_line(80, "02:15", 0.3, "07:30", "♪ 75%", CacheState::Streaming);
+        let line =
+            build_playback_bar_line(80, "02:15", 0.3, "07:30", "♪ 75%", CacheState::Streaming);
         let text = line_to_string(&line);
         assert!(text.contains("02:15"), "position");
         assert!(text.contains("07:30"), "duration");
@@ -1000,9 +1168,18 @@ mod tests {
                 let _header = build_now_playing_header_line(w, *center, *speed);
             }
             let _track = build_track_info_line(w, "Title", "Artist", "source");
-            let _bar_cached = build_playback_bar_line(w, "01:00", 0.5, "02:00", "♪ 80%", CacheState::Cached);
-            let _bar_stream = build_playback_bar_line(w, "01:00", 0.5, "02:00", "♪ 80%", CacheState::Streaming);
-            let _bar_dl = build_playback_bar_line(w, "01:00", 0.5, "02:00", "♪ 80%", CacheState::Downloading(0.6));
+            let _bar_cached =
+                build_playback_bar_line(w, "01:00", 0.5, "02:00", "♪ 80%", CacheState::Cached);
+            let _bar_stream =
+                build_playback_bar_line(w, "01:00", 0.5, "02:00", "♪ 80%", CacheState::Streaming);
+            let _bar_dl = build_playback_bar_line(
+                w,
+                "01:00",
+                0.5,
+                "02:00",
+                "♪ 80%",
+                CacheState::Downloading(0.6),
+            );
         }
     }
 
@@ -1014,10 +1191,12 @@ mod tests {
         // We validate this with actual ratatui layout math.
         use ratatui::layout::{Constraint, Layout, Rect};
         let outer = Rect::new(0, 0, 80, 4); // Length(4) outer area
-        let block = ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::TOP);
+        let block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::TOP);
         let inner = block.inner(outer);
-        assert_eq!(inner.height, 3, "Borders::TOP on a 4-row area leaves 3 rows for content");
+        assert_eq!(
+            inner.height, 3,
+            "Borders::TOP on a 4-row area leaves 3 rows for content"
+        );
 
         let rows = Layout::vertical([
             Constraint::Length(1),
@@ -1027,16 +1206,28 @@ mod tests {
         .split(inner);
         assert_eq!(rows[0].height, 1, "header row height");
         assert_eq!(rows[1].height, 1, "track info row height");
-        assert_eq!(rows[2].height, 1, "playback bar row height — must be 1, not 0");
+        assert_eq!(
+            rows[2].height, 1,
+            "playback bar row height — must be 1, not 0"
+        );
     }
 
     #[test]
     fn now_playing_cache_state_removed_from_old_row() {
         // Verify cache status is integrated into row 3 (playback bar),
         // not in a separate fourth row. The playback bar should contain cache info.
-        let cached_line = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 90%", CacheState::Cached);
-        let stream_line = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 90%", CacheState::Streaming);
-        let dl_line = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 90%", CacheState::Downloading(0.5));
+        let cached_line =
+            build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 90%", CacheState::Cached);
+        let stream_line =
+            build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 90%", CacheState::Streaming);
+        let dl_line = build_playback_bar_line(
+            80,
+            "00:10",
+            0.2,
+            "01:00",
+            "♪ 90%",
+            CacheState::Downloading(0.5),
+        );
 
         let cached_text = line_to_string(&cached_line);
         let stream_text = line_to_string(&stream_line);
@@ -1065,16 +1256,25 @@ mod tests {
         // Speed is only in row 1, not in row 2 or 3
         assert!(h.contains("1.2×"), "speed in header");
         assert!(!t.contains("1.2×"), "speed must not bleed into track info");
-        assert!(!b.contains("1.2×"), "speed must not bleed into playback bar");
+        assert!(
+            !b.contains("1.2×"),
+            "speed must not bleed into playback bar"
+        );
 
         // Track title is only in row 2
         assert!(t.contains("Cool Track"), "title in track info");
-        assert!(!h.contains("Cool Track"), "title must not bleed into header");
+        assert!(
+            !h.contains("Cool Track"),
+            "title must not bleed into header"
+        );
 
         // Position time is only in row 3
         assert!(b.contains("00:45"), "position in playback bar");
         assert!(!h.contains("00:45"), "position must not bleed into header");
-        assert!(!t.contains("00:45"), "position must not bleed into track info");
+        assert!(
+            !t.contains("00:45"),
+            "position must not bleed into track info"
+        );
     }
 
     // ── UI consistency / make_panel_block tests ───────────────────────────────
@@ -1085,7 +1285,10 @@ mod tests {
         let focused = make_panel_block(" My Panel ", true);
         let unfocused = make_panel_block(" My Panel ", false);
         // Blocks with different border colors are not equal
-        assert_ne!(focused, unfocused, "focused and unfocused panels should differ");
+        assert_ne!(
+            focused, unfocused,
+            "focused and unfocused panels should differ"
+        );
     }
 
     #[test]
@@ -1093,14 +1296,20 @@ mod tests {
         // Calling make_panel_block twice with same args should produce equal blocks
         let block1 = make_panel_block(" Settings ", true);
         let block2 = make_panel_block(" Settings ", true);
-        assert_eq!(block1, block2, "same focus state should produce identical blocks");
+        assert_eq!(
+            block1, block2,
+            "same focus state should produce identical blocks"
+        );
     }
 
     #[test]
     fn panel_block_different_titles_are_distinct() {
         let settings = make_panel_block(" ⚙ Settings ", false);
         let tracks = make_panel_block(" My Playlist ", false);
-        assert_ne!(settings, tracks, "different titles should produce different blocks");
+        assert_ne!(
+            settings, tracks,
+            "different titles should produce different blocks"
+        );
     }
 
     #[test]
@@ -1125,12 +1334,24 @@ mod tests {
         let tracks_idle = make_panel_block(" My Tracks ", false);
 
         // Each panel: focused ≠ unfocused
-        assert_ne!(settings_focused, settings_idle, "settings focused vs idle should differ");
-        assert_ne!(tracks_focused, tracks_idle, "track table focused vs idle should differ");
+        assert_ne!(
+            settings_focused, settings_idle,
+            "settings focused vs idle should differ"
+        );
+        assert_ne!(
+            tracks_focused, tracks_idle,
+            "track table focused vs idle should differ"
+        );
 
         // Cross-panel with same focus: should differ only by title
-        assert_ne!(settings_focused, tracks_focused, "different panel titles should differ");
-        assert_ne!(settings_idle, tracks_idle, "different panel titles should differ");
+        assert_ne!(
+            settings_focused, tracks_focused,
+            "different panel titles should differ"
+        );
+        assert_ne!(
+            settings_idle, tracks_idle,
+            "different panel titles should differ"
+        );
     }
 
     // ── Task 9: Acceptance criteria and edge case verification ────────────────
@@ -1144,10 +1365,16 @@ mod tests {
         let paused = build_now_playing_header_line(80, Some("⏸ Paused"), Some("1.0×"));
         let no_track = build_now_playing_header_line(80, None, None);
 
-        for (name, line) in [("playing", &playing), ("paused", &paused), ("no_track", &no_track)] {
+        for (name, line) in [
+            ("playing", &playing),
+            ("paused", &paused),
+            ("no_track", &no_track),
+        ] {
             let text = line_to_string(line);
-            assert!(text.contains("🎵 Now Playing"),
-                "header must always show label in state {name}: {text:?}");
+            assert!(
+                text.contains("🎵 Now Playing"),
+                "header must always show label in state {name}: {text:?}"
+            );
         }
     }
 
@@ -1164,11 +1391,22 @@ mod tests {
         assert!(text.contains("▶ Playing"), "status present");
         assert!(text.contains("1.4×"), "speed present");
 
-        let label_span = line.spans.iter().find(|s| s.content.contains("🎵 Now Playing"));
+        let label_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("🎵 Now Playing"));
         let speed_span = line.spans.iter().find(|s| s.content.contains("1.4×"));
 
-        assert_eq!(label_span.unwrap().style.fg, Some(gold), "label must be GOLD");
-        assert_eq!(speed_span.unwrap().style.fg, Some(accent), "speed must be ACCENT");
+        assert_eq!(
+            label_span.unwrap().style.fg,
+            Some(gold),
+            "label must be GOLD"
+        );
+        assert_eq!(
+            speed_span.unwrap().style.fg,
+            Some(accent),
+            "speed must be ACCENT"
+        );
     }
 
     #[test]
@@ -1185,13 +1423,34 @@ mod tests {
         assert!(text.contains("youtube.com/watch"), "source present");
         assert!(text.contains(" • "), "bullet separators present");
 
-        let title_span = line.spans.iter().find(|s| s.content.contains("My Track Title"));
-        let artist_span = line.spans.iter().find(|s| s.content.contains("Great Artist"));
-        let source_span = line.spans.iter().find(|s| s.content.contains("youtube.com/watch"));
+        let title_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("My Track Title"));
+        let artist_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("Great Artist"));
+        let source_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("youtube.com/watch"));
 
-        assert_eq!(title_span.unwrap().style.fg, Some(white), "title must be white");
-        assert_eq!(artist_span.unwrap().style.fg, Some(text_dim), "artist must be TEXT_DIM");
-        assert_eq!(source_span.unwrap().style.fg, Some(text_dim), "source must be TEXT_DIM");
+        assert_eq!(
+            title_span.unwrap().style.fg,
+            Some(white),
+            "title must be white"
+        );
+        assert_eq!(
+            artist_span.unwrap().style.fg,
+            Some(text_dim),
+            "artist must be TEXT_DIM"
+        );
+        assert_eq!(
+            source_span.unwrap().style.fg,
+            Some(text_dim),
+            "source must be TEXT_DIM"
+        );
     }
 
     #[test]
@@ -1221,28 +1480,66 @@ mod tests {
 
         // Header: label=GOLD, speed=ACCENT
         let header = build_now_playing_header_line(80, Some("▶ Playing"), Some("1.4×"));
-        let label_span = header.spans.iter().find(|s| s.content.contains("🎵 Now Playing")).unwrap();
-        let speed_span = header.spans.iter().find(|s| s.content.contains("1.4×")).unwrap();
+        let label_span = header
+            .spans
+            .iter()
+            .find(|s| s.content.contains("🎵 Now Playing"))
+            .unwrap();
+        let speed_span = header
+            .spans
+            .iter()
+            .find(|s| s.content.contains("1.4×"))
+            .unwrap();
         assert_eq!(label_span.style.fg, Some(gold), "header label must be GOLD");
-        assert_eq!(speed_span.style.fg, Some(accent), "header speed must be ACCENT");
+        assert_eq!(
+            speed_span.style.fg,
+            Some(accent),
+            "header speed must be ACCENT"
+        );
 
         // Track info: artist=TEXT_DIM
         let track = build_track_info_line(80, "Title", "Artist", "source.com");
-        let artist_span = track.spans.iter().find(|s| s.content.contains("Artist")).unwrap();
-        assert_eq!(artist_span.style.fg, Some(text_dim), "artist must be TEXT_DIM");
+        let artist_span = track
+            .spans
+            .iter()
+            .find(|s| s.content.contains("Artist"))
+            .unwrap();
+        assert_eq!(
+            artist_span.style.fg,
+            Some(text_dim),
+            "artist must be TEXT_DIM"
+        );
 
         // Playback bar: cached indicator=SEA_GREEN
         let bar = build_playback_bar_line(80, "00:00", 0.0, "01:00", "♪ 80%", CacheState::Cached);
-        let cache_span = bar.spans.iter().find(|s| s.content.contains("◈ Cached")).unwrap();
-        assert_eq!(cache_span.style.fg, Some(sea_green), "cached indicator must be SEA_GREEN");
+        let cache_span = bar
+            .spans
+            .iter()
+            .find(|s| s.content.contains("◈ Cached"))
+            .unwrap();
+        assert_eq!(
+            cache_span.style.fg,
+            Some(sea_green),
+            "cached indicator must be SEA_GREEN"
+        );
 
         // Progress bar: fill color=SEA_GREEN, empty color=BORDER_IDLE
         let border_idle = Color::Rgb(70, 70, 70);
         let bar_spans = build_progress_bar(20, 0.5, '━', '─', '◉', sea_green, border_idle);
-        let fill_spans: Vec<_> = bar_spans.iter().filter(|s| s.content.contains('━')).collect();
-        let empty_spans: Vec<_> = bar_spans.iter().filter(|s| s.content.contains('─')).collect();
-        for s in &fill_spans { assert_eq!(s.style.fg, Some(sea_green), "fill must be SEA_GREEN"); }
-        for s in &empty_spans { assert_eq!(s.style.fg, Some(border_idle), "empty must be BORDER_IDLE"); }
+        let fill_spans: Vec<_> = bar_spans
+            .iter()
+            .filter(|s| s.content.contains('━'))
+            .collect();
+        let empty_spans: Vec<_> = bar_spans
+            .iter()
+            .filter(|s| s.content.contains('─'))
+            .collect();
+        for s in &fill_spans {
+            assert_eq!(s.style.fg, Some(sea_green), "fill must be SEA_GREEN");
+        }
+        for s in &empty_spans {
+            assert_eq!(s.style.fg, Some(border_idle), "empty must be BORDER_IDLE");
+        }
     }
 
     // --- Edge case: very narrow terminal ---
@@ -1266,7 +1563,12 @@ mod tests {
         // At 40 chars (below recommended), should not panic but content may be limited
         let w = 40usize;
         let _h = build_now_playing_header_line(w, Some("▶ Playing"), Some("1.0×"));
-        let _t = build_track_info_line(w, "A Very Long Track Title Indeed", "Long Artist Name", "very-long-source-url.com/watch?v=abc");
+        let _t = build_track_info_line(
+            w,
+            "A Very Long Track Title Indeed",
+            "Long Artist Name",
+            "very-long-source-url.com/watch?v=abc",
+        );
         let _b = build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Cached);
     }
 
@@ -1276,9 +1578,18 @@ mod tests {
         for w in [1, 5, 10, 15, 20] {
             let _h = build_now_playing_header_line(w, Some("▶ Playing"), Some("1.0×"));
             let _t = build_track_info_line(w, "Track Title", "Artist Name", "source.com");
-            let _b_cached = build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Cached);
-            let _b_stream = build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Streaming);
-            let _b_dl = build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Downloading(0.5));
+            let _b_cached =
+                build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Cached);
+            let _b_stream =
+                build_playback_bar_line(w, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Streaming);
+            let _b_dl = build_playback_bar_line(
+                w,
+                "00:30",
+                0.5,
+                "01:00",
+                "♪ 80%",
+                CacheState::Downloading(0.5),
+            );
         }
     }
 
@@ -1295,8 +1606,10 @@ mod tests {
             assert_eq!(widths[2], 5, "fixed section 2 should be 5 for w={w}");
             // flexible section gets the remaining space (non-negative)
             let expected_flex = w.saturating_sub(20);
-            assert_eq!(widths[1], expected_flex,
-                "flexible section should be max(0, w-20) for w={w}: {widths:?}");
+            assert_eq!(
+                widths[1], expected_flex,
+                "flexible section should be max(0, w-20) for w={w}: {widths:?}"
+            );
         }
         // Overflow case: when fixed widths exceed total_width, flexible section is 0
         // and sum > total_width (fixed sections retain their sizes)
@@ -1304,7 +1617,10 @@ mod tests {
         assert_eq!(overflow[0], 15, "fixed section 0 unchanged in overflow");
         assert_eq!(overflow[2], 5, "fixed section 2 unchanged in overflow");
         assert_eq!(overflow[1], 0, "flexible section is 0 in overflow");
-        assert!(overflow.iter().sum::<usize>() > 10, "sum exceeds total_width in overflow case");
+        assert!(
+            overflow.iter().sum::<usize>() > 10,
+            "sum exceeds total_width in overflow case"
+        );
     }
 
     // --- Edge case: no tracks ---
@@ -1313,7 +1629,10 @@ mod tests {
     fn edge_case_no_track_header_shows_no_track_selected() {
         let line = build_now_playing_header_line(80, None, None);
         let text = line_to_string(&line);
-        assert!(text.contains("No track selected"), "no-track state: {text:?}");
+        assert!(
+            text.contains("No track selected"),
+            "no-track state: {text:?}"
+        );
     }
 
     #[test]
@@ -1329,7 +1648,10 @@ mod tests {
         let line = build_now_playing_header_line(80, None, None);
         let text = line_to_string(&line);
         // In no-track mode, no speed "×" suffix should appear
-        assert!(!text.contains('×'), "no track should not show speed: {text:?}");
+        assert!(
+            !text.contains('×'),
+            "no track should not show speed: {text:?}"
+        );
     }
 
     // --- Edge case: long titles ---
@@ -1341,9 +1663,15 @@ mod tests {
         let text = line_to_string(&line);
         // Content should fit within width (leading space + content)
         let char_count = text.chars().count();
-        assert!(char_count <= 82, "long title must be truncated: {char_count} chars");
+        assert!(
+            char_count <= 82,
+            "long title must be truncated: {char_count} chars"
+        );
         // Truncation should use ellipsis
-        assert!(text.contains('…'), "truncated text should end with ellipsis: {text:?}");
+        assert!(
+            text.contains('…'),
+            "truncated text should end with ellipsis: {text:?}"
+        );
     }
 
     #[test]
@@ -1352,7 +1680,10 @@ mod tests {
         let line = build_track_info_line(80, "Short Title", &long_artist, "source.com");
         let text = line_to_string(&line);
         let char_count = text.chars().count();
-        assert!(char_count <= 82, "long artist must be truncated: {char_count} chars");
+        assert!(
+            char_count <= 82,
+            "long artist must be truncated: {char_count} chars"
+        );
     }
 
     #[test]
@@ -1361,7 +1692,10 @@ mod tests {
         let line = build_track_info_line(80, "Title", "Artist", &long_source);
         let text = line_to_string(&line);
         let char_count = text.chars().count();
-        assert!(char_count <= 82, "long source must be truncated: {char_count} chars");
+        assert!(
+            char_count <= 82,
+            "long source must be truncated: {char_count} chars"
+        );
     }
 
     #[test]
@@ -1371,8 +1705,10 @@ mod tests {
         let text = line_to_string(&line);
         // "My Important Track Title" (24) doesn't fit in 29 chars with separators,
         // but its beginning should be there since it has priority
-        assert!(text.starts_with(" M") || text.contains("My "),
-            "title should have truncation priority: {text:?}");
+        assert!(
+            text.starts_with(" M") || text.contains("My "),
+            "title should have truncation priority: {text:?}"
+        );
     }
 
     // --- All playback states: stopped/no-track, playing, paused, downloading ---
@@ -1387,7 +1723,10 @@ mod tests {
         // Header with no track
         let line = build_now_playing_header_line(80, None, None);
         let header_text = line_to_string(&line);
-        assert!(header_text.contains("No track selected"), "no-track header text");
+        assert!(
+            header_text.contains("No track selected"),
+            "no-track header text"
+        );
     }
 
     #[test]
@@ -1407,7 +1746,10 @@ mod tests {
         let center = format!("{} {}", icon, text);
         let line = build_now_playing_header_line(80, Some(&center), Some("1.5×"));
         let header_text = line_to_string(&line);
-        assert!(header_text.contains("▶ Playing"), "header shows playing state");
+        assert!(
+            header_text.contains("▶ Playing"),
+            "header shows playing state"
+        );
     }
 
     #[test]
@@ -1419,30 +1761,68 @@ mod tests {
         let center = format!("{} {}", icon, text);
         let line = build_now_playing_header_line(80, Some(&center), Some("1.0×"));
         let header_text = line_to_string(&line);
-        assert!(header_text.contains("⏸ Paused"), "header shows paused state");
+        assert!(
+            header_text.contains("⏸ Paused"),
+            "header shows paused state"
+        );
     }
 
     #[test]
     fn playback_state_downloading_display() {
         // Downloading state shows caching indicator with percentage
-        let line_25 = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Downloading(0.25));
-        let line_75 = build_playback_bar_line(80, "00:30", 0.5, "01:00", "♪ 80%", CacheState::Downloading(0.75));
+        let line_25 = build_playback_bar_line(
+            80,
+            "00:10",
+            0.2,
+            "01:00",
+            "♪ 80%",
+            CacheState::Downloading(0.25),
+        );
+        let line_75 = build_playback_bar_line(
+            80,
+            "00:30",
+            0.5,
+            "01:00",
+            "♪ 80%",
+            CacheState::Downloading(0.75),
+        );
 
         let text_25 = line_to_string(&line_25);
         let text_75 = line_to_string(&line_75);
 
-        assert!(text_25.contains("⟳ Caching"), "downloading: caching label at 25%: {text_25:?}");
-        assert!(text_25.contains("25%"), "downloading: percentage 25%: {text_25:?}");
-        assert!(text_75.contains("⟳ Caching"), "downloading: caching label at 75%: {text_75:?}");
-        assert!(text_75.contains("75%"), "downloading: percentage 75%: {text_75:?}");
+        assert!(
+            text_25.contains("⟳ Caching"),
+            "downloading: caching label at 25%: {text_25:?}"
+        );
+        assert!(
+            text_25.contains("25%"),
+            "downloading: percentage 25%: {text_25:?}"
+        );
+        assert!(
+            text_75.contains("⟳ Caching"),
+            "downloading: caching label at 75%: {text_75:?}"
+        );
+        assert!(
+            text_75.contains("75%"),
+            "downloading: percentage 75%: {text_75:?}"
+        );
     }
 
     #[test]
     fn playback_state_all_cache_states_covered() {
         // All three cache states must be visually distinct and clearly indicated
-        let cached = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Cached);
-        let streaming = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Streaming);
-        let downloading = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Downloading(0.5));
+        let cached =
+            build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Cached);
+        let streaming =
+            build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", CacheState::Streaming);
+        let downloading = build_playback_bar_line(
+            80,
+            "00:10",
+            0.2,
+            "01:00",
+            "♪ 80%",
+            CacheState::Downloading(0.5),
+        );
 
         let ct = line_to_string(&cached);
         let st = line_to_string(&streaming);
@@ -1476,7 +1856,11 @@ mod tests {
         let widths = calculate_distributed_widths(w, 3, &[(1, 5), (2, 3)]);
         assert_eq!(widths[1], 5, "fixed section 1");
         assert_eq!(widths[2], 3, "fixed section 2");
-        assert_eq!(widths[0], w.saturating_sub(5 + 3), "flexible section saturates");
+        assert_eq!(
+            widths[0],
+            w.saturating_sub(5 + 3),
+            "flexible section saturates"
+        );
     }
 
     #[test]
@@ -1494,10 +1878,18 @@ mod tests {
     fn layout_track_info_width_bounds_respected() {
         // At various widths, track info line should not exceed width + margin
         for w in [40, 60, 80, 100, 120] {
-            let line = build_track_info_line(w, "Song Title That Is Somewhat Long", "Artist Name Here", "source.com/path");
+            let line = build_track_info_line(
+                w,
+                "Song Title That Is Somewhat Long",
+                "Artist Name Here",
+                "source.com/path",
+            );
             let char_count = line_to_string(&line).chars().count();
-            assert!(char_count <= w + 2,
-                "track info at w={w}: {char_count} chars > {}", w + 2);
+            assert!(
+                char_count <= w + 2,
+                "track info at w={w}: {char_count} chars > {}",
+                w + 2
+            );
         }
     }
 
@@ -1508,8 +1900,11 @@ mod tests {
         assert_eq!(format_duration(59), "00:59", "59 seconds");
         assert_eq!(format_duration(3599), "59:59", "59m59s");
         assert_eq!(format_duration(3600), "01:00:00", "exactly 1 hour");
-        assert_eq!(format_duration(u64::MAX / 3600 * 3600), // large hours value
-            format!("{:02}:00:00", u64::MAX / 3600), "large duration");
+        assert_eq!(
+            format_duration(u64::MAX / 3600 * 3600), // large hours value
+            format!("{:02}:00:00", u64::MAX / 3600),
+            "large duration"
+        );
     }
 
     #[test]
@@ -1527,13 +1922,20 @@ mod tests {
     fn cache_status_integrated_into_row3_not_separate_row() {
         // Cache status is part of the playback bar (row 3), not a fourth separate row.
         // Verify by checking the playback bar contains cache info directly.
-        for state in [CacheState::Cached, CacheState::Streaming, CacheState::Downloading(0.3)] {
+        for state in [
+            CacheState::Cached,
+            CacheState::Streaming,
+            CacheState::Downloading(0.3),
+        ] {
             let line = build_playback_bar_line(80, "00:10", 0.2, "01:00", "♪ 80%", state.clone());
             let text = line_to_string(&line);
             let has_cache_info = text.contains("◈ Cached")
                 || text.contains("◌ Stream")
                 || text.contains("⟳ Caching");
-            assert!(has_cache_info, "row 3 must contain cache info for state {state:?}: {text:?}");
+            assert!(
+                has_cache_info,
+                "row 3 must contain cache info for state {state:?}: {text:?}"
+            );
         }
     }
 
@@ -1565,7 +1967,10 @@ mod tests {
         // Active playlist is "Jazz", no other playlists registered
         let app = make_app_with_playlists("Jazz", &["Jazz"]);
         let items = app.available_playlist_names();
-        assert!(items.is_empty(), "should be empty when only active playlist exists: {items:?}");
+        assert!(
+            items.is_empty(),
+            "should be empty when only active playlist exists: {items:?}"
+        );
     }
 
     #[test]
@@ -1573,9 +1978,18 @@ mod tests {
         // Three playlists; active is "Jazz" — should return the other two
         let app = make_app_with_playlists("Jazz", &["Jazz", "Rock", "Classical"]);
         let items = app.available_playlist_names();
-        assert!(!items.contains(&"Jazz".to_string()), "active playlist must be excluded");
-        assert!(items.contains(&"Rock".to_string()), "Rock should be in items");
-        assert!(items.contains(&"Classical".to_string()), "Classical should be in items");
+        assert!(
+            !items.contains(&"Jazz".to_string()),
+            "active playlist must be excluded"
+        );
+        assert!(
+            items.contains(&"Rock".to_string()),
+            "Rock should be in items"
+        );
+        assert!(
+            items.contains(&"Classical".to_string()),
+            "Classical should be in items"
+        );
         assert_eq!(items.len(), 2, "should have exactly 2 items");
     }
 
@@ -1591,7 +2005,10 @@ mod tests {
         // available_playlists is empty
         let app = make_app_with_playlists("Main", &[]);
         let items = app.available_playlist_names();
-        assert!(items.is_empty(), "should be empty with no available_playlists");
+        assert!(
+            items.is_empty(),
+            "should be empty with no available_playlists"
+        );
     }
 
     #[test]
@@ -1600,7 +2017,10 @@ mod tests {
         let app = make_app_with_playlists("Active", names);
         let items = app.available_playlist_names();
         assert_eq!(items.len(), 5, "should exclude 1 active from 6 total");
-        assert!(!items.contains(&"Active".to_string()), "Active must be excluded");
+        assert!(
+            !items.contains(&"Active".to_string()),
+            "Active must be excluded"
+        );
         for n in &["A", "B", "C", "D", "E"] {
             assert!(items.contains(&n.to_string()), "{n} should be included");
         }
@@ -1611,16 +2031,28 @@ mod tests {
         // available_playlist_names must exclude the active playlist and preserve sorted order
         let app = make_app_with_playlists("Jazz", &["Jazz", "Rock", "Classical"]);
         let names = app.available_playlist_names();
-        assert!(!names.contains(&"Jazz".to_string()), "active playlist must be excluded");
-        assert!(names.contains(&"Rock".to_string()), "Rock should be included");
-        assert!(names.contains(&"Classical".to_string()), "Classical should be included");
+        assert!(
+            !names.contains(&"Jazz".to_string()),
+            "active playlist must be excluded"
+        );
+        assert!(
+            names.contains(&"Rock".to_string()),
+            "Rock should be included"
+        );
+        assert!(
+            names.contains(&"Classical".to_string()),
+            "Classical should be included"
+        );
         assert_eq!(names.len(), 2, "exactly two non-active playlists");
     }
 
     #[test]
     fn context_menu_selected_initialized_to_zero() {
         let app = make_app_with_playlists("Main", &["Main", "Other"]);
-        assert_eq!(app.context_menu_selected, 0, "context_menu_selected should start at 0");
+        assert_eq!(
+            app.context_menu_selected, 0,
+            "context_menu_selected should start at 0"
+        );
     }
 
     #[test]
@@ -1651,7 +2083,11 @@ mod tests {
         if app.context_menu_selected + 1 < count {
             app.context_menu_selected += 1;
         }
-        assert_eq!(app.context_menu_selected, count - 1, "should clamp at last item");
+        assert_eq!(
+            app.context_menu_selected,
+            count - 1,
+            "should clamp at last item"
+        );
     }
 
     #[test]
@@ -1776,7 +2212,10 @@ mod tests {
         pl.add_track(make_track("vid1", "Track One"));
         pl.current_track = Some("vid1".to_string());
         pl.remove_track_by_video_id("vid1");
-        assert!(pl.current_track.is_none(), "current_track should be cleared");
+        assert!(
+            pl.current_track.is_none(),
+            "current_track should be cleared"
+        );
     }
 
     #[test]
@@ -1786,7 +2225,11 @@ mod tests {
         pl.add_track(make_track("vid2", "Track Two"));
         pl.current_track = Some("vid2".to_string());
         pl.remove_track_by_video_id("vid1");
-        assert_eq!(pl.current_track.as_deref(), Some("vid2"), "current_track should be preserved");
+        assert_eq!(
+            pl.current_track.as_deref(),
+            Some("vid2"),
+            "current_track should be preserved"
+        );
     }
 
     #[test]
@@ -1814,13 +2257,19 @@ mod tests {
             playlist.add_track(make_track(id, title));
         }
         let config = crate::config::Config::default();
-        let mut available: Vec<(String, PathBuf)> = vec![
-            (active.to_string(), PathBuf::from(format!("/fake/{active}.toml"))),
-        ];
+        let mut available: Vec<(String, PathBuf)> = vec![(
+            active.to_string(),
+            PathBuf::from(format!("/fake/{active}.toml")),
+        )];
         for t in targets {
             available.push((t.to_string(), PathBuf::from(format!("/fake/{t}.toml"))));
         }
-        crate::tui::App::new(playlist, config, available, PathBuf::from(format!("/fake/{active}.toml")))
+        crate::tui::App::new(
+            playlist,
+            config,
+            available,
+            PathBuf::from(format!("/fake/{active}.toml")),
+        )
     }
 
     #[test]
@@ -1831,7 +2280,10 @@ mod tests {
             &[], // no targets at all
         );
         let result = app.move_track_to_playlist("NonExistent");
-        assert!(result.is_err(), "should fail when target not in available_playlists");
+        assert!(
+            result.is_err(),
+            "should fail when target not in available_playlists"
+        );
     }
 
     #[test]
@@ -1887,14 +2339,26 @@ mod tests {
 
         // Critical invariants: player cleared, playing session cleared,
         // current_track cleared, is_paused reset
-        assert!(app.player.is_none(), "player must be None after moving current track");
-        assert!(app.playing.is_none(), "playing session must be cleared after moving the playing track");
-        assert!(app.playlist.current_track.is_none(), "current_track must be cleared");
+        assert!(
+            app.player.is_none(),
+            "player must be None after moving current track"
+        );
+        assert!(
+            app.playing.is_none(),
+            "playing session must be cleared after moving the playing track"
+        );
+        assert!(
+            app.playlist.current_track.is_none(),
+            "current_track must be cleared"
+        );
         assert!(!app.is_paused, "is_paused must be reset to false");
         assert_eq!(app.position, 0.0, "position must be reset");
 
         // Source playlist must no longer contain vid1
-        assert!(app.playlist.tracks.is_empty(), "source playlist should be empty after move");
+        assert!(
+            app.playlist.tracks.is_empty(),
+            "source playlist should be empty after move"
+        );
     }
 
     #[test]
@@ -1934,7 +2398,10 @@ mod tests {
             app.selected -= 1;
         }
         // selected=0 < new_count=2, so no clamping
-        assert_eq!(app.selected, 0, "selection should stay at 0 when not out of bounds");
+        assert_eq!(
+            app.selected, 0,
+            "selection should stay at 0 when not out of bounds"
+        );
     }
 
     #[test]
@@ -1945,14 +2412,20 @@ mod tests {
         pl.add_track(track);
         let removed = pl.remove_track_by_video_id("vid1");
         assert!(removed.is_some());
-        assert!(pl.tracks.is_empty(), "playlist should be empty after round trip");
+        assert!(
+            pl.tracks.is_empty(),
+            "playlist should be empty after round trip"
+        );
     }
 
     #[test]
     fn remove_track_from_empty_playlist_returns_none() {
         let mut pl = make_playlist("Empty");
         let result = pl.remove_track_by_video_id("vid1");
-        assert!(result.is_none(), "removing from empty playlist should return None");
+        assert!(
+            result.is_none(),
+            "removing from empty playlist should return None"
+        );
     }
 
     #[test]
@@ -1962,14 +2435,20 @@ mod tests {
             pl.add_track(make_track(&format!("vid{i}"), &format!("Track {i}")));
         }
         for (i, track) in pl.tracks.iter().enumerate() {
-            assert_eq!(track.video_id, format!("vid{i}"), "track order must be preserved");
+            assert_eq!(
+                track.video_id,
+                format!("vid{i}"),
+                "track order must be preserved"
+            );
         }
     }
 
     // ── App::switch_to_playlist tests ─────────────────────────────────────────
 
     /// Write a playlist to a temp file and return the path.
-    fn write_temp_playlist(pl: &crate::playlist::Playlist) -> (tempfile::TempDir, std::path::PathBuf) {
+    fn write_temp_playlist(
+        pl: &crate::playlist::Playlist,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(format!("{}.toml", pl.name));
         pl.save(&path).expect("save");
@@ -1983,7 +2462,8 @@ mod tests {
         let beta = make_playlist("Beta");
         let (_dir, path) = write_temp_playlist(&beta);
 
-        app.switch_to_playlist("Beta", &path).expect("switch should succeed");
+        app.switch_to_playlist("Beta", &path)
+            .expect("switch should succeed");
 
         assert_eq!(app.playlist.name, "Beta");
         assert_eq!(app.playlist_path, path);
@@ -2016,7 +2496,10 @@ mod tests {
         app.switch_to_playlist("Beta", &path).expect("switch");
 
         assert!(app.input_buf.is_empty(), "input_buf should be cleared");
-        assert!(app.filtered_indices.is_empty(), "filtered_indices should be cleared");
+        assert!(
+            app.filtered_indices.is_empty(),
+            "filtered_indices should be cleared"
+        );
     }
 
     #[test]
@@ -2030,8 +2513,14 @@ mod tests {
 
         app.switch_to_playlist("Beta", &path).expect("switch");
 
-        assert!(app.is_paused, "is_paused must be unaffected by playlist switch");
-        assert_eq!(app.position, 42.5, "position must be unaffected by playlist switch");
+        assert!(
+            app.is_paused,
+            "is_paused must be unaffected by playlist switch"
+        );
+        assert_eq!(
+            app.position, 42.5,
+            "position must be unaffected by playlist switch"
+        );
     }
 
     #[test]
@@ -2129,12 +2618,14 @@ mod tests {
 
         let beta = make_playlist("Beta");
         let (_dir_beta, path_beta) = write_temp_playlist(&beta);
-        app.switch_to_playlist("Beta", &path_beta).expect("switch to beta");
+        app.switch_to_playlist("Beta", &path_beta)
+            .expect("switch to beta");
         assert_eq!(app.config.active_playlist, Some("Beta".to_string()));
 
         let gamma = make_playlist("Gamma");
         let (_dir_gamma, path_gamma) = write_temp_playlist(&gamma);
-        app.switch_to_playlist("Gamma", &path_gamma).expect("switch to gamma");
+        app.switch_to_playlist("Gamma", &path_gamma)
+            .expect("switch to gamma");
         assert_eq!(app.config.active_playlist, Some("Gamma".to_string()));
     }
 
@@ -2177,7 +2668,10 @@ mod tests {
 
         app.switch_to_playlist("Beta", &path).expect("switch");
 
-        let session = app.playing.as_ref().expect("playing session should survive switch");
+        let session = app
+            .playing
+            .as_ref()
+            .expect("playing session should survive switch");
         assert_eq!(session.path, gamma_path, "playing session path unchanged");
         assert_eq!(session.track().video_id, "g1", "playing track unchanged");
         assert_eq!(app.playlist.name, "Beta", "displayed playlist did switch");
@@ -2227,12 +2721,20 @@ mod tests {
 
         // Editing the displayed (Alpha) playlist must not affect the playing
         // track, which belongs to a different playlist (Gamma).
-        app.playlist.tracks.push(make_track("g1", "Colliding Id But Different Playlist"));
+        app.playlist
+            .tracks
+            .push(make_track("g1", "Colliding Id But Different Playlist"));
         app.playlist.tracks[0].user_title = Some("Should not leak".to_string());
 
         let playing_track = app.playing_track().expect("playing track should resolve");
-        assert_eq!(playing_track.title, "Gamma Track", "should use session's own copy, not displayed playlist");
-        assert_eq!(playing_track.user_title, None, "must not pick up edits from the unrelated displayed playlist");
+        assert_eq!(
+            playing_track.title, "Gamma Track",
+            "should use session's own copy, not displayed playlist"
+        );
+        assert_eq!(
+            playing_track.user_title, None,
+            "must not pick up edits from the unrelated displayed playlist"
+        );
     }
 
     // ── Task 4: Playlist management in sidebar ────────────────────────────────
@@ -2278,8 +2780,14 @@ mod tests {
         let result = pl2.rename("SameName", &path);
 
         // Renaming to the same name should succeed and file should still exist
-        assert!(result.is_ok(), "rename to same name should not fail: {result:?}");
-        assert!(path.exists(), "file should still exist after rename to same name");
+        assert!(
+            result.is_ok(),
+            "rename to same name should not fail: {result:?}"
+        );
+        assert!(
+            path.exists(),
+            "file should still exist after rename to same name"
+        );
     }
 
     #[test]
@@ -2299,7 +2807,10 @@ mod tests {
     fn playlist_delete_missing_file_returns_error() {
         let path = std::path::Path::new("/tmp/does_not_exist_trovers_task4_test.toml");
         let result = crate::playlist::Playlist::delete(path);
-        assert!(result.is_err(), "deleting non-existent file should return error");
+        assert!(
+            result.is_err(),
+            "deleting non-existent file should return error"
+        );
     }
 
     // --- validate_playlist_name tests ---
@@ -2356,41 +2867,64 @@ mod tests {
     fn validate_playlist_name_rejects_dot() {
         use crate::tui::input::validate_playlist_name;
         let existing: Vec<(String, std::path::PathBuf)> = vec![];
-        assert!(validate_playlist_name(".", &existing, None).is_err(), ". is invalid");
-        assert!(validate_playlist_name("..", &existing, None).is_err(), ".. is invalid");
+        assert!(
+            validate_playlist_name(".", &existing, None).is_err(),
+            ". is invalid"
+        );
+        assert!(
+            validate_playlist_name("..", &existing, None).is_err(),
+            ".. is invalid"
+        );
     }
 
     #[test]
     fn validate_playlist_name_rejects_duplicate() {
         use crate::tui::input::validate_playlist_name;
-        let existing = vec![
-            ("Rock".to_string(), std::path::PathBuf::from("/fake/Rock.toml")),
-        ];
+        let existing = vec![(
+            "Rock".to_string(),
+            std::path::PathBuf::from("/fake/Rock.toml"),
+        )];
         let result = validate_playlist_name("Rock", &existing, None);
-        assert!(result.is_err(), "duplicate name should be rejected: {result:?}");
+        assert!(
+            result.is_err(),
+            "duplicate name should be rejected: {result:?}"
+        );
     }
 
     #[test]
     fn validate_playlist_name_allows_current_name_during_rename() {
         use crate::tui::input::validate_playlist_name;
         // During rename, the current name is excluded from duplicate check
-        let existing = vec![
-            ("Rock".to_string(), std::path::PathBuf::from("/fake/Rock.toml")),
-        ];
+        let existing = vec![(
+            "Rock".to_string(),
+            std::path::PathBuf::from("/fake/Rock.toml"),
+        )];
         let result = validate_playlist_name("Rock", &existing, Some("Rock"));
-        assert!(result.is_ok(), "current name should be allowed during rename: {result:?}");
+        assert!(
+            result.is_ok(),
+            "current name should be allowed during rename: {result:?}"
+        );
     }
 
     #[test]
     fn validate_playlist_name_rejects_other_duplicate_during_rename() {
         use crate::tui::input::validate_playlist_name;
         let existing = vec![
-            ("Rock".to_string(), std::path::PathBuf::from("/fake/Rock.toml")),
-            ("Jazz".to_string(), std::path::PathBuf::from("/fake/Jazz.toml")),
+            (
+                "Rock".to_string(),
+                std::path::PathBuf::from("/fake/Rock.toml"),
+            ),
+            (
+                "Jazz".to_string(),
+                std::path::PathBuf::from("/fake/Jazz.toml"),
+            ),
         ];
         // Renaming "Rock" to "Jazz" (which already exists) should be rejected
         let result = validate_playlist_name("Jazz", &existing, Some("Rock"));
-        assert!(result.is_err(), "renaming to existing name should be rejected");
+        assert!(
+            result.is_err(),
+            "renaming to existing name should be rejected"
+        );
     }
 
     // --- InputMode variants tests ---
@@ -2423,12 +2957,21 @@ mod tests {
         // sidebar_selected=1 → Jazz playlist item; simulate what handle_sidebar 'r' does
         app.sidebar_selected = 1; // PlaylistsHeader at 0, Jazz at 1
         let items = app.sidebar_items();
-        if let Some(crate::tui::SidebarItem::Playlist { name, .. }) = items.get(app.sidebar_selected) {
+        if let Some(crate::tui::SidebarItem::Playlist { name, .. }) =
+            items.get(app.sidebar_selected)
+        {
             app.input_buf = name.clone();
             app.input_mode = InputMode::PlaylistRename;
         }
-        assert_eq!(app.input_mode, InputMode::PlaylistRename, "should enter PlaylistRename");
-        assert_eq!(app.input_buf, "Jazz", "input_buf should be pre-filled with playlist name");
+        assert_eq!(
+            app.input_mode,
+            InputMode::PlaylistRename,
+            "should enter PlaylistRename"
+        );
+        assert_eq!(
+            app.input_buf, "Jazz",
+            "input_buf should be pre-filled with playlist name"
+        );
     }
 
     #[test]
@@ -2438,11 +2981,17 @@ mod tests {
         app.sidebar_selected = 0; // PlaylistsHeader
         let items = app.sidebar_items();
         // Simulate 'r' key — only enter rename if Playlist item
-        if let Some(crate::tui::SidebarItem::Playlist { name, .. }) = items.get(app.sidebar_selected) {
+        if let Some(crate::tui::SidebarItem::Playlist { name, .. }) =
+            items.get(app.sidebar_selected)
+        {
             app.input_buf = name.clone();
             app.input_mode = InputMode::PlaylistRename;
         }
-        assert_eq!(app.input_mode, InputMode::Normal, "should not enter rename on header");
+        assert_eq!(
+            app.input_mode,
+            InputMode::Normal,
+            "should not enter rename on header"
+        );
     }
 
     #[test]
@@ -2451,10 +3000,17 @@ mod tests {
         let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
         app.sidebar_selected = 1;
         let items = app.sidebar_items();
-        if matches!(items.get(app.sidebar_selected), Some(crate::tui::SidebarItem::Playlist { .. })) {
+        if matches!(
+            items.get(app.sidebar_selected),
+            Some(crate::tui::SidebarItem::Playlist { .. })
+        ) {
             app.input_mode = InputMode::PlaylistDelete;
         }
-        assert_eq!(app.input_mode, InputMode::PlaylistDelete, "should enter PlaylistDelete");
+        assert_eq!(
+            app.input_mode,
+            InputMode::PlaylistDelete,
+            "should enter PlaylistDelete"
+        );
     }
 
     // --- playlist_delete_target helper ---
@@ -2465,7 +3021,11 @@ mod tests {
         let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
         app.sidebar_selected = 1; // Jazz playlist item
         let target = playlist_delete_target(&app);
-        assert_eq!(target, Some("Jazz"), "should return the selected playlist name");
+        assert_eq!(
+            target,
+            Some("Jazz"),
+            "should return the selected playlist name"
+        );
     }
 
     #[test]
@@ -2516,13 +3076,10 @@ mod tests {
         let after_third = app.target_playlist_for_url.clone().unwrap();
 
         // All three names should appear
-        let names: std::collections::HashSet<_> = [
-            &after_first as &str,
-            &after_second,
-            &after_third,
-        ]
-        .into_iter()
-        .collect();
+        let names: std::collections::HashSet<_> =
+            [&after_first as &str, &after_second, &after_third]
+                .into_iter()
+                .collect();
         assert!(
             names.contains("Classical") || names.contains("Jazz") || names.contains("Rock"),
             "cycle should cover all playlist names; got: {after_first:?}, {after_second:?}, {after_third:?}"
@@ -2625,7 +3182,9 @@ mod tests {
     #[test]
     fn context_menu_with_many_playlists_shows_all_others() {
         // Ten playlists: context menu should show nine others
-        let all: Vec<&str> = vec!["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "Active"];
+        let all: Vec<&str> = vec![
+            "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "Active",
+        ];
         let app = make_app_with_playlists("Active", &all);
         let items = app.available_playlist_names();
         assert_eq!(items.len(), 9, "ten playlists: nine targets");
@@ -2664,7 +3223,10 @@ mod tests {
         let (_dir, path) = write_temp_playlist(&beta);
         app.switch_to_playlist("Beta", &path).expect("switch");
 
-        assert_eq!(app.position, 123.4, "position must survive a playlist switch");
+        assert_eq!(
+            app.position, 123.4,
+            "position must survive a playlist switch"
+        );
     }
 
     #[test]
@@ -2692,7 +3254,11 @@ mod tests {
 
         app.switch_to_playlist("Beta", &path).expect("switch");
 
-        assert_eq!(app.playlist.tracks.len(), 3, "switched playlist should have 3 tracks");
+        assert_eq!(
+            app.playlist.tracks.len(),
+            3,
+            "switched playlist should have 3 tracks"
+        );
     }
 
     // --- Verify playlist management handles file system errors ---
@@ -2701,7 +3267,10 @@ mod tests {
     fn playlist_delete_nonexistent_file_returns_error() {
         let path = std::path::Path::new("/tmp/trovers_task6_nonexistent_test.toml");
         let result = crate::playlist::Playlist::delete(path);
-        assert!(result.is_err(), "delete of missing file should return error");
+        assert!(
+            result.is_err(),
+            "delete of missing file should return error"
+        );
     }
 
     #[test]
@@ -2715,7 +3284,10 @@ mod tests {
         let nonexistent_parent = dir.path().join("nonexistent_subdir").join("NewName.toml");
         // Try saving to a path whose parent doesn't exist
         let result = pl2.save(&nonexistent_parent);
-        assert!(result.is_err(), "save to non-existent directory should fail");
+        assert!(
+            result.is_err(),
+            "save to non-existent directory should fail"
+        );
     }
 
     #[test]
@@ -2767,7 +3339,11 @@ mod tests {
             app.cycle_url_target_playlist();
         }
 
-        assert_eq!(seen.len(), 5, "all 5 playlists should be cycled through: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            5,
+            "all 5 playlists should be cycled through: {seen:?}"
+        );
     }
 
     // --- Test edge cases: empty playlists, corrupted files ---
@@ -2781,7 +3357,11 @@ mod tests {
         pl.save(&path).expect("save");
 
         let loaded = crate::playlist::Playlist::load(&path).expect("load empty playlist");
-        assert_eq!(loaded.tracks.len(), 0, "empty playlist should load with 0 tracks");
+        assert_eq!(
+            loaded.tracks.len(),
+            0,
+            "empty playlist should load with 0 tracks"
+        );
         assert_eq!(loaded.name, "Empty");
     }
 
@@ -2811,8 +3391,14 @@ mod tests {
         let removed = pl.remove_track_by_video_id("only");
 
         assert!(removed.is_some(), "should return the removed track");
-        assert!(pl.tracks.is_empty(), "playlist should be empty after removal");
-        assert!(pl.current_track.is_none(), "current_track should be cleared");
+        assert!(
+            pl.tracks.is_empty(),
+            "playlist should be empty after removal"
+        );
+        assert!(
+            pl.current_track.is_none(),
+            "current_track should be cleared"
+        );
     }
 
     // --- Verify backward compatibility with existing playlist files ---
@@ -2843,7 +3429,10 @@ added_at = "2025-01-01T12:00:00Z"
         std::fs::write(&path, toml_content).expect("write");
 
         let result = crate::playlist::Playlist::load(&path);
-        assert!(result.is_ok(), "legacy TOML should load without error: {result:?}");
+        assert!(
+            result.is_ok(),
+            "legacy TOML should load without error: {result:?}"
+        );
 
         let pl = result.unwrap();
         assert_eq!(pl.name, "LegacyPlaylist");
@@ -2878,13 +3467,28 @@ added_at = "2025-06-01T08:00:00Z"
         std::fs::write(&path, toml_content).expect("write");
 
         let result = crate::playlist::Playlist::load(&path);
-        assert!(result.is_ok(), "minimal playlist without optional fields should load: {result:?}");
+        assert!(
+            result.is_ok(),
+            "minimal playlist without optional fields should load: {result:?}"
+        );
 
         let pl = result.unwrap();
-        assert!(pl.tracks[0].speed.is_none(), "speed should be None when absent");
-        assert!(pl.tracks[0].user_title.is_none(), "user_title should be None when absent");
-        assert!(pl.tracks[0].user_artist.is_none(), "user_artist should be None when absent");
-        assert!(pl.tracks[0].file.is_none(), "file should be None when absent");
+        assert!(
+            pl.tracks[0].speed.is_none(),
+            "speed should be None when absent"
+        );
+        assert!(
+            pl.tracks[0].user_title.is_none(),
+            "user_title should be None when absent"
+        );
+        assert!(
+            pl.tracks[0].user_artist.is_none(),
+            "user_artist should be None when absent"
+        );
+        assert!(
+            pl.tracks[0].file.is_none(),
+            "file should be None when absent"
+        );
     }
 
     #[test]
@@ -2908,8 +3512,15 @@ tracks = []
             std::fs::write(&path, toml_content.as_bytes()).expect("write");
 
             let result = crate::playlist::Playlist::load(&path);
-            assert!(result.is_ok(), "loop_mode={mode_str} should load: {result:?}");
-            assert_eq!(result.unwrap().loop_mode, expected, "loop_mode={mode_str} mismatch");
+            assert!(
+                result.is_ok(),
+                "loop_mode={mode_str} should load: {result:?}"
+            );
+            assert_eq!(
+                result.unwrap().loop_mode,
+                expected,
+                "loop_mode={mode_str} mismatch"
+            );
         }
     }
 
@@ -2943,8 +3554,8 @@ tracks = []
 
     #[test]
     fn download_done_updates_non_active_playlist_on_disk() {
-        use crate::tui::{App, TaskMsg};
         use crate::playlist::{CacheStatus, Playlist};
+        use crate::tui::{App, TaskMsg};
 
         let dir = tempfile::tempdir().expect("tempdir");
 
@@ -2968,7 +3579,8 @@ tracks = []
 
         // Simulate that vid1 was submitted for downloading into the Rock playlist
         app.downloading.insert("vid1".to_string());
-        app.download_targets.insert("vid1".to_string(), rock_path.clone());
+        app.download_targets
+            .insert("vid1".to_string(), rock_path.clone());
 
         // Fire the DownloadDone message
         let fake_file = dir.path().join("vid1.m4a");
@@ -2979,22 +3591,40 @@ tracks = []
         });
 
         // download_targets entry must be removed
-        assert!(!app.download_targets.contains_key("vid1"), "download_targets should be cleared");
+        assert!(
+            !app.download_targets.contains_key("vid1"),
+            "download_targets should be cleared"
+        );
 
         // The active (Source) playlist must NOT be mutated
-        assert!(app.playlist.tracks.is_empty(), "source playlist must not be modified");
+        assert!(
+            app.playlist.tracks.is_empty(),
+            "source playlist must not be modified"
+        );
 
         // The Rock playlist on disk must have cache_status = Cached and file set
         let rock_reloaded = Playlist::load(&rock_path).expect("reload rock");
-        let track = rock_reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
-        assert_eq!(track.cache_status, CacheStatus::Cached, "cache_status must be Cached");
-        assert_eq!(track.file.as_deref(), Some(fake_file.as_path()), "file path must be set");
+        let track = rock_reloaded
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
+        assert_eq!(
+            track.cache_status,
+            CacheStatus::Cached,
+            "cache_status must be Cached"
+        );
+        assert_eq!(
+            track.file.as_deref(),
+            Some(fake_file.as_path()),
+            "file path must be set"
+        );
     }
 
     #[test]
     fn download_done_for_active_playlist_updates_in_memory_state() {
-        use crate::tui::{App, TaskMsg};
         use crate::playlist::CacheStatus;
+        use crate::tui::{App, TaskMsg};
 
         let dir = tempfile::tempdir().expect("tempdir");
 
@@ -3017,9 +3647,22 @@ tracks = []
             file: fake_file.clone(),
         });
 
-        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
-        assert_eq!(track.cache_status, CacheStatus::Cached, "in-memory cache_status must be Cached");
-        assert_eq!(track.file.as_deref(), Some(fake_file.as_path()), "in-memory file must be set");
+        let track = app
+            .playlist
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
+        assert_eq!(
+            track.cache_status,
+            CacheStatus::Cached,
+            "in-memory cache_status must be Cached"
+        );
+        assert_eq!(
+            track.file.as_deref(),
+            Some(fake_file.as_path()),
+            "in-memory file must be set"
+        );
     }
 
     // ── Task 1: add-track playback-hijack regression tests ─────────────────────
@@ -3060,7 +3703,10 @@ tracks = []
         });
 
         // Track B must have been added...
-        assert!(app.playlist.tracks.iter().any(|t| t.video_id == "B"), "track B should be added");
+        assert!(
+            app.playlist.tracks.iter().any(|t| t.video_id == "B"),
+            "track B should be added"
+        );
         // ...but current_track must remain unchanged (still A), and playback
         // position must not have been touched by adding the track.
         assert_eq!(
@@ -3068,7 +3714,10 @@ tracks = []
             Some("A"),
             "adding a track must not change current_track"
         );
-        assert_eq!(app.position, 137.0, "adding a track must not touch playback position");
+        assert_eq!(
+            app.position, 137.0,
+            "adding a track must not touch playback position"
+        );
     }
 
     #[tokio::test]
@@ -3123,10 +3772,18 @@ tracks = []
             Some("A"),
             "current_track must still be A after B's download completes"
         );
-        assert_eq!(app.position, 137.0, "playback position must remain untouched");
+        assert_eq!(
+            app.position, 137.0,
+            "playback position must remain untouched"
+        );
 
         // B's cache metadata should still have been updated normally.
-        let track_b = app.playlist.tracks.iter().find(|t| t.video_id == "B").expect("track B");
+        let track_b = app
+            .playlist
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "B")
+            .expect("track B");
         assert_eq!(track_b.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track_b.file.as_deref(), Some(fake_file.as_path()));
     }
@@ -3173,13 +3830,23 @@ tracks = []
         });
 
         // Active (displayed) playlist must be untouched in memory and on disk.
-        assert!(app.playlist.tracks.is_empty(), "active playlist must not be mutated in memory");
+        assert!(
+            app.playlist.tracks.is_empty(),
+            "active playlist must not be mutated in memory"
+        );
         let active_reloaded = crate::playlist::Playlist::load(&active_path).expect("reload active");
-        assert!(active_reloaded.tracks.is_empty(), "active playlist must not be mutated on disk");
+        assert!(
+            active_reloaded.tracks.is_empty(),
+            "active playlist must not be mutated on disk"
+        );
 
         // Target (Rock) playlist must have the new track on disk.
         let rock_reloaded = crate::playlist::Playlist::load(&rock_path).expect("reload rock");
-        let track = rock_reloaded.tracks.iter().find(|t| t.video_id == "vidX").expect("vidX added to Rock");
+        let track = rock_reloaded
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vidX")
+            .expect("vidX added to Rock");
         assert_eq!(track.title, "Track X");
 
         // download_targets must be populated so DownloadDone patches Rock.toml,
@@ -3221,14 +3888,23 @@ tracks = []
         });
 
         // In-memory displayed playlist reflects the patch immediately.
-        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        let track = app
+            .playlist
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
         assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
         assert_eq!(track.user_title.as_deref(), Some("Patched"));
 
         // And it was persisted to disk.
         let reloaded = crate::playlist::Playlist::load(&path).expect("reload");
-        let track = reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        let track = reloaded
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
         assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
         assert_eq!(track.user_title.as_deref(), Some("Patched"));
@@ -3264,11 +3940,18 @@ tracks = []
         });
 
         // Displayed (active) playlist must remain untouched.
-        assert!(app.playlist.tracks.is_empty(), "displayed playlist must not be mutated");
+        assert!(
+            app.playlist.tracks.is_empty(),
+            "displayed playlist must not be mutated"
+        );
 
         // Other playlist's file on disk was patched.
         let reloaded = crate::playlist::Playlist::load(&other_path).expect("reload other");
-        let track = reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        let track = reloaded
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
         assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
     }
@@ -3293,7 +3976,12 @@ tracks = []
             t.cache_status = crate::playlist::CacheStatus::Cached;
         });
 
-        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        let track = app
+            .playlist
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
         assert_eq!(
             track.cache_status,
             crate::playlist::CacheStatus::Streaming,
@@ -3328,7 +4016,11 @@ tracks = []
         });
 
         let reloaded = crate::playlist::Playlist::load(&other_path).expect("reload other");
-        let track = reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        let track = reloaded
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
         assert_eq!(
             track.cache_status,
             crate::playlist::CacheStatus::Streaming,
@@ -3369,7 +4061,8 @@ tracks = []
             playlist: crate::playlist::Playlist::load(&playing_path).expect("load playing"),
             track_idx: 0,
         });
-        app.download_targets.insert("vid1".to_string(), playing_path.clone());
+        app.download_targets
+            .insert("vid1".to_string(), playing_path.clone());
         app.position = 42.0;
 
         let fake_file = dir.path().join("vid1.m4a");
@@ -3393,17 +4086,27 @@ tracks = []
         // The Playing playlist's file on disk was patched, even though it's
         // not the displayed playlist.
         let reloaded = crate::playlist::Playlist::load(&playing_path).expect("reload playing");
-        let track = reloaded.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        let track = reloaded
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
         assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
 
         // The displayed (Browsing) playlist must remain untouched.
-        assert!(app.playlist.tracks.is_empty(), "displayed playlist must not be mutated");
+        assert!(
+            app.playlist.tracks.is_empty(),
+            "displayed playlist must not be mutated"
+        );
 
         // The playing session's own track copy must also reflect the update
         // (this is what `playing_track()`/Now Playing would render).
         let playing_track = app.playing_track().expect("playing track should resolve");
-        assert_eq!(playing_track.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(
+            playing_track.cache_status,
+            crate::playlist::CacheStatus::Cached
+        );
         assert_eq!(playing_track.file.as_deref(), Some(fake_file.as_path()));
     }
 
@@ -3447,8 +4150,16 @@ tracks = []
         adjust_playing_track_speed(&mut app, 0.1).await;
 
         // The displayed (Browsing) playlist's track must be untouched.
-        let displayed_track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
-        assert_eq!(displayed_track.speed, None, "displayed playlist's track must not be touched");
+        let displayed_track = app
+            .playlist
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
+        assert_eq!(
+            displayed_track.speed, None,
+            "displayed playlist's track must not be touched"
+        );
 
         // The playing track (from Playing.toml) must have its speed bumped by
         // 0.1 relative to the default speed (1.0), since neither the track nor
@@ -3461,13 +4172,29 @@ tracks = []
         );
 
         // Persisted to the *playing* session's own file, not Browsing.toml.
-        let reloaded_playing = crate::playlist::Playlist::load(&playing_path).expect("reload playing");
-        let track = reloaded_playing.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
-        assert!(track.speed.is_some(), "speed change must be persisted to the playing playlist's file");
+        let reloaded_playing =
+            crate::playlist::Playlist::load(&playing_path).expect("reload playing");
+        let track = reloaded_playing
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
+        assert!(
+            track.speed.is_some(),
+            "speed change must be persisted to the playing playlist's file"
+        );
 
-        let reloaded_browsing = crate::playlist::Playlist::load(&browsing_path).expect("reload browsing");
-        let track = reloaded_browsing.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
-        assert_eq!(track.speed, None, "browsing playlist's file must not be touched");
+        let reloaded_browsing =
+            crate::playlist::Playlist::load(&browsing_path).expect("reload browsing");
+        let track = reloaded_browsing
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
+        assert_eq!(
+            track.speed, None,
+            "browsing playlist's file must not be touched"
+        );
     }
 
     #[tokio::test]
@@ -3478,13 +4205,29 @@ tracks = []
         let mut pl = make_playlist("Active");
         pl.add_track(make_track("vid1", "Track One"));
         let config = crate::config::Config::default();
-        let available = vec![("Active".to_string(), std::path::PathBuf::from("/fake/Active.toml"))];
-        let mut app = App::new(pl, config, available, std::path::PathBuf::from("/fake/Active.toml"));
+        let available = vec![(
+            "Active".to_string(),
+            std::path::PathBuf::from("/fake/Active.toml"),
+        )];
+        let mut app = App::new(
+            pl,
+            config,
+            available,
+            std::path::PathBuf::from("/fake/Active.toml"),
+        );
 
         adjust_playing_track_speed(&mut app, 0.1).await;
 
-        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
-        assert_eq!(track.speed, None, "no track should be touched when nothing is playing");
+        let track = app
+            .playlist
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
+        assert_eq!(
+            track.speed, None,
+            "no track should be touched when nothing is playing"
+        );
     }
 
     #[tokio::test]
@@ -3512,7 +4255,12 @@ tracks = []
 
         adjust_playing_track_speed(&mut app, 0.5).await;
 
-        let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
+        let track = app
+            .playlist
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "vid1")
+            .expect("vid1");
         assert_eq!(track.speed, Some(3.0), "speed must clamp at 3.0");
     }
 
@@ -3601,7 +4349,10 @@ tracks = []
         let mut app = make_app_with_playlists("Alpha", &["Alpha"]);
         app.playlist.tracks.push(make_track("vid1", "Track One"));
 
-        assert!(!row_is_playing(&app, "vid1"), "no highlight when app.playing is None");
+        assert!(
+            !row_is_playing(&app, "vid1"),
+            "no highlight when app.playing is None"
+        );
     }
 
     // ── Task 5: n/b operate on displayed playlist; delete/move identity guard ──
@@ -3638,7 +4389,10 @@ tracks = []
 
         // Cursor must step to the next track *within the displayed playlist*,
         // not jump toward the unrelated playing session.
-        assert_eq!(app.selected, 1, "n should move cursor to the next displayed-playlist track");
+        assert_eq!(
+            app.selected, 1,
+            "n should move cursor to the next displayed-playlist track"
+        );
     }
 
     #[tokio::test]
@@ -3682,7 +4436,10 @@ tracks = []
             .await
             .expect("handle b");
 
-        assert_eq!(app.selected, 1, "b should move cursor to the previous displayed-playlist track");
+        assert_eq!(
+            app.selected, 1,
+            "b should move cursor to the previous displayed-playlist track"
+        );
     }
 
     #[tokio::test]
@@ -3712,7 +4469,10 @@ tracks = []
             .await
             .expect("handle n");
 
-        assert_eq!(app.selected, 0, "n on an empty playlist must not panic or move cursor");
+        assert_eq!(
+            app.selected, 0,
+            "n on an empty playlist must not panic or move cursor"
+        );
     }
 
     #[tokio::test]
@@ -3735,7 +4495,11 @@ tracks = []
         app.selected = 1; // cursor sits on x2, not x1
 
         let result = handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char(' '))).await;
-        assert!(result.is_ok(), "space handling must not error: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "space handling must not error: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -3789,13 +4553,17 @@ tracks = []
         // a hypothetical id collision) — deleting it must not stop playback,
         // since identity requires both path and video_id to match.
         let mut app = make_app_with_playlists("Browsing", &["Browsing", "Playing"]);
-        app.playlist.tracks.push(make_track("shared", "Colliding Track"));
+        app.playlist
+            .tracks
+            .push(make_track("shared", "Colliding Track"));
         app.playlist_path = std::path::PathBuf::from("/fake/Browsing.toml");
         app.selected = 0;
         app.input_mode = InputMode::ConfirmDelete;
 
         let mut playing_pl = make_playlist("Playing");
-        playing_pl.tracks.push(make_track("shared", "Actually Playing Track"));
+        playing_pl
+            .tracks
+            .push(make_track("shared", "Actually Playing Track"));
         app.playing = Some(PlayingSession {
             path: std::path::PathBuf::from("/fake/Playing.toml"),
             playlist: playing_pl,
@@ -3821,7 +4589,9 @@ tracks = []
         use crate::tui::{InputMode, PlayingSession};
 
         let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
-        app.playlist.tracks.push(make_track("vid1", "Now Playing Track"));
+        app.playlist
+            .tracks
+            .push(make_track("vid1", "Now Playing Track"));
         app.playlist_path = std::path::PathBuf::from("/fake/Browsing.toml");
         app.selected = 0;
         app.input_mode = InputMode::ConfirmDelete;
@@ -3867,7 +4637,9 @@ tracks = []
         // The track actually playing lives in a wholly different, unrelated
         // playlist file and just happens to share the "shared" video_id.
         let mut playing_pl = make_playlist("Playing");
-        playing_pl.tracks.push(make_track("shared", "Actually Playing Track"));
+        playing_pl
+            .tracks
+            .push(make_track("shared", "Actually Playing Track"));
         app.playing = Some(PlayingSession {
             path: std::path::PathBuf::from("/fake/Playing.toml"),
             playlist: playing_pl,
@@ -3993,7 +4765,10 @@ tracks = []
             .await
             .expect("handle b");
 
-        assert_eq!(app.selected, 0, "b should move cursor to the previous track");
+        assert_eq!(
+            app.selected, 0,
+            "b should move cursor to the previous track"
+        );
         assert_eq!(
             app.position, 30.0,
             "b landing on a track with last_position=30 must resume there, discarding the stale 42.0"
@@ -4151,7 +4926,9 @@ tracks = []
         let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
 
         let mut playing_pl = make_playlist("Elsewhere");
-        playing_pl.tracks.push(make_track("vid1", "Elsewhere Track"));
+        playing_pl
+            .tracks
+            .push(make_track("vid1", "Elsewhere Track"));
         let (_dir, playing_path) = write_temp_playlist(&playing_pl);
 
         app.playing = Some(PlayingSession {
@@ -4187,7 +4964,8 @@ tracks = []
         let (dir, old_path) = write_temp_playlist(&elsewhere);
 
         let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
-        app.available_playlists.push(("Elsewhere".to_string(), old_path.clone()));
+        app.available_playlists
+            .push(("Elsewhere".to_string(), old_path.clone()));
 
         app.playing = Some(PlayingSession {
             path: old_path.clone(),
@@ -4212,7 +4990,10 @@ tracks = []
         assert!(new_path.exists(), "renamed file should exist");
         assert!(!old_path.exists(), "old file should be gone");
 
-        let session = app.playing.as_ref().expect("playing session must survive rename");
+        let session = app
+            .playing
+            .as_ref()
+            .expect("playing session must survive rename");
         assert_eq!(
             session.path, new_path,
             "playing session's path must be re-pointed at the renamed file, not the deleted old_path"
@@ -4231,7 +5012,8 @@ tracks = []
         let (_dir, elsewhere_path) = write_temp_playlist(&elsewhere);
 
         let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
-        app.available_playlists.push(("Elsewhere".to_string(), elsewhere_path.clone()));
+        app.available_playlists
+            .push(("Elsewhere".to_string(), elsewhere_path.clone()));
 
         app.playing = Some(PlayingSession {
             path: elsewhere_path.clone(),
@@ -4257,7 +5039,10 @@ tracks = []
             "app.playing must be cleared when deleting the playlist it points at, \
              even though it isn't the displayed playlist"
         );
-        assert!(!app.is_paused, "paused state must be cleared alongside playback");
+        assert!(
+            !app.is_paused,
+            "paused state must be cleared alongside playback"
+        );
     }
 
     #[test]
@@ -4356,7 +5141,10 @@ tracks = []
         let process = tokio::process::Command::new("true")
             .spawn()
             .expect("spawn placeholder process");
-        crate::player::Player { process, socket_path }
+        crate::player::Player {
+            process,
+            socket_path,
+        }
     }
 
     fn dead_player_socket(tag: &str) -> std::path::PathBuf {
@@ -4462,7 +5250,10 @@ tracks = []
         let action = handle_key(&mut app, event).await.expect("handle_key");
 
         assert_eq!(action, Action::Quit);
-        assert!(app.should_quit, "Ctrl+C must trigger the normal shutdown path");
+        assert!(
+            app.should_quit,
+            "Ctrl+C must trigger the normal shutdown path"
+        );
     }
 
     #[test]
@@ -4504,7 +5295,9 @@ tracks = []
         use crate::tui::TaskMsg;
 
         let mut app = make_app_with_playlists("Active", &["Active"]);
-        let stale = app.player_generation.load(std::sync::atomic::Ordering::SeqCst);
+        let stale = app
+            .player_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
 
         // A newer player has since been started.
         app.stop_player();
@@ -4540,7 +5333,9 @@ tracks = []
             track_idx: 0,
         });
 
-        let stale = app.player_generation.load(std::sync::atomic::Ordering::SeqCst);
+        let stale = app
+            .player_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
         // The user moves on before the slow spawn finishes.
         app.stop_player();
 
@@ -4584,7 +5379,10 @@ tracks = []
             "starting a new track must retire the outgoing player's position poller, \
              otherwise its timestamps keep landing in App::position"
         );
-        assert!(app.player.is_none(), "the outgoing mpv must be killed straight away");
+        assert!(
+            app.player.is_none(),
+            "the outgoing mpv must be killed straight away"
+        );
     }
 
     #[tokio::test]
@@ -4594,7 +5392,9 @@ tracks = []
 
         let dir = tempfile::tempdir().expect("tempdir");
         let active_path = dir.path().join("Active.toml");
-        make_playlist("Active").save(&active_path).expect("save active");
+        make_playlist("Active")
+            .save(&active_path)
+            .expect("save active");
 
         let missing_path = dir.path().join("Gone.toml");
 
@@ -4633,8 +5433,14 @@ tracks = []
         use crate::player::socket_owner_pid;
         use std::path::Path;
 
-        assert_eq!(socket_owner_pid(Path::new("/tmp/trovers-1234-0.sock")), Some(1234));
-        assert_eq!(socket_owner_pid(Path::new("/tmp/trovers-99-7.sock")), Some(99));
+        assert_eq!(
+            socket_owner_pid(Path::new("/tmp/trovers-1234-0.sock")),
+            Some(1234)
+        );
+        assert_eq!(
+            socket_owner_pid(Path::new("/tmp/trovers-99-7.sock")),
+            Some(99)
+        );
     }
 
     #[test]
@@ -4653,17 +5459,18 @@ tracks = []
         // A socket belonging to a *running* trovers (here: this test process)
         // must survive, or launching a second instance would silently kill the
         // first one's playback.
-        let own = std::path::PathBuf::from(format!(
-            "/tmp/trovers-{}-90001.sock",
-            std::process::id()
-        ));
+        let own =
+            std::path::PathBuf::from(format!("/tmp/trovers-{}-90001.sock", std::process::id()));
         std::fs::write(&own, b"").expect("create own socket placeholder");
 
         crate::player::reap_orphaned_players().await;
 
         let survived = own.exists();
         let _ = std::fs::remove_file(&own);
-        assert!(survived, "the reaper must never touch a live instance's socket");
+        assert!(
+            survived,
+            "the reaper must never touch a live instance's socket"
+        );
     }
 
     #[tokio::test]
@@ -4732,13 +5539,9 @@ tracks = []
         let generation = 1u64;
         let counter = Arc::new(AtomicU64::new(generation));
 
-        let mpv_exited = crate::player::poll_position_loop(
-            socket_path.clone(),
-            pos_tx,
-            generation,
-            counter,
-        )
-        .await;
+        let mpv_exited =
+            crate::player::poll_position_loop(socket_path.clone(), pos_tx, generation, counter)
+                .await;
 
         assert!(
             mpv_exited,
@@ -4843,7 +5646,10 @@ tracks = []
             crate::player::Player::spawn(ENDLESS_SILENT_SOURCE, None),
         )
         .await;
-        assert!(cancelled.is_err(), "the spawn was meant to be cancelled, not to finish");
+        assert!(
+            cancelled.is_err(),
+            "the spawn was meant to be cancelled, not to finish"
+        );
 
         // mpv needs a moment to die after receiving the kill.
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -4939,8 +5745,15 @@ tracks = []
             .expect("handle enter");
 
         let on_disk = crate::playlist::Playlist::load(&path).expect("reload");
-        let a = on_disk.tracks.iter().find(|t| t.video_id == "A").expect("track A");
-        assert_eq!(a.last_position, 77, "A's position must survive the switch on disk");
+        let a = on_disk
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "A")
+            .expect("track A");
+        assert_eq!(
+            a.last_position, 77,
+            "A's position must survive the switch on disk"
+        );
     }
 
     // ── Phase 2: duplicate adds ─────────────────────────────────────────────
@@ -4970,7 +5783,11 @@ tracks = []
             target_path: None,
         });
 
-        assert_eq!(app.playlist.tracks.len(), 1, "the same video_id must not be added twice");
+        assert_eq!(
+            app.playlist.tracks.len(),
+            1,
+            "the same video_id must not be added twice"
+        );
         assert!(
             app.downloading.is_empty(),
             "no download may start for a track that was not added"
@@ -4984,7 +5801,9 @@ tracks = []
 
         let dir = tempfile::tempdir().expect("tempdir");
         let active_path = dir.path().join("Active.toml");
-        make_playlist("Active").save(&active_path).expect("save active");
+        make_playlist("Active")
+            .save(&active_path)
+            .expect("save active");
 
         let rock_path = dir.path().join("Rock.toml");
         let mut rock = make_playlist("Rock");
@@ -5009,9 +5828,19 @@ tracks = []
         });
 
         let rock_after = crate::playlist::Playlist::load(&rock_path).expect("reload rock");
-        assert_eq!(rock_after.tracks.len(), 1, "target playlist must not gain a duplicate row");
-        assert!(app.playlist.tracks.is_empty(), "the displayed playlist must be untouched");
-        assert!(app.downloading.is_empty(), "no download may start for a rejected add");
+        assert_eq!(
+            rock_after.tracks.len(),
+            1,
+            "target playlist must not gain a duplicate row"
+        );
+        assert!(
+            app.playlist.tracks.is_empty(),
+            "the displayed playlist must be untouched"
+        );
+        assert!(
+            app.downloading.is_empty(),
+            "no download may start for a rejected add"
+        );
     }
 
     // ── Phase 2: downloading state persistence ──────────────────────────────
@@ -5113,7 +5942,11 @@ tracks = []
         .await;
 
         assert_eq!(result.unwrap(), 42);
-        assert_eq!(attempts.load(Ordering::SeqCst), 1, "a working first attempt must not retry");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "a working first attempt must not retry"
+        );
     }
 
     #[tokio::test]
@@ -5165,7 +5998,10 @@ tracks = []
         })
         .await;
 
-        assert!(result.is_err(), "must surface the failure once every attempt is spent");
+        assert!(
+            result.is_err(),
+            "must surface the failure once every attempt is spent"
+        );
         assert_eq!(
             attempts.load(Ordering::SeqCst),
             3,
@@ -5184,7 +6020,10 @@ tracks = []
 
         app.recache_track(0);
 
-        assert!(app.downloading.contains("A"), "recache must start a real download");
+        assert!(
+            app.downloading.contains("A"),
+            "recache must start a real download"
+        );
         assert_eq!(
             app.playlist.tracks[0].cache_status,
             crate::playlist::CacheStatus::Downloading,
@@ -5243,7 +6082,8 @@ tracks = []
         let (dir, old_path, mut app) = app_on_disk(pl);
 
         app.downloading.insert("A".to_string());
-        app.download_targets.insert("A".to_string(), old_path.clone());
+        app.download_targets
+            .insert("A".to_string(), old_path.clone());
 
         // sidebar_items() is [PlaylistsHeader, Old, ...], so index 1 is the playlist.
         app.sidebar_selected = 1;
@@ -5269,7 +6109,11 @@ tracks = []
         });
 
         let renamed = crate::playlist::Playlist::load(&new_path).expect("load renamed");
-        let a = renamed.tracks.iter().find(|t| t.video_id == "A").expect("track A");
+        let a = renamed
+            .tracks
+            .iter()
+            .find(|t| t.video_id == "A")
+            .expect("track A");
         assert_eq!(a.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(a.file.as_deref(), Some(audio.as_path()));
     }
@@ -5285,7 +6129,9 @@ tracks = []
         source.save(&source_path).expect("save source");
 
         let target_path = dir.path().join("Target.toml");
-        make_playlist("Target").save(&target_path).expect("save target");
+        make_playlist("Target")
+            .save(&target_path)
+            .expect("save target");
 
         let available = vec![
             ("Source".to_string(), source_path.clone()),
@@ -5298,7 +6144,8 @@ tracks = []
             source_path.clone(),
         );
         app.downloading.insert("A".to_string());
-        app.download_targets.insert("A".to_string(), source_path.clone());
+        app.download_targets
+            .insert("A".to_string(), source_path.clone());
         app.selected = 0;
 
         app.move_track_to_playlist("Target").expect("move");
@@ -5317,7 +6164,9 @@ tracks = []
 
         let dir = tempfile::tempdir().expect("tempdir");
         let active_path = dir.path().join("Active.toml");
-        make_playlist("Active").save(&active_path).expect("save active");
+        make_playlist("Active")
+            .save(&active_path)
+            .expect("save active");
 
         let doomed_path = dir.path().join("Doomed.toml");
         let mut doomed = make_playlist("Doomed");
@@ -5337,7 +6186,8 @@ tracks = []
         );
         app.downloading.insert("A".to_string());
         app.download_progress.insert("A".to_string(), 10.0);
-        app.download_targets.insert("A".to_string(), doomed_path.clone());
+        app.download_targets
+            .insert("A".to_string(), doomed_path.clone());
 
         app.sidebar_selected = 2;
         app.input_mode = InputMode::PlaylistDelete;
@@ -5414,7 +6264,10 @@ tracks = []
         handle_confirm_delete(&mut app, key(crossterm::event::KeyCode::Char('y')))
             .expect("confirm delete");
 
-        assert!(app.playlist.tracks.is_empty(), "the row must be removed from this playlist");
+        assert!(
+            app.playlist.tracks.is_empty(),
+            "the row must be removed from this playlist"
+        );
         assert!(
             audio.exists(),
             "the cached file is shared with another playlist and must survive"
@@ -5433,8 +6286,7 @@ tracks = []
     async fn deleting_a_track_removes_a_cached_file_nothing_else_references() {
         use crate::tui::input::handle_confirm_delete;
 
-        let (_dir, _displayed, _other, audio, mut app) =
-            two_playlists_sharing_a_file("A", false);
+        let (_dir, _displayed, _other, audio, mut app) = two_playlists_sharing_a_file("A", false);
         app.selected = 0;
 
         handle_confirm_delete(&mut app, key(crossterm::event::KeyCode::Char('y')))
@@ -5469,7 +6321,9 @@ tracks = []
 
         let dir = tempfile::tempdir().expect("tempdir");
         let displayed_path = dir.path().join("Displayed.toml");
-        make_playlist("Displayed").save(&displayed_path).expect("save");
+        make_playlist("Displayed")
+            .save(&displayed_path)
+            .expect("save");
 
         // Listed but absent from disk: we cannot prove the file is unreferenced.
         let missing_path = dir.path().join("Missing.toml");
@@ -5511,7 +6365,10 @@ tracks = []
         // Nothing yet: the app has only just started.
         app.maybe_flush_position();
         let before = crate::playlist::Playlist::load(&path).expect("load");
-        assert_eq!(before.tracks[0].last_position, 0, "the flush must be throttled");
+        assert_eq!(
+            before.tracks[0].last_position, 0,
+            "the flush must be throttled"
+        );
 
         app.last_position_flush = std::time::Instant::now() - std::time::Duration::from_secs(60);
         app.maybe_flush_position();
@@ -5526,7 +6383,10 @@ tracks = []
         app.position = 999.0;
         app.maybe_flush_position();
         let again = crate::playlist::Playlist::load(&path).expect("load");
-        assert_eq!(again.tracks[0].last_position, 64, "the timer must have been reset");
+        assert_eq!(
+            again.tracks[0].last_position, 64,
+            "the timer must have been reset"
+        );
     }
 
     #[tokio::test]
@@ -5596,7 +6456,10 @@ tracks = []
             parse_progress_line("[download] 100% of    3.27MiB in 00:00:00 at 14.05MiB/s"),
             Some(100.0)
         );
-        assert_eq!(parse_progress_line("[youtube] A: Downloading webpage"), None);
+        assert_eq!(
+            parse_progress_line("[youtube] A: Downloading webpage"),
+            None
+        );
     }
 
     #[test]
@@ -5655,8 +6518,11 @@ tracks = []
             track_idx: idx,
         });
         app.position = position;
-        app.player = Some(make_dead_player(dead_player_socket(&format!("phase3-{idx}"))));
-        app.player_generation.load(std::sync::atomic::Ordering::SeqCst)
+        app.player = Some(make_dead_player(dead_player_socket(&format!(
+            "phase3-{idx}"
+        ))));
+        app.player_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[tokio::test]
@@ -5672,7 +6538,11 @@ tracks = []
             target_path: None,
         });
 
-        assert_eq!(app.playlist.tracks.len(), 4, "the track must still be added");
+        assert_eq!(
+            app.playlist.tracks.len(),
+            4,
+            "the track must still be added"
+        );
         assert_eq!(
             app.selected, 1,
             "adding a track must not move the selection out from under the user"
@@ -5689,12 +6559,19 @@ tracks = []
 
         handle_confirm_delete(&mut app, key(crossterm::event::KeyCode::Char('y'))).unwrap();
 
-        assert!(app.playing.is_none(), "playback must stop with the track gone");
+        assert!(
+            app.playing.is_none(),
+            "playback must stop with the track gone"
+        );
         assert_eq!(
             app.position, 0.0,
             "the deleted track's elapsed time must not carry over to the next one"
         );
-        assert_eq!(*app.position_rx.borrow(), 0.0, "and the reset must reach the channel");
+        assert_eq!(
+            *app.position_rx.borrow(),
+            0.0,
+            "and the reset must reach the channel"
+        );
     }
 
     #[tokio::test]
@@ -5796,7 +6673,8 @@ tracks = []
         });
 
         // The user browses to "Other" while X keeps playing in the background.
-        app.switch_to_playlist("Other", &other_path).expect("switch");
+        app.switch_to_playlist("Other", &other_path)
+            .expect("switch");
 
         // A periodic position flush (or the one at quit).
         app.save_playing_session_playlist();
@@ -5961,7 +6839,8 @@ tracks = []
 
         // The playlist on screen, with loop off — it must have no say here.
         let (_d, active_path, mut app) = app_with_tracks(3);
-        app.available_playlists.push(("Other".to_string(), other_path.clone()));
+        app.available_playlists
+            .push(("Other".to_string(), other_path.clone()));
 
         app.playing = Some(crate::tui::PlayingSession {
             path: other_path.clone(),
@@ -5970,12 +6849,17 @@ tracks = []
         });
         app.position = 180.0;
         app.player = Some(make_dead_player(dead_player_socket("phase3-elsewhere")));
-        let generation = app.player_generation.load(std::sync::atomic::Ordering::SeqCst);
+        let generation = app
+            .player_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
 
         app.handle_task_msg(TaskMsg::PlayerGone { generation });
 
         let session = app.playing.as_ref().expect("still playing");
-        assert_eq!(session.path, other_path, "playback must stay in its own playlist");
+        assert_eq!(
+            session.path, other_path,
+            "playback must stay in its own playlist"
+        );
         assert_eq!(
             session.track_idx, 1,
             "the next track must come from the playing playlist, not the displayed one"
@@ -6030,7 +6914,9 @@ tracks = []
         let mut visited = vec![0usize];
         let mut at = 0usize;
         for _ in 0..5 {
-            at = app.step_index(&path, 6, true, at, true).expect("a next track");
+            at = app
+                .step_index(&path, 6, true, at, true)
+                .expect("a next track");
             visited.push(at);
         }
 
@@ -6051,7 +6937,9 @@ tracks = []
         app.rebuild_shuffle_order();
 
         let next = app.step_index(&path, 6, true, 0, true).expect("next");
-        let back = app.step_index(&path, 6, true, next, false).expect("previous");
+        let back = app
+            .step_index(&path, 6, true, next, false)
+            .expect("previous");
 
         assert_eq!(
             back, 0,
@@ -6091,7 +6979,9 @@ tracks = []
         assert!(app.playlist.shuffle, "`r` must toggle shuffle on");
         assert_eq!(app.shuffle_order.len(), 4, "and build an order to walk");
         assert!(
-            crate::playlist::Playlist::load(&path).expect("load").shuffle,
+            crate::playlist::Playlist::load(&path)
+                .expect("load")
+                .shuffle,
             "shuffle must survive a restart, like loop mode"
         );
 
@@ -6100,7 +6990,11 @@ tracks = []
             .unwrap();
         assert!(!app.playlist.shuffle, "`r` must toggle shuffle back off");
         assert!(app.shuffle_order.is_empty());
-        assert!(!crate::playlist::Playlist::load(&path).expect("load").shuffle);
+        assert!(
+            !crate::playlist::Playlist::load(&path)
+                .expect("load")
+                .shuffle
+        );
     }
 
     #[tokio::test]
@@ -6152,7 +7046,10 @@ tracks = []
             .await
             .unwrap();
 
-        assert_eq!(app.selected, 5, "`n` must follow the shuffled order, not the index order");
+        assert_eq!(
+            app.selected, 5,
+            "`n` must follow the shuffled order, not the index order"
+        );
         assert_eq!(app.playing.as_ref().map(|p| p.track_idx), Some(5));
 
         handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('b')))
@@ -6372,7 +7269,10 @@ tracks = []
         assert!(is_partial_artifact("A.opus.temp", "A"));
         assert!(is_partial_artifact("A.webm.part-Frag3", "A"));
 
-        assert!(!is_partial_artifact("A.opus", "A"), "the cached file must survive");
+        assert!(
+            !is_partial_artifact("A.opus", "A"),
+            "the cached file must survive"
+        );
         assert!(!is_partial_artifact("A.webm", "A"));
         // A different id that merely starts with ours.
         assert!(!is_partial_artifact("AB.webm.part", "A"));
@@ -6395,10 +7295,16 @@ tracks = []
         clean_partial_downloads(dir.path(), "A");
 
         for name in scratch {
-            assert!(!dir.path().join(name).exists(), "{name} should have been removed");
+            assert!(
+                !dir.path().join(name).exists(),
+                "{name} should have been removed"
+            );
         }
         for name in keep {
-            assert!(dir.path().join(name).exists(), "{name} should have been kept");
+            assert!(
+                dir.path().join(name).exists(),
+                "{name} should have been kept"
+            );
         }
     }
 

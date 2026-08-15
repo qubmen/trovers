@@ -24,9 +24,7 @@ pub fn audio_path(video_id: &str, ext: &str) -> PathBuf {
 
 /// Creates audio and playlists directories if they do not exist.
 pub fn ensure_dirs() -> Result<()> {
-    std::fs::create_dir_all(audio_dir())
-        .context("failed to create audio directory")?;
-    std::fs::create_dir_all(playlists_dir())
-        .context("failed to create playlists directory")?;
+    std::fs::create_dir_all(audio_dir()).context("failed to create audio directory")?;
+    std::fs::create_dir_all(playlists_dir()).context("failed to create playlists directory")?;
     Ok(())
 }

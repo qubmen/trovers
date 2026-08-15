@@ -71,8 +71,7 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("failed to create config directory")?;
+            std::fs::create_dir_all(parent).context("failed to create config directory")?;
         }
         let raw = toml::to_string(self).context("failed to serialize config")?;
         let tmp = path.with_extension("toml.tmp");

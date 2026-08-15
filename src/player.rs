@@ -84,7 +84,10 @@ impl Player {
             sleep(Duration::from_millis(50)).await;
         }
 
-        Ok(Self { process, socket_path })
+        Ok(Self {
+            process,
+            socket_path,
+        })
     }
 
     /// Send a raw JSON command over the IPC socket and return the response value.

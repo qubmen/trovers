@@ -25,9 +25,7 @@ fn check_binary(name: &str, install_hint: &str) -> Result<()> {
         .unwrap_or(false);
 
     if !ok {
-        bail!(
-            "Required binary '{name}' not found in PATH.\n  {install_hint}"
-        );
+        bail!("Required binary '{name}' not found in PATH.\n  {install_hint}");
     }
     Ok(())
 }
