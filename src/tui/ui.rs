@@ -873,7 +873,7 @@ fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
     // For URL input mode, show the target playlist hint as a second line
     let show_playlist_hint = app.input_mode == InputMode::UrlInput;
     let height = if show_playlist_hint { 5u16 } else { 3u16 };
-    let width = area.width.min(64).max(30);
+    let width = area.width.clamp(30, 64);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -943,7 +943,7 @@ fn render_track_context_menu(frame: &mut Frame, app: &App, area: Rect) {
     // Height: 2 (border) + 1 (header line) + max(1, item_count) rows, clamped to terminal area
     let content_rows = if item_count == 0 { 1 } else { item_count };
     let height = ((2 + 1 + content_rows) as u16).min(area.height);
-    let width = area.width.min(40).max(24);
+    let width = area.width.clamp(24, 40);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -1008,8 +1008,8 @@ fn render_track_context_menu(frame: &mut Frame, app: &App, area: Rect) {
 // ── Help overlay ──────────────────────────────────────────────────────────
 
 fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
-    let width = area.width.min(84).max(44);
-    let height = area.height.min(22).max(12);
+    let width = area.width.clamp(44, 84);
+    let height = area.height.clamp(12, 22);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -1084,7 +1084,7 @@ fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
 // ── Playlist rename overlay ───────────────────────────────────────────────
 
 fn render_playlist_rename_overlay(frame: &mut Frame, app: &App, area: Rect) {
-    let width = area.width.min(52).max(30);
+    let width = area.width.clamp(30, 52);
     let height = 3u16;
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
@@ -1158,7 +1158,7 @@ fn render_playlist_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
         format!("Delete '{}'?  [y] yes  [n] no", truncate(&target, 24))
     };
 
-    let width = area.width.min(56).max(34);
+    let width = area.width.clamp(34, 56);
     let height = 3u16;
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
