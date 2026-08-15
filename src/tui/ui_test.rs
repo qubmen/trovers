@@ -6129,4 +6129,73 @@ tracks = []
             "both states have to be visible at once, got {footer:?}"
         );
     }
+
+    // ── Phase 4: stream URL and download cleanup ────────────────────────────
+
+    #[test]
+    fn the_stream_url_is_the_first_line_of_yt_dlps_output() {
+        use crate::ytdlp::first_url_line;
+
+        // A format selector resolving to separate audio and video streams makes
+        // yt-dlp print one URL per line. mpv cannot open a URL with a newline in
+        // the middle of it.
+        assert_eq!(
+            first_url_line("https://example.com/audio\nhttps://example.com/video\n").as_deref(),
+            Some("https://example.com/audio")
+        );
+        assert_eq!(
+            first_url_line("\n  https://example.com/audio  \n").as_deref(),
+            Some("https://example.com/audio")
+        );
+        assert_eq!(first_url_line("   \n\n"), None);
+        assert_eq!(first_url_line(""), None);
+    }
+
+    #[test]
+    fn partial_download_files_are_recognised_but_finished_ones_are_not() {
+        use crate::ytdlp::is_partial_artifact;
+
+        assert!(is_partial_artifact("A.webm.part", "A"));
+        assert!(is_partial_artifact("A.webm.ytdl", "A"));
+        assert!(is_partial_artifact("A.opus.temp", "A"));
+        assert!(is_partial_artifact("A.webm.part-Frag3", "A"));
+
+        assert!(!is_partial_artifact("A.opus", "A"), "the cached file must survive");
+        assert!(!is_partial_artifact("A.webm", "A"));
+        // A different id that merely starts with ours.
+        assert!(!is_partial_artifact("AB.webm.part", "A"));
+        assert!(!is_partial_artifact("B.webm.part", "A"));
+    }
+
+    #[test]
+    fn a_failed_download_leaves_no_scratch_files_but_keeps_the_shared_cache() {
+        use crate::ytdlp::clean_partial_downloads;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scratch = ["A.webm.part", "A.webm.ytdl", "A.opus.temp"];
+        // `A.opus` is here because another playlist already cached this track: a
+        // download is spawned even then, so a failure must not take it with it.
+        let keep = ["A.opus", "B.webm.part"];
+        for name in scratch.iter().chain(keep.iter()) {
+            std::fs::write(dir.path().join(name), b"x").expect("write");
+        }
+
+        clean_partial_downloads(dir.path(), "A");
+
+        for name in scratch {
+            assert!(!dir.path().join(name).exists(), "{name} should have been removed");
+        }
+        for name in keep {
+            assert!(dir.path().join(name).exists(), "{name} should have been kept");
+        }
+    }
+
+    #[test]
+    fn cleaning_up_a_missing_audio_dir_is_not_an_error() {
+        use crate::ytdlp::clean_partial_downloads;
+
+        // The cache dir is created at startup, but a failed download racing a
+        // user who removed it by hand must not take the download task down.
+        clean_partial_downloads(std::path::Path::new("/nonexistent/trovers-audio"), "A");
+    }
 }

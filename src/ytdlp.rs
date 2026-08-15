@@ -94,14 +94,12 @@ pub async fn get_stream_url(url: &str, quality: &AudioQuality) -> Result<String>
         bail!("yt-dlp --get-url failed: {stderr}");
     }
 
-    let stream_url = String::from_utf8(output.stdout)
-        .context("yt-dlp returned non-UTF8 URL")?
-        .trim()
-        .to_string();
+    let stdout = String::from_utf8(output.stdout).context("yt-dlp returned non-UTF8 URL")?;
 
-    if stream_url.is_empty() {
-        bail!("yt-dlp returned an empty stream URL");
-    }
+    // First line only. A format selector that resolves to separate audio and
+    // video streams makes yt-dlp print one URL per line; handing the whole blob
+    // to mpv gave it a "URL" with an embedded newline that it could not open.
+    let stream_url = first_url_line(&stdout).context("yt-dlp returned an empty stream URL")?;
 
     Ok(stream_url)
 }
@@ -109,7 +107,26 @@ pub async fn get_stream_url(url: &str, quality: &AudioQuality) -> Result<String>
 /// Spawn a yt-dlp download, reporting progress via watch channel.
 /// Uses `video_id.%(ext)s` as the output template so yt-dlp picks the extension.
 /// Returns the actual downloaded file path when complete.
+///
+/// A failed download leaves nothing behind: yt-dlp keeps its half-written data in
+/// `<video_id>.<ext>.part` and its resume state in `.ytdl` companions, and those
+/// used to accumulate in the audio cache with no row referring to them — one
+/// abandoned copy per retry of the same track.
 pub async fn spawn_download(
+    url: &str,
+    audio_dir: &Path,
+    video_id: &str,
+    quality: &AudioQuality,
+    progress_tx: watch::Sender<(String, f32)>,
+) -> Result<PathBuf> {
+    let result = run_download(url, audio_dir, video_id, quality, progress_tx).await;
+    if result.is_err() {
+        clean_partial_downloads(audio_dir, video_id);
+    }
+    result
+}
+
+async fn run_download(
     url: &str,
     audio_dir: &Path,
     video_id: &str,
@@ -193,6 +210,52 @@ pub async fn spawn_download(
         .with_context(|| format!("could not find downloaded file for {video_id}"))?;
 
     Ok(file)
+}
+
+/// Delete the half-finished files a failed download left in the audio cache.
+///
+/// Only yt-dlp's own scratch files are touched. A finished `<video_id>.opus` is
+/// deliberately left alone: a download is started even when the track is already
+/// cached from another playlist, so deleting every `<video_id>.*` on failure would
+/// destroy a good file that other playlists still play.
+pub(crate) fn clean_partial_downloads(audio_dir: &Path, video_id: &str) {
+    let Ok(entries) = std::fs::read_dir(audio_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if is_partial_artifact(name, video_id) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// True for the scratch files yt-dlp writes while downloading `video_id`:
+/// `<id>.<ext>.part`, its `.part-Frag<n>` fragments, `<id>.<ext>.ytdl` resume
+/// state, and `.temp` intermediates.
+pub(crate) fn is_partial_artifact(name: &str, video_id: &str) -> bool {
+    let Some(rest) = name.strip_prefix(video_id) else {
+        return false;
+    };
+    if !rest.starts_with('.') {
+        return false; // a different id that merely starts with ours
+    }
+    rest.ends_with(".part")
+        || rest.ends_with(".ytdl")
+        || rest.ends_with(".temp")
+        || rest.contains(".part-")
+}
+
+/// The first non-blank line of `--get-url` output, trimmed.
+pub(crate) fn first_url_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse a download-progress percentage out of a single yt-dlp output line.

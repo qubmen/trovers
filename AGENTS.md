@@ -499,6 +499,19 @@ The finished file is taken from the last `Destination:` line, matching both
 line is often absent entirely and only the `[ExtractAudio]` one names the file
 that survives conversion.
 
+A failed download cleans up after itself (`clean_partial_downloads`): yt-dlp's
+`<video_id>.<ext>.part` data, its `.part-Frag<n>` fragments, `.ytdl` resume state
+and `.temp` intermediates are removed. A finished `<video_id>.opus` is
+deliberately **not** touched — a download is spawned even when the track is
+already cached from another playlist, so deleting every `<video_id>.*` on failure
+would destroy a file other playlists still play.
+
+### ytdlp.rs — stream URL
+`get_stream_url` takes the **first non-blank line** of `--get-url` output. A
+format selector that resolves to separate audio and video streams makes yt-dlp
+print one URL per line, and handing the whole blob to mpv gives it a "URL" with a
+newline in the middle that it cannot open.
+
 ### player.rs — IPC over Unix socket
 - Socket path: `/tmp/trovers-<pid>-<seq>.sock` (pid = current process id, `seq` a
   per-process counter — the pid alone collides between successive players in one

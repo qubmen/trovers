@@ -41,12 +41,19 @@ and `mpv` spawned as child processes. Do not use `rusty_ytdl`, `rodio`,
 
 ## ADR-003: IPC socket path includes PID
 
-**Decision:** mpv IPC socket is `/tmp/trovers-<pid>.sock`, not a fixed path.
+**Decision:** mpv IPC socket is `/tmp/trovers-<pid>-<seq>.sock`, not a fixed
+path. `<seq>` is a per-process counter bumped on every `Player::spawn`.
 
 **Reasoning:**
 - A fixed path (`/tmp/trovers.sock`) would break if two instances of trovers
   run simultaneously (e.g. two terminal windows).
 - PID-based path is unique per process and is cleaned up in `Player::drop()`.
+- The `<seq>` half keeps *successive* players within one process apart. mpv does
+  not unlink its socket on exit, so an outgoing player's file is still on disk
+  when the next one starts; sharing one path per process would let a poll aimed
+  at the new player connect to the old socket and read the old track's position.
+- The pid stays first and parseable so `reap_orphaned_players` (ADR-012) can
+  tell whose socket a leftover file is.
 
 ---
 
@@ -228,3 +235,103 @@ add/import path) that writes to `current_track`, `app.playing`, or otherwise
 implies a freshly-added track is "now playing" must be rejected — adding a
 track must never change playback state, by design, confirmed by the product
 owner.
+
+---
+
+## ADR-012: Orphaned mpv is prevented in four independent layers
+
+**Decision:** Nothing is allowed to leave mpv playing with no UI attached. Four
+mechanisms cover it, deliberately overlapping:
+
+1. `kill_on_drop(true)` on the mpv `Command` (and on both yt-dlp ones).
+2. `Player::drop` — `start_kill()` plus unlinking the socket file.
+3. A `tokio::signal` task for SIGINT/SIGTERM/SIGHUP that sets `should_quit`, so
+   the event loop runs its normal shutdown (flush position → save → kill mpv →
+   restore terminal) rather than dying without unwinding.
+4. `player::reap_orphaned_players()` at startup: connect to every
+   `/tmp/trovers-<pid>-<seq>.sock` whose pid is no longer alive, send
+   `{"command":["quit"]}`, unlink the file.
+
+**Reasoning:**
+- Each layer covers a hole the others cannot reach, which is why all four exist:
+  - `Player::drop` only helps once the `Player` struct is fully built. Inside
+    `Player::spawn` there is a socket-wait loop of up to a second during which
+    `Child` is a bare local; if that future is cancelled (user quits or switches
+    track), only `kill_on_drop` can still kill the process. `tokio::process`
+    *detaches* on drop by default — this is the single most surprising fact in
+    the whole file, and the original cause of the reported symptom.
+  - Both of the above need unwinding to happen at all, which a signal does not
+    provide. Hence layer 3. Ctrl+C is handled separately in `handle_key`, since
+    raw mode suppresses the terminal's own SIGINT translation.
+  - Nothing in-process survives `SIGKILL` or a lost power supply. Layer 4 is the
+    self-healing net that makes the symptom stop recurring rather than merely
+    becoming rarer.
+- The reaper only touches sockets whose encoded pid is no longer a live process,
+  so a second trovers running concurrently is never disturbed. If a dead
+  instance's pid has since been recycled, its socket is skipped this time round;
+  the next launch that sees the pid free cleans it up. Erring towards leaving one
+  stale file behind is much cheaper than killing a live sibling's player.
+- A refused connection is not an error for the reaper: mpv does **not** unlink
+  its IPC socket when it exits, so a leftover file usually means the process is
+  already gone and only the file needs removing.
+
+---
+
+## ADR-013: mpv's own exit is the end-of-track signal
+
+**Decision:** Auto-advance is driven by mpv exiting, surfaced as
+`TaskMsg::PlayerGone`, not by polling `eof-reached` or `percent-pos`. A
+`PlayerGone` counts as "the track finished" only when
+`App::reached_end_of_track()` agrees: the last polled position is within
+`EOF_SLACK_SECS` (10s) of the track's duration, or the duration is unknown (`0`).
+Anything else is reported as "Playback stopped unexpectedly" and does not
+advance.
+
+**Reasoning:**
+- mpv is spawned without `--idle` and without `--keep-open`, so it exits by
+  itself the moment a track ends. That exit is already detected reliably —
+  `poll_position_loop` sees `ECONNREFUSED` — so there is nothing to poll for.
+  An `eof-reached` property poll would add a second, weaker signal for an event
+  the existing one already reports, and would have to race mpv's teardown to
+  read it. Verified against real mpv in the `real_mpv_*` tests.
+- The position check is the load-bearing half. mpv also exits when a stream
+  breaks, when it meets a codec it cannot handle, and when something kills it
+  from outside. Advancing on those would walk the entire playlist in seconds,
+  respawning mpv and yt-dlp for every track on the way — a far worse failure
+  than not advancing.
+- The 10s slack is not tuning slop: the position poller samples once a second, so
+  the last reading always lags where mpv actually reached, and a stream whose
+  reported duration is slightly optimistic lags further still. `duration == 0`
+  (metadata gave no duration) is treated as finished, because there is nothing to
+  compare against and refusing to advance forever is the worse default.
+- `handle_track_ended` rewinds the finished track's `last_position` to 0 before
+  advancing. Otherwise the resume logic would reopen the track at its own EOF —
+  and with auto-advance live, playing it again would skip straight past it.
+- Auto-advance follows the **playing** playlist (`PlayingSession`), not the
+  displayed one. This is the one place that differs from `n`/`b`, which
+  deliberately step what is on screen (see ADR-011): a track ending is not a
+  cursor movement, and the user browsing elsewhere must not redirect it.
+
+---
+
+## ADR-014: Shuffle is a stored permutation, not a random pick per step
+
+**Decision:** `playlist::shuffled_indices(len, seed)` builds a Fisher-Yates
+permutation of `0..len`, cached on `App` alongside the playlist path and length
+it was built for, and rebuilt when either changes. `next`/`previous` and
+auto-advance walk that order. Shuffle is ignored while a search filter is active.
+
+**Reasoning:**
+- A permutation is what makes a shuffled walk visit every track exactly once
+  before repeating any, and it is the only way "previous" has a meaningful
+  answer. Drawing a random index per step gives both properties up.
+- Taking the seed as a parameter (callers pass `shuffle_seed()`, which reads the
+  clock) is what makes the order testable: tests pin an explicit permutation
+  instead of asserting statistics.
+- Fisher-Yates with an inline `xorshift64*` avoids a `rand` dependency. Nothing
+  about choosing play order is security-sensitive.
+- Deferring to an active search filter: with a filter on, the visible rows are
+  already a deliberately chosen subset in a deliberate order, and the indices
+  `n`/`b` step are positions in that subset, not in the playlist. Shuffling them
+  would make the cursor jump around inside a list the user is reading. Clearing
+  the search restores the shuffled walk.
