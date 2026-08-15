@@ -1,0 +1,7 @@
+[workspace]
+# cargo-dist's tag-triggered release.yml owns creating the GitHub Release
+# (it attaches all the cross-built binaries once every job succeeds) —
+# release-plz should only bump the version/changelog and push the tag.
+git_release_enable = false
+# Not published to crates.io yet — see docs/plans/ if that changes.
+publish = false

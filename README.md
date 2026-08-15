@@ -45,7 +45,8 @@ Or grab a prebuilt binary directly from the [Releases page](https://github.com/q
 **Required Cannons:** ffmpeg, mpv, and [yt-dlp](https://github.com/yt-dlp/yt-dlp) (for the heavy lifting) — trovers shells out to these rather than bundling them, so install them separately:
 
 ```sh
-brew install ffmpeg mpv     # macOS
+brew install ffmpeg mpv yt-dlp   # macOS / Linux (via Homebrew)
+# or keep yt-dlp fresher via pip, since it needs frequent updates to keep up with YouTube:
 pip install yt-dlp
 ```
 
