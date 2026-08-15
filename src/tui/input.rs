@@ -3,7 +3,7 @@ use crate::playlist::{LoopMode, Playlist, Track};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::io::Write;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 // #region agent log
 fn agent_log(
@@ -308,6 +308,9 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                 LoopMode::Track => LoopMode::Playlist,
                 LoopMode::Playlist => LoopMode::None,
             };
+            // Persist immediately. Relying on the save at quit meant the setting
+            // was lost to any exit that did not run it.
+            app.save_playlist();
         }
 
         // Next / Previous: always step relative to the cursor position in
@@ -427,6 +430,11 @@ pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) {
 async fn set_volume(app: &mut App, delta: i16) {
     let vol = (app.config.default_volume as i16 + delta).clamp(0, 100) as u8;
     app.config.default_volume = vol;
+    // Persist immediately, for the same reason as `loop_mode`: the save at quit
+    // does not run on every exit path.
+    if let Err(e) = app.config.save() {
+        warn!(err = %e, "failed to save config after volume change");
+    }
     let res = match &app.player {
         Some(player) => Some(player.set_volume(vol).await),
         None => None,
@@ -620,6 +628,8 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
 
             let file_to_delete = app.playlist.tracks[idx].file.clone();
             app.playlist.tracks.remove(idx);
+            // A download still running for this row has nowhere to land now.
+            app.clear_download_state(&video_id);
             // Clear any active search filter; stale indices would point to wrong tracks
             app.filtered_indices.clear();
             if app.selected >= app.visible_track_count() && app.selected > 0 {
@@ -628,7 +638,11 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
             app.clamp_scroll();
             app.save_playlist();
             if let Some(path) = file_to_delete {
-                if let Err(e) = std::fs::remove_file(&path) {
+                // The audio cache is keyed by `video_id`, so this file may well
+                // be the one backing the same track in another playlist.
+                if app.video_id_referenced_elsewhere(&video_id) {
+                    info!(video_id = %video_id, path = %path.display(), "kept cached file, another playlist still references it");
+                } else if let Err(e) = std::fs::remove_file(&path) {
                     warn!(path = %path.display(), err = %e, "failed to delete cached file");
                 }
             }
@@ -741,6 +755,11 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
                             app.sidebar_selected = 1 + new_pos; // +1 for PlaylistsHeader
                         }
 
+                        // In-flight downloads recorded the old path at add-time;
+                        // it no longer exists, so their completion would patch
+                        // nothing and leave the tracks stuck at `downloading`.
+                        app.remap_download_targets(&old_path, &new_path);
+
                         // If the playing session belongs to the renamed playlist file,
                         // re-point it at the new path so future saves (flush_playing_position,
                         // adjust_playing_track_speed, request_playback's leaving-track save)
@@ -820,6 +839,9 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
 
                 match Playlist::delete(&path) {
                     Ok(()) => {
+                        // Every row an in-flight download was going to fill has
+                        // just gone with the file.
+                        app.clear_download_state_for_playlist(&path);
                         app.available_playlists.retain(|(n, _)| n != &name);
                         // Move sidebar selection up if needed
                         let new_items = app.sidebar_items();

@@ -480,13 +480,24 @@ Do not crash or return an error when optional fields are absent — different pl
 (SoundCloud, Bandcamp, Mixcloud, etc.) populate different subsets of these fields.
 
 ### ytdlp.rs — parsing download progress
-yt-dlp writes progress to stderr:
+yt-dlp writes progress to **stdout** (not stderr — stderr carries only warnings
+and the `ERROR:` line), and must be run with `--newline` or each update
+overwrites the previous one with a bare `\r` and `lines()` yields nothing until
+the download is already over:
 ```
 [download]  45.3% of    4.23MiB at    1.23MiB/s ETA 00:02
 ```
 Parse with regex `r"\[download\]\s+([\d.]+)%"` → send percentage to a
 `tokio::sync::watch` channel → TUI reads from the channel on each render tick
 to update the caching progress bar on Now Playing line 3.
+
+Pipe stderr as well and drain it on its own task: it holds the reason for a
+failed download, and an unread pipe stalls yt-dlp once the kernel buffer fills.
+
+The finished file is taken from the last `Destination:` line, matching both
+`[download]` and `[ExtractAudio]` — with `-x --audio-format opus` the download
+line is often absent entirely and only the `[ExtractAudio]` one names the file
+that survives conversion.
 
 ### player.rs — IPC over Unix socket
 - Socket path: `/tmp/trovers-<pid>.sock` (pid = current process id, avoids conflicts

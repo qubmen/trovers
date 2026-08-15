@@ -112,6 +112,11 @@ pub const SETTINGS_ITEMS: &[SettingsItem] = &[
     SettingsItem::DefaultVolume,
 ];
 
+/// How often the playing track's position is written to disk while it plays.
+/// Throttled because each flush rewrites the whole playlist TOML; without any
+/// periodic flush at all a hard kill discarded the entire session's progress.
+const POSITION_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+
 // ── PlayingSession ────────────────────────────────────────────────────────
 
 /// Snapshot of the playlist/track that is actually driving playback right
@@ -203,6 +208,9 @@ pub struct App {
     pub download_targets: HashMap<String, PathBuf>,
     // In-flight metadata fetches
     pub pending_fetches: usize,
+    /// When the playing track's position was last written to disk — see
+    /// `maybe_flush_position`.
+    pub last_position_flush: Instant,
 
     // Context menu
     pub context_menu_selected: usize,
@@ -254,6 +262,7 @@ impl App {
             downloading: HashSet::new(),
             download_targets: HashMap::new(),
             pending_fetches: 0,
+            last_position_flush: Instant::now(),
             context_menu_selected: 0,
             target_playlist_for_url: None,
         };
@@ -348,6 +357,89 @@ impl App {
         }
     }
 
+    /// Forget every trace of an in-flight download for `video_id`.
+    ///
+    /// Called when the row the download was going to fill disappears (track
+    /// deleted, or its whole playlist deleted). Without it the `⟳` spinner and
+    /// `is_downloading()` stay stuck forever on a track that no longer exists.
+    ///
+    /// The yt-dlp process itself is not cancelled — its handle is not retained —
+    /// so `DownloadDone` can still arrive afterwards. `patch_and_save_playlist`
+    /// then finds no matching row and logs a warning, which is the intended
+    /// no-op.
+    pub fn clear_download_state(&mut self, video_id: &str) {
+        self.downloading.remove(video_id);
+        self.download_progress.remove(video_id);
+        self.download_targets.remove(video_id);
+    }
+
+    /// Drop the download state of every track whose target playlist is `path`,
+    /// for when that whole playlist file is deleted.
+    pub fn clear_download_state_for_playlist(&mut self, path: &Path) {
+        let ids: Vec<String> = self
+            .download_targets
+            .iter()
+            .filter(|(_, target)| target.as_path() == path)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.clear_download_state(&id);
+        }
+    }
+
+    /// Re-point every in-flight download from `old_path` to `new_path`, for when
+    /// the playlist file they belong to is renamed.
+    ///
+    /// `download_targets` is captured at add-time so `DownloadDone` patches the
+    /// right file however the user navigates in the meantime. A rename
+    /// invalidates that snapshot: the recorded path no longer exists, so the
+    /// finished download would patch nothing and the track would sit at
+    /// `downloading` in the renamed file forever.
+    pub fn remap_download_targets(&mut self, old_path: &Path, new_path: &Path) {
+        for target in self.download_targets.values_mut() {
+            if target.as_path() == old_path {
+                *target = new_path.to_path_buf();
+            }
+        }
+    }
+
+    /// Re-point the in-flight download for a single `video_id` at `new_path`,
+    /// for when that one track's row moves to another playlist. No-op when
+    /// nothing is downloading for it.
+    pub fn retarget_download(&mut self, video_id: &str, new_path: &Path) {
+        if let Some(target) = self.download_targets.get_mut(video_id) {
+            *target = new_path.to_path_buf();
+        }
+    }
+
+    /// True when the cached audio for `video_id` is still referenced by some
+    /// playlist other than the displayed one — or by a duplicate row within it —
+    /// and so must not be deleted.
+    ///
+    /// The audio cache is keyed by `video_id` alone, so one file backs the track
+    /// in *every* playlist holding it. Deleting a track used to unlink that file
+    /// unconditionally, silently downgrading every other playlist's copy to
+    /// `streaming`.
+    ///
+    /// Deliberately answers "yes" whenever a playlist cannot be read: a stray
+    /// cached file costs disk, whereas another playlist's deleted audio costs a
+    /// re-download.
+    pub fn video_id_referenced_elsewhere(&self, video_id: &str) -> bool {
+        if self.playlist.tracks.iter().any(|t| t.video_id == video_id) {
+            return true;
+        }
+        self.available_playlists
+            .iter()
+            .filter(|(_, path)| path != &self.playlist_path)
+            .any(|(_, path)| match Playlist::load(path) {
+                Ok(pl) => pl.tracks.iter().any(|t| t.video_id == video_id),
+                Err(e) => {
+                    warn!(err = %e, path = %path.display(), "could not check playlist for shared cache file; keeping it");
+                    true
+                }
+            })
+    }
+
     /// Tear down the current player and invalidate everything still working on
     /// its behalf, returning the new generation.
     ///
@@ -414,11 +506,17 @@ impl App {
         // displayed playlist, so record it.
         self.playlist.current_track = Some(video_id.clone());
         self.is_paused = false;
-        // Only reset the position display on a fresh start, not on stream→file switch
-        if start_pos.is_none() {
-            self.position = 0.0;
-            let _ = self.pos_tx.send(0.0);
-        }
+        // Set the position to wherever this player is actually about to start.
+        //
+        // This used to be skipped whenever `start_pos` was `Some`, which is the
+        // case for every track that carries a `last_position`. `App::position`
+        // then still held the *outgoing* track's timestamp — and when the new
+        // track's download completed, `hot_switch_to_local_file` respawned mpv
+        // with `--start=<that stale value>`, so the new track jumped to where the
+        // previous one left off. Writing it into the watch channel too means a
+        // position still queued from the retired poller cannot overwrite it.
+        self.position = start_pos.unwrap_or(0.0);
+        let _ = self.pos_tx.send(self.position);
 
         self.spawn_player_for(video_id, source, speed, start_pos);
     }
@@ -606,7 +704,12 @@ impl App {
                     channel: meta.channel,
                     duration: meta.duration,
                     video_id: meta.video_id,
-                    cache_status: CacheStatus::Streaming,
+                    // The download starts unconditionally a few lines below, so
+                    // record that in the row that is about to be written. It was
+                    // saved as `streaming`, which meant the `downloading` state
+                    // never reached the TOML at all and `Playlist::load`'s
+                    // crash-recovery reset had nothing to recover from.
+                    cache_status: CacheStatus::Downloading,
                     file: None,
                     last_position: 0,
                     speed: None,
@@ -631,6 +734,11 @@ impl App {
                     // the audio cache that nothing will ever clean up.
                     match Playlist::load(&owning_path) {
                         Ok(mut target_pl) => {
+                            if target_pl.tracks.iter().any(|t| t.video_id == video_id) {
+                                info!(video_id = %video_id, path = %owning_path.display(), "track already in target playlist, not adding again");
+                                self.set_status(format!("Already in playlist: {status_title}"));
+                                return;
+                            }
                             target_pl.add_track(track);
                             if let Err(e) = target_pl.save(&owning_path) {
                                 error!(err = %e, "failed to save target playlist after URL add");
@@ -646,6 +754,15 @@ impl App {
                     }
                     self.set_status(format!("Added to playlist: {status_title}"));
                 } else {
+                    // Adding the same URL twice used to produce a second row
+                    // sharing the first one's `video_id`, and so its cached file
+                    // too — two rows whose download, cache status and deletion
+                    // all fight over one file.
+                    if self.playlist.tracks.iter().any(|t| t.video_id == video_id) {
+                        info!(video_id = %video_id, "track already in displayed playlist, not adding again");
+                        self.set_status(format!("Already in playlist: {status_title}"));
+                        return;
+                    }
                     // Default: add to the active (displayed) playlist
                     self.playlist.tracks.push(track);
                     self.selected = self.playlist.tracks.len() - 1;
@@ -716,9 +833,18 @@ impl App {
 
             TaskMsg::DownloadError { video_id, err } => {
                 error!(video_id = %video_id, err = %err, "download failed");
-                self.downloading.remove(&video_id);
-                self.download_progress.remove(&video_id);
-                self.download_targets.remove(&video_id);
+                // Roll the row back off `downloading`, otherwise it keeps
+                // claiming a download is in progress until the next
+                // `Playlist::load` happens to reset it.
+                let owning_path = self
+                    .download_targets
+                    .get(&video_id)
+                    .cloned()
+                    .unwrap_or_else(|| self.playlist_path.clone());
+                self.patch_and_save_playlist(&owning_path, &video_id, |track| {
+                    track.cache_status = CacheStatus::Streaming;
+                });
+                self.clear_download_state(&video_id);
                 self.set_status("Download failed");
             }
 
@@ -935,6 +1061,25 @@ impl App {
         self.save_playing_session_playlist();
     }
 
+    /// Write the playing track's position to disk, but at most once every
+    /// `POSITION_FLUSH_INTERVAL`.
+    ///
+    /// `flush_playing_position` otherwise runs only on quit and when switching
+    /// away from a track, so anything short of a clean exit — a `SIGKILL`, a
+    /// closed lid, a power cut — threw away the whole session's listening
+    /// progress. Skipped while paused or with no live player, since the position
+    /// cannot have moved.
+    pub fn maybe_flush_position(&mut self) {
+        if self.player.is_none() || self.is_paused || self.playing.is_none() {
+            return;
+        }
+        if self.last_position_flush.elapsed() < POSITION_FLUSH_INTERVAL {
+            return;
+        }
+        self.last_position_flush = Instant::now();
+        self.flush_playing_position();
+    }
+
     /// Patch a single track (found by `video_id`) in the playlist at `path`
     /// and persist the change to disk — the general "mutate a track that
     /// might not be in the currently displayed playlist" mechanism.
@@ -1090,6 +1235,12 @@ impl App {
         // Append to target playlist
         target_playlist.add_track(track);
 
+        // The row this download is filling now lives in the target file, so
+        // re-point `DownloadDone` at it. Clearing the state instead would leave
+        // the moved track stuck at `downloading` with a finished file on disk
+        // that nothing ever records.
+        self.retarget_download(&video_id, &target_path);
+
         // Save target first, then source (both atomic)
         target_playlist
             .save(&target_path)
@@ -1207,6 +1358,7 @@ pub async fn run(app: &mut App) -> Result<()> {
 
     loop {
         app.sync_channels();
+        app.maybe_flush_position();
         terminal.draw(|frame| ui::render(frame, app))?;
 
         if event::poll(Duration::from_millis(100))? {

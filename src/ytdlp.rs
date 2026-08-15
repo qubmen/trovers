@@ -2,9 +2,23 @@ use crate::config::AudioQuality;
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
+
+/// How many trailing stderr lines to keep as the reason for a failed download.
+/// yt-dlp is chatty; the tail is where the actual `ERROR:` line lands.
+const STDERR_TAIL_LINES: usize = 10;
+
+static PROGRESS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[download\]\s+([\d.]+)%").unwrap());
+
+/// yt-dlp announces the pre-conversion download as `[download] Destination:` and
+/// the extracted audio as `[ExtractAudio] Destination:`. Both are matched so the
+/// later line wins and `dest` ends up holding the file that actually survives.
+static DEST_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[(?:download|ExtractAudio)\] Destination: (.+)").unwrap());
 
 #[derive(Debug)]
 pub struct TrackMeta {
@@ -108,9 +122,6 @@ pub async fn spawn_download(
         .context("audio dir path is not valid UTF-8")?
         .to_string();
 
-    let progress_re = Regex::new(r"\[download\]\s+([\d.]+)%").unwrap();
-    let dest_re = Regex::new(r"\[download\] Destination: (.+)").unwrap();
-
     let mut child = Command::new("yt-dlp")
         .args([
             "-f",
@@ -119,11 +130,18 @@ pub async fn spawn_download(
             "--audio-format",
             "opus",
             "--no-playlist",
+            // Progress is rewritten in place with `\r` by default, so `lines()`
+            // yields nothing at all until the download is over. One line per
+            // update is what lets the progress bar actually move.
+            "--newline",
             "-o",
             &template,
             url,
         ])
-        .stdout(std::process::Stdio::null())
+        // Progress goes to *stdout*. This used to be `Stdio::null()` with the
+        // parser reading stderr, where yt-dlp writes no progress whatsoever —
+        // which is why the caching bar never advanced.
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         // A download that outlives the app would keep writing into the audio
         // cache with nothing left to record the result in the playlist.
@@ -131,41 +149,82 @@ pub async fn spawn_download(
         .spawn()
         .context("failed to spawn yt-dlp download")?;
 
+    // Drain stderr on its own task rather than after the fact: it is where
+    // errors land, and an unread pipe stops yt-dlp dead once the kernel buffer
+    // fills.
     let stderr = child.stderr.take().expect("stderr was piped");
-    let mut lines = BufReader::new(stderr).lines();
+    let stderr_tail = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut tail: Vec<String> = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if tail.len() == STDERR_TAIL_LINES {
+                tail.remove(0);
+            }
+            tail.push(line);
+        }
+        tail
+    });
+
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let mut lines = BufReader::new(stdout).lines();
     let mut dest: Option<PathBuf> = None;
 
     while let Some(line) = lines.next_line().await? {
-        if let Some(caps) = dest_re.captures(&line) {
-            dest = Some(PathBuf::from(caps[1].trim()));
+        if let Some(path) = parse_destination_line(&line) {
+            dest = Some(path);
         }
-        if let Some(caps) = progress_re.captures(&line) {
-            if let Ok(pct) = caps[1].parse::<f32>() {
-                let _ = progress_tx.send((video_id.to_string(), pct));
-            }
+        if let Some(pct) = parse_progress_line(&line) {
+            let _ = progress_tx.send((video_id.to_string(), pct));
         }
     }
 
     let status = child.wait().await.context("yt-dlp download process failed")?;
+    let reason = stderr_tail.await.unwrap_or_default().join(" | ");
     if !status.success() {
-        bail!("yt-dlp download exited with status {status}");
+        bail!("yt-dlp download exited with status {status}: {reason}");
     }
 
     let _ = progress_tx.send((video_id.to_string(), 100.0));
 
-    // Use the destination logged by yt-dlp, or scan directory as fallback
+    // Use the destination logged by yt-dlp, or scan the directory as fallback
     let file = dest
         .filter(|p| p.exists())
-        .or_else(|| {
-            std::fs::read_dir(audio_dir)
-                .ok()?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(video_id))
-        })
+        .or_else(|| find_downloaded_file(audio_dir, video_id))
         .with_context(|| format!("could not find downloaded file for {video_id}"))?;
 
     Ok(file)
+}
+
+/// Parse a download-progress percentage out of a single yt-dlp output line.
+pub(crate) fn parse_progress_line(line: &str) -> Option<f32> {
+    PROGRESS_RE.captures(line)?[1].parse::<f32>().ok()
+}
+
+/// Parse a `Destination:` path out of a single yt-dlp output line.
+pub(crate) fn parse_destination_line(line: &str) -> Option<PathBuf> {
+    Some(PathBuf::from(DEST_RE.captures(line)?[1].trim()))
+}
+
+/// Fallback for when yt-dlp logged no usable `Destination:` line: find
+/// `<video_id>.<ext>` in the audio dir.
+///
+/// `.opus` wins when several extensions share the stem. `-x --audio-format opus`
+/// always converts to it, and a leftover pre-conversion file would otherwise be
+/// picked at the mercy of `read_dir` ordering — recording a path that the
+/// converter is about to delete.
+pub(crate) fn find_downloaded_file(audio_dir: &Path, video_id: &str) -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = std::fs::read_dir(audio_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.file_stem().and_then(|s| s.to_str()) == Some(video_id))
+        .collect();
+
+    candidates
+        .iter()
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("opus"))
+        .or_else(|| candidates.first())
+        .cloned()
 }
 
 /// Extract the bare domain from a URL (e.g. "youtube.com" from "https://www.youtube.com/...").
