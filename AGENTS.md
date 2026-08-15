@@ -362,10 +362,18 @@ widgets or custom `Paragraph` lines built from unicode block characters.
 
 ### Global (all modes)
 
-| Key   | Action                              |
-|-------|-------------------------------------|
-| `Tab` | Toggle focus: Sidebar ↔ Track list  |
-| `q`   | Quit (saves state to TOML)          |
+| Key      | Action                                                  |
+|----------|---------------------------------------------------------|
+| `Tab`    | Toggle focus: Sidebar ↔ Track list                     |
+| `q`      | Quit (saves state to TOML)                             |
+| `Ctrl+C` | Quit — same path as `q`, from any mode (see note below) |
+
+Raw mode suppresses the terminal's SIGINT translation, so `Ctrl+C` arrives as an
+ordinary `KeyEvent` rather than a signal. It is therefore handled as a keybinding,
+ahead of every mode dispatch, so it works even while a prompt has focus.
+`SIGINT`/`SIGTERM`/`SIGHUP` delivered from outside (`kill`, closing the terminal
+window) are caught separately and set the same `should_quit` flag, so every exit
+route flushes state and kills mpv.
 
 ### Track list focus (Normal mode)
 

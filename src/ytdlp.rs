@@ -21,6 +21,9 @@ pub struct TrackMeta {
 pub async fn fetch_metadata(url: &str) -> Result<TrackMeta> {
     let output = Command::new("yt-dlp")
         .args(["-j", "--no-playlist", url])
+        // Cancelling this future (app quits mid-fetch) must not leave yt-dlp
+        // running detached — tokio detaches rather than kills by default.
+        .kill_on_drop(true)
         .output()
         .await
         .context("failed to spawn yt-dlp")?;
@@ -67,6 +70,7 @@ pub async fn fetch_metadata(url: &str) -> Result<TrackMeta> {
 pub async fn get_stream_url(url: &str, quality: &AudioQuality) -> Result<String> {
     let output = Command::new("yt-dlp")
         .args(["-f", quality.to_format_str(), "--get-url", "--no-playlist", url])
+        .kill_on_drop(true)
         .output()
         .await
         .context("failed to spawn yt-dlp")?;
@@ -121,6 +125,9 @@ pub async fn spawn_download(
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
+        // A download that outlives the app would keep writing into the audio
+        // cache with nothing left to record the result in the playlist.
+        .kill_on_drop(true)
         .spawn()
         .context("failed to spawn yt-dlp download")?;
 

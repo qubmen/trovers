@@ -44,6 +44,14 @@ pub enum Action {
 
 /// Top-level key dispatcher. Tab is handled first, always.
 pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
+    // Ctrl+C, from any mode. Raw mode suppresses the terminal's own SIGINT
+    // translation, so without this the keystroke is silently swallowed and the
+    // user's only way out is to close the window — which used to strand mpv.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.should_quit = true;
+        return Ok(Action::Quit);
+    }
+
     // Help modal: only allow closing toggles while open.
     if app.input_mode == InputMode::Help {
         return handle_help(app, key);
@@ -240,13 +248,16 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         // Space: toggle pause if playing, otherwise start (resuming from
         // `last_position` if the track has one).
         KeyCode::Char(' ') => {
-            if let Some(player) = &app.player {
+            if app.player.is_some() {
                 app.is_paused = !app.is_paused;
-                if app.is_paused {
-                    player.pause().await?;
-                } else {
-                    player.resume().await?;
-                }
+                let pausing = app.is_paused;
+                let res = match &app.player {
+                    Some(player) => {
+                        Some(if pausing { player.pause().await } else { player.resume().await })
+                    }
+                    None => None,
+                };
+                note_ipc_result(app, "pause", res);
             } else if let Some(idx) = app.track_index_at(app.selected) {
                 let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
                 app.request_playback(idx, start_pos);
@@ -256,15 +267,19 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         // Seek
         KeyCode::Left => {
             let secs = if key.modifiers.contains(KeyModifiers::SHIFT) { -60 } else { -10 };
-            if let Some(player) = &app.player {
-                player.seek(secs, "relative").await?;
-            }
+            let res = match &app.player {
+                Some(player) => Some(player.seek(secs, "relative").await),
+                None => None,
+            };
+            note_ipc_result(app, "seek", res);
         }
         KeyCode::Right => {
             let secs = if key.modifiers.contains(KeyModifiers::SHIFT) { 60 } else { 10 };
-            if let Some(player) = &app.player {
-                player.seek(secs, "relative").await?;
-            }
+            let res = match &app.player {
+                Some(player) => Some(player.seek(secs, "relative").await),
+                None => None,
+            };
+            note_ipc_result(app, "seek", res);
         }
 
         // Speed: [ = slower, ] = faster. Adjusts the speed of the *playing*
@@ -272,26 +287,18 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         // not whatever track happens to sit at `current_track_index()` in
         // the displayed playlist.
         KeyCode::Char(']') => {
-            adjust_playing_track_speed(app, 0.1).await?;
+            adjust_playing_track_speed(app, 0.1).await;
         }
         KeyCode::Char('[') => {
-            adjust_playing_track_speed(app, -0.1).await?;
+            adjust_playing_track_speed(app, -0.1).await;
         }
 
         // Volume
         KeyCode::Char('v') => {
-            let vol = app.config.default_volume.saturating_add(5).min(100);
-            app.config.default_volume = vol;
-            if let Some(player) = &app.player {
-                player.set_volume(vol).await?;
-            }
+            set_volume(app, 5).await;
         }
         KeyCode::Char('V') => {
-            let vol = app.config.default_volume.saturating_sub(5);
-            app.config.default_volume = vol;
-            if let Some(player) = &app.player {
-                player.set_volume(vol).await?;
-            }
+            set_volume(app, -5).await;
         }
 
         // Loop mode
@@ -381,16 +388,19 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
 /// point at — the playing track may live in a different playlist entirely.
 /// No-op if nothing is playing. `delta` is added to the track's current
 /// effective speed and clamped to mpv's supported range.
-pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) -> Result<()> {
+///
+/// The speed is persisted to TOML even if mpv never receives it, so the setting
+/// survives a dead player and applies the next time the track is started.
+pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) {
     if app.playing.is_none() {
-        return Ok(());
+        return;
     }
     let default_speed = app.config.default_speed;
     let playlist_default_speed = app.playing.as_ref().and_then(|p| p.playlist.default_speed);
 
     let speed = {
         let Some(track) = app.playing_track_mut() else {
-            return Ok(());
+            return;
         };
         let base = track.speed.or(playlist_default_speed).unwrap_or(default_speed);
         let new_speed = (base + delta).clamp(0.25, 3.0);
@@ -398,17 +408,48 @@ pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) -> Res
         new_speed
     };
 
-    if let Some(player) = &app.player {
-        player.set_speed(speed).await?;
-    }
+    let res = match &app.player {
+        Some(player) => Some(player.set_speed(speed).await),
+        None => None,
+    };
+    note_ipc_result(app, "speed", res);
 
     // Persist through whichever copy is the source of truth for the playing
     // track's identity: the displayed playlist (already the case when paths
     // match, since `playing_track_mut` mutated it directly) or the playing
     // session's own playlist file.
     app.save_playing_session_playlist();
+}
 
-    Ok(())
+/// Change the volume by `delta` and push it to mpv. The config value is updated
+/// regardless of whether mpv is reachable, so the new level applies to the next
+/// track even when the current player has already exited.
+async fn set_volume(app: &mut App, delta: i16) {
+    let vol = (app.config.default_volume as i16 + delta).clamp(0, 100) as u8;
+    app.config.default_volume = vol;
+    let res = match &app.player {
+        Some(player) => Some(player.set_volume(vol).await),
+        None => None,
+    };
+    note_ipc_result(app, "volume", res);
+}
+
+/// Absorb a failed mpv IPC call into a footer message instead of letting it
+/// escape `handle_key`.
+///
+/// mpv runs without `--idle`, so it exits by itself at the end of a track and
+/// `app.player` can briefly hold a socket nobody is listening on. Propagating
+/// that error used to unwind the whole event loop and abort `main` — which is
+/// what made the app "randomly crash", and discarded the session's unsaved
+/// playlist edits along with it. Clearing the stale player is the job of the
+/// `TaskMsg::PlayerGone` handler; there is nothing to do here but say so.
+///
+/// `None` means there was no player to talk to, which is not a failure.
+fn note_ipc_result(app: &mut App, action: &str, res: Option<Result<()>>) {
+    if let Some(Err(e)) = res {
+        warn!(action, err = %e, "mpv IPC call failed");
+        app.set_status(format!("Player not responding ({action})"));
+    }
 }
 
 // ── Settings panel ────────────────────────────────────────────────────────
@@ -571,7 +612,7 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
 
             if is_current {
                 // Stop playback immediately when deleting current track
-                app.player = None;  // Drop implementation kills mpv process
+                app.stop_player(); // kills mpv and retires its position poller
                 app.playing = None;
                 app.playlist.current_track = None;
                 app.is_paused = false;
@@ -772,7 +813,7 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
                 // resurrect the just-deleted file with a stale snapshot.
                 let deleting_playing_playlist = app.playing.as_ref().is_some_and(|p| p.path == path);
                 if deleting_playing_playlist {
-                    app.player = None; // Drop kills mpv process
+                    app.stop_player(); // kills mpv and retires its position poller
                     app.playing = None;
                     app.is_paused = false;
                 }

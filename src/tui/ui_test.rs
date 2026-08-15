@@ -3433,7 +3433,7 @@ tracks = []
             track_idx: 0,
         });
 
-        adjust_playing_track_speed(&mut app, 0.1).await.expect("adjust speed");
+        adjust_playing_track_speed(&mut app, 0.1).await;
 
         // The displayed (Browsing) playlist's track must be untouched.
         let displayed_track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
@@ -3470,7 +3470,7 @@ tracks = []
         let available = vec![("Active".to_string(), std::path::PathBuf::from("/fake/Active.toml"))];
         let mut app = App::new(pl, config, available, std::path::PathBuf::from("/fake/Active.toml"));
 
-        adjust_playing_track_speed(&mut app, 0.1).await.expect("adjust speed");
+        adjust_playing_track_speed(&mut app, 0.1).await;
 
         let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
         assert_eq!(track.speed, None, "no track should be touched when nothing is playing");
@@ -3499,7 +3499,7 @@ tracks = []
         // Same path as displayed → mutation goes through app.playlist directly.
         app.playlist.tracks[0].speed = Some(2.95);
 
-        adjust_playing_track_speed(&mut app, 0.5).await.expect("adjust speed");
+        adjust_playing_track_speed(&mut app, 0.5).await;
 
         let track = app.playlist.tracks.iter().find(|t| t.video_id == "vid1").expect("vid1");
         assert_eq!(track.speed, Some(3.0), "speed must clamp at 3.0");
@@ -4332,6 +4332,506 @@ tracks = []
             reloaded.tracks[0].last_position, 77,
             "leaving track A's last_position must be flushed to its own playlist file \
              (Elsewhere.toml), not dropped when self.playing is replaced by the new session"
+        );
+    }
+
+    // ── Phase 1: player lifecycle & crash resistance ──────────────────────────
+
+    /// A `Player` whose mpv is already gone: the socket path does not exist, so
+    /// every IPC call against it fails. This is exactly the state the app is
+    /// left in when mpv exits by itself at the end of a track.
+    fn make_dead_player(socket_path: std::path::PathBuf) -> crate::player::Player {
+        let process = tokio::process::Command::new("true")
+            .spawn()
+            .expect("spawn placeholder process");
+        crate::player::Player { process, socket_path }
+    }
+
+    fn dead_player_socket(tag: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("/tmp/trovers-no-such-socket-{tag}.sock"))
+    }
+
+    #[tokio::test]
+    async fn volume_key_with_dead_player_does_not_abort_the_event_loop() {
+        use crate::tui::input::{handle_key, Action};
+
+        let mut app = make_app_with_playlists("Active", &["Active"]);
+        app.player = Some(make_dead_player(dead_player_socket("vol")));
+
+        let action = handle_key(&mut app, key(crossterm::event::KeyCode::Char('v')))
+            .await
+            .expect("a dead mpv socket must not propagate an error out of handle_key");
+
+        assert_eq!(action, Action::Continue);
+        assert_eq!(
+            app.config.default_volume, 85,
+            "the volume setting must still be applied even when mpv cannot be reached"
+        );
+        assert!(
+            app.status_message.is_some(),
+            "the failure should surface as a footer message"
+        );
+    }
+
+    #[tokio::test]
+    async fn seek_key_with_dead_player_does_not_abort_the_event_loop() {
+        use crate::tui::input::{handle_key, Action};
+
+        let mut app = make_app_with_playlists("Active", &["Active"]);
+        app.player = Some(make_dead_player(dead_player_socket("seek")));
+
+        let action = handle_key(&mut app, key(crossterm::event::KeyCode::Left))
+            .await
+            .expect("a dead mpv socket must not propagate an error out of handle_key");
+
+        assert_eq!(action, Action::Continue);
+    }
+
+    #[tokio::test]
+    async fn pause_key_with_dead_player_does_not_abort_the_event_loop() {
+        use crate::tui::input::{handle_key, Action};
+
+        let mut app = make_app_with_playlists("Active", &["Active"]);
+        app.player = Some(make_dead_player(dead_player_socket("pause")));
+
+        let action = handle_key(&mut app, key(crossterm::event::KeyCode::Char(' ')))
+            .await
+            .expect("a dead mpv socket must not propagate an error out of handle_key");
+
+        assert_eq!(action, Action::Continue);
+    }
+
+    #[tokio::test]
+    async fn speed_key_with_dead_player_still_persists_the_new_speed() {
+        use crate::tui::input::{handle_key, Action};
+        use crate::tui::{App, PlayingSession};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Active.toml");
+        let mut pl = make_playlist("Active");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.save(&path).expect("save");
+
+        let mut app = App::new(
+            pl,
+            crate::config::Config::default(),
+            vec![("Active".to_string(), path.clone())],
+            path.clone(),
+        );
+        app.playing = Some(PlayingSession {
+            path: path.clone(),
+            playlist: crate::playlist::Playlist::load(&path).expect("load"),
+            track_idx: 0,
+        });
+        app.player = Some(make_dead_player(dead_player_socket("speed")));
+
+        let action = handle_key(&mut app, key(crossterm::event::KeyCode::Char(']')))
+            .await
+            .expect("a dead mpv socket must not propagate an error out of handle_key");
+
+        assert_eq!(action, Action::Continue);
+        assert_eq!(
+            app.playlist.tracks[0].speed,
+            Some(1.1),
+            "the speed change must be recorded even though mpv never received it"
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_quits() {
+        use crate::tui::input::{handle_key, Action};
+
+        let mut app = make_app_with_playlists("Active", &["Active"]);
+        let event = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+
+        let action = handle_key(&mut app, event).await.expect("handle_key");
+
+        assert_eq!(action, Action::Quit);
+        assert!(app.should_quit, "Ctrl+C must trigger the normal shutdown path");
+    }
+
+    #[test]
+    fn stop_player_drops_the_player_and_bumps_the_generation() {
+        use std::sync::atomic::Ordering;
+
+        let mut app = make_app_with_playlists("Active", &["Active"]);
+        let before = app.player_generation.load(Ordering::SeqCst);
+
+        let returned = app.stop_player();
+
+        assert!(app.player.is_none());
+        assert_eq!(returned, before + 1);
+        assert_eq!(app.player_generation.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[tokio::test]
+    async fn player_gone_for_the_current_generation_clears_the_player() {
+        use crate::tui::TaskMsg;
+        use std::sync::atomic::Ordering;
+
+        let mut app = make_app_with_playlists("Active", &["Active"]);
+        app.player = Some(make_dead_player(dead_player_socket("gone")));
+        app.is_paused = true;
+        let generation = app.player_generation.load(Ordering::SeqCst);
+
+        app.handle_task_msg(TaskMsg::PlayerGone { generation });
+
+        assert!(
+            app.player.is_none(),
+            "mpv exiting on its own must clear the stale Player, or the next \
+             keypress talks to a socket nobody is listening on"
+        );
+        assert!(!app.is_paused);
+    }
+
+    #[tokio::test]
+    async fn player_gone_for_a_stale_generation_is_ignored() {
+        use crate::tui::TaskMsg;
+
+        let mut app = make_app_with_playlists("Active", &["Active"]);
+        let stale = app.player_generation.load(std::sync::atomic::Ordering::SeqCst);
+
+        // A newer player has since been started.
+        app.stop_player();
+        app.player = Some(make_dead_player(dead_player_socket("gone-stale")));
+
+        app.handle_task_msg(TaskMsg::PlayerGone { generation: stale });
+
+        assert!(
+            app.player.is_some(),
+            "the previous player's exit notification must not kill the current one"
+        );
+    }
+
+    #[tokio::test]
+    async fn player_ready_for_a_stale_generation_is_discarded() {
+        use crate::tui::{PlayingSession, TaskMsg};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Active.toml");
+        let mut pl = make_playlist("Active");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.save(&path).expect("save");
+
+        let mut app = crate::tui::App::new(
+            pl,
+            crate::config::Config::default(),
+            vec![("Active".to_string(), path.clone())],
+            path.clone(),
+        );
+        app.playing = Some(PlayingSession {
+            path: path.clone(),
+            playlist: crate::playlist::Playlist::load(&path).expect("load"),
+            track_idx: 0,
+        });
+
+        let stale = app.player_generation.load(std::sync::atomic::Ordering::SeqCst);
+        // The user moves on before the slow spawn finishes.
+        app.stop_player();
+
+        app.handle_task_msg(TaskMsg::PlayerReady {
+            video_id: "vid1".to_string(),
+            player: Box::new(make_dead_player(dead_player_socket("ready-stale"))),
+            generation: stale,
+        });
+
+        assert!(
+            app.player.is_none(),
+            "a player that finished starting after being superseded must be dropped, \
+             not installed — matching video_ids are not enough to tell them apart"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_playback_invalidates_the_previous_player() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Active.toml");
+        let mut pl = make_playlist("Active");
+        pl.add_track(make_track("vid1", "Track One"));
+        pl.add_track(make_track("vid2", "Track Two"));
+        pl.save(&path).expect("save");
+
+        let mut app = crate::tui::App::new(
+            pl,
+            crate::config::Config::default(),
+            vec![("Active".to_string(), path.clone())],
+            path.clone(),
+        );
+        app.player = Some(make_dead_player(dead_player_socket("switch")));
+        let before = app.player_generation.load(Ordering::SeqCst);
+
+        app.request_playback(1, None);
+
+        assert!(
+            app.player_generation.load(Ordering::SeqCst) > before,
+            "starting a new track must retire the outgoing player's position poller, \
+             otherwise its timestamps keep landing in App::position"
+        );
+        assert!(app.player.is_none(), "the outgoing mpv must be killed straight away");
+    }
+
+    #[tokio::test]
+    async fn meta_ready_for_a_missing_target_playlist_starts_no_download() {
+        use crate::tui::TaskMsg;
+        use crate::ytdlp::TrackMeta;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let active_path = dir.path().join("Active.toml");
+        make_playlist("Active").save(&active_path).expect("save active");
+
+        let missing_path = dir.path().join("Gone.toml");
+
+        let mut app = crate::tui::App::new(
+            make_playlist("Active"),
+            crate::config::Config::default(),
+            vec![("Active".to_string(), active_path.clone())],
+            active_path,
+        );
+
+        app.handle_task_msg(TaskMsg::MetaReady {
+            url: "https://example.com/x".to_string(),
+            meta: TrackMeta {
+                title: "T".to_string(),
+                artist: "A".to_string(),
+                channel: "C".to_string(),
+                duration: 10,
+                video_id: "vid1".to_string(),
+                source: "example.com".to_string(),
+            },
+            target_path: Some(missing_path),
+        });
+
+        assert!(
+            app.downloading.is_empty(),
+            "a download whose track could not be recorded anywhere would leave an \
+             orphaned file in the audio cache"
+        );
+        assert!(app.download_targets.is_empty());
+    }
+
+    // ── Orphan socket reaper ──────────────────────────────────────────────────
+
+    #[test]
+    fn socket_owner_pid_parses_our_socket_names() {
+        use crate::player::socket_owner_pid;
+        use std::path::Path;
+
+        assert_eq!(socket_owner_pid(Path::new("/tmp/trovers-1234-0.sock")), Some(1234));
+        assert_eq!(socket_owner_pid(Path::new("/tmp/trovers-99-7.sock")), Some(99));
+    }
+
+    #[test]
+    fn socket_owner_pid_rejects_foreign_files() {
+        use crate::player::socket_owner_pid;
+        use std::path::Path;
+
+        assert_eq!(socket_owner_pid(Path::new("/tmp/mpv-1234-0.sock")), None);
+        assert_eq!(socket_owner_pid(Path::new("/tmp/trovers-1234-0.log")), None);
+        assert_eq!(socket_owner_pid(Path::new("/tmp/trovers-abc-0.sock")), None);
+        assert_eq!(socket_owner_pid(Path::new("/tmp/trovers.sock")), None);
+    }
+
+    #[tokio::test]
+    async fn reaper_leaves_a_live_instances_socket_alone() {
+        // A socket belonging to a *running* trovers (here: this test process)
+        // must survive, or launching a second instance would silently kill the
+        // first one's playback.
+        let own = std::path::PathBuf::from(format!(
+            "/tmp/trovers-{}-90001.sock",
+            std::process::id()
+        ));
+        std::fs::write(&own, b"").expect("create own socket placeholder");
+
+        crate::player::reap_orphaned_players().await;
+
+        let survived = own.exists();
+        let _ = std::fs::remove_file(&own);
+        assert!(survived, "the reaper must never touch a live instance's socket");
+    }
+
+    #[tokio::test]
+    async fn reaper_removes_a_dead_instances_socket() {
+        // Borrow the pid of a process we have already reaped, so it is
+        // guaranteed dead by the time the reaper looks at it.
+        let mut child = tokio::process::Command::new("true")
+            .spawn()
+            .expect("spawn short-lived process");
+        let dead_pid = child.id().expect("child pid");
+        child.wait().await.expect("wait");
+
+        let stale = std::path::PathBuf::from(format!("/tmp/trovers-{dead_pid}-90002.sock"));
+        std::fs::write(&stale, b"").expect("create stale socket placeholder");
+
+        crate::player::reap_orphaned_players().await;
+
+        let still_there = stale.exists();
+        let _ = std::fs::remove_file(&stale);
+        assert!(
+            !still_there,
+            "a socket whose owning trovers is gone must be cleaned up, so a stranded \
+             mpv is not left playing with nothing attached to stop it"
+        );
+    }
+
+    // ── End-to-end player lifecycle (needs a real mpv on PATH) ────────────────
+
+    /// A silent, one-second source mpv can synthesise on its own, so this test
+    /// needs nothing but mpv itself — no fixture file, no audible output.
+    const SHORT_SILENT_SOURCE: &str = "av://lavfi:aevalsrc=0:d=1";
+
+    /// Proves the whole symptom-1 chain is broken at the root: mpv runs without
+    /// `--idle`, so it exits when the track ends, and the poller must notice and
+    /// report it. Detection cannot key off the socket file — mpv leaves that on
+    /// disk after exiting — so this guards the `ECONNREFUSED` classification in
+    /// `poll_time_pos` against regressing back to an `exists()` check.
+    ///
+    /// Ignored by default because it spawns a real mpv:
+    /// `cargo test -- --ignored real_mpv`
+    #[tokio::test]
+    #[ignore = "spawns a real mpv process"]
+    async fn real_mpv_exiting_at_end_of_track_is_reported_as_gone() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Arc;
+
+        let player = crate::player::Player::spawn(SHORT_SILENT_SOURCE, None)
+            .await
+            .expect("mpv must be on PATH for this test");
+        let socket_path = player.socket_path.clone();
+
+        // Hand the socket to the poller and let mpv reach the end of the source.
+        // Keeping `player` alive means `Player::drop` has *not* removed the
+        // socket file, which is exactly the situation being tested.
+        let (pos_tx, _pos_rx) = tokio::sync::watch::channel(0.0f64);
+        let generation = 1u64;
+        let counter = Arc::new(AtomicU64::new(generation));
+
+        let mpv_exited = crate::player::poll_position_loop(
+            socket_path.clone(),
+            pos_tx,
+            generation,
+            counter,
+        )
+        .await;
+
+        assert!(
+            mpv_exited,
+            "the poller must report mpv exiting on its own, otherwise the app keeps \
+             a Player pointing at a dead socket and dies on the next keypress"
+        );
+        assert!(
+            socket_path.exists(),
+            "sanity check: mpv leaves its IPC socket file behind, so detection must \
+             not rely on the file disappearing"
+        );
+    }
+
+    /// The generation guard must retire a poller without it publishing another
+    /// position — the mechanism that stops the outgoing track's timestamp from
+    /// bleeding into the next track.
+    ///
+    /// Ignored by default because it spawns a real mpv:
+    /// `cargo test -- --ignored real_mpv`
+    #[tokio::test]
+    #[ignore = "spawns a real mpv process"]
+    async fn real_mpv_poller_stops_without_publishing_when_superseded() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let player = crate::player::Player::spawn(SHORT_SILENT_SOURCE, None)
+            .await
+            .expect("mpv must be on PATH for this test");
+
+        // A sentinel no real position can equal, so "still the sentinel" proves
+        // nothing was ever published.
+        let (pos_tx, pos_rx) = tokio::sync::watch::channel(-1.0f64);
+        let generation = 1u64;
+        let counter = Arc::new(AtomicU64::new(generation));
+
+        // Supersede the player before the poller's first tick.
+        counter.store(generation + 1, Ordering::SeqCst);
+
+        let mpv_exited = crate::player::poll_position_loop(
+            player.socket_path.clone(),
+            pos_tx,
+            generation,
+            Arc::clone(&counter),
+        )
+        .await;
+
+        assert!(!mpv_exited, "a superseded poller must not raise PlayerGone");
+        assert_eq!(
+            *pos_rx.borrow(),
+            -1.0,
+            "a superseded poller must publish no position at all — a single stale \
+             write is enough to make the next track resume at this track's timestamp"
+        );
+    }
+
+    /// An endless silent source, so mpv never exits on its own and its survival
+    /// is entirely down to whether we killed it.
+    const ENDLESS_SILENT_SOURCE: &str = "av://lavfi:anullsrc=r=8000:cl=mono";
+
+    /// Try to connect to every mpv IPC socket belonging to *this* process.
+    /// Any socket that accepts a connection has a live mpv behind it.
+    async fn live_own_sockets() -> Vec<std::path::PathBuf> {
+        let own_pid = std::process::id();
+        let mut live = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/tmp") else {
+            return live;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if crate::player::socket_owner_pid(&path) != Some(own_pid) {
+                continue;
+            }
+            if tokio::net::UnixStream::connect(&path).await.is_ok() {
+                live.push(path);
+            }
+        }
+        live
+    }
+
+    /// Symptom 2, root link (a): `Player::spawn` waits up to a second for mpv's
+    /// socket to appear, and during that wait the `Child` is still a bare local.
+    /// If the future is cancelled then — the user quits or switches track — the
+    /// `Child` is dropped, and `tokio::process::Child` *detaches* rather than
+    /// kills unless `kill_on_drop(true)` is set. That is how mpv was left
+    /// playing forever with the app gone.
+    ///
+    /// Ignored by default because it spawns a real mpv:
+    /// `cargo test -- --ignored real_mpv`
+    #[tokio::test]
+    #[ignore = "spawns a real mpv process"]
+    async fn real_mpv_is_killed_when_spawn_is_cancelled_midway() {
+        let before = live_own_sockets().await;
+
+        // Give the spawn long enough to fork mpv, but nowhere near long enough
+        // to return — then drop the future.
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(80),
+            crate::player::Player::spawn(ENDLESS_SILENT_SOURCE, None),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the spawn was meant to be cancelled, not to finish");
+
+        // mpv needs a moment to die after receiving the kill.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        let after = live_own_sockets().await;
+        let leaked: Vec<_> = after.iter().filter(|p| !before.contains(p)).collect();
+        for path in &after {
+            if !before.contains(path) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "cancelling Player::spawn leaked a live mpv on {leaked:?} — kill_on_drop is not set"
         );
     }
 }

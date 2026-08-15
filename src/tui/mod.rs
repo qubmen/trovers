@@ -14,6 +14,8 @@ use chrono::Utc;
 use crossterm::event::{self, Event};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
@@ -75,8 +77,15 @@ pub enum TaskMsg {
     MetaError { url: String, err: String },
     DownloadDone { video_id: String, file: PathBuf },
     DownloadError { video_id: String, err: String },
-    PlayerReady { video_id: String, player: Box<Player> },
+    /// A freshly spawned mpv is ready. `generation` identifies which playback
+    /// request it belongs to, so a player that finished starting *after* the
+    /// user already moved on is discarded instead of hijacking the new track.
+    PlayerReady { video_id: String, player: Box<Player>, generation: u64 },
     PlayerError { video_id: String, err: String },
+    /// mpv exited on its own — it reached the end of the track, or crashed.
+    /// Without this the app kept a `Player` pointing at a dead socket, showed
+    /// "▶ Playing", and then died the moment any key sent an IPC command.
+    PlayerGone { generation: u64 },
 }
 
 // ── Speed resolution ──────────────────────────────────────────────────────
@@ -138,6 +147,12 @@ pub struct App {
     pub playlist_path: PathBuf,
     pub config: Config,
     pub player: Option<Player>,
+    /// Monotonic counter identifying the *current* playback request. Bumped
+    /// every time a player is stopped or replaced (see `stop_player`), and
+    /// shared with the async spawn task and the position poller so both can tell
+    /// whether the player they are working on is still the one the app wants.
+    /// Anything carrying a stale generation is discarded rather than applied.
+    pub player_generation: Arc<AtomicU64>,
     /// The session (playlist + track index) actually driving playback right
     /// now — independent of whichever playlist is currently displayed.
     pub playing: Option<PlayingSession>,
@@ -212,6 +227,7 @@ impl App {
             playlist_path,
             config,
             player: None,
+            player_generation: Arc::new(AtomicU64::new(0)),
             playing: None,
             pos_tx,
             position_rx,
@@ -332,6 +348,19 @@ impl App {
         }
     }
 
+    /// Tear down the current player and invalidate everything still working on
+    /// its behalf, returning the new generation.
+    ///
+    /// Dropping the `Player` kills mpv. Bumping the generation additionally
+    /// retires the position poller watching the old socket and any in-flight
+    /// spawn task, so neither can write into `App` after this point. Callers
+    /// that are about to start a *different* player just call
+    /// `spawn_player_for`, which does this for them.
+    pub fn stop_player(&mut self) -> u64 {
+        self.player = None;
+        self.player_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     /// Start playback of the track at Vec index `idx` within the displayed
     /// playlist (`self.playlist`).
     /// `start_pos`: resume at this position in seconds (used when switching
@@ -449,11 +478,17 @@ impl App {
     /// polling and reporting the result back via `TaskMsg::PlayerReady`/
     /// `PlayerError`. Pure "start a player" — callers are responsible for any
     /// `self.playing`/`current_track`/`position` bookkeeping beforehand.
-    fn spawn_player_for(&self, video_id: String, source: PlaySource, speed: f32, start_pos: Option<f64>) {
+    ///
+    /// Always stops the previous player first (via `stop_player`), so no two mpv
+    /// processes are ever audible at once and the outgoing player's poller is
+    /// retired before the new one starts reporting positions.
+    fn spawn_player_for(&mut self, video_id: String, source: PlaySource, speed: f32, start_pos: Option<f64>) {
+        let generation = self.stop_player();
         let volume = self.config.default_volume;
         let quality = self.config.audio_quality.clone();
         let task_tx = self.task_tx.clone();
         let pos_tx = self.pos_tx.clone();
+        let player_generation = Arc::clone(&self.player_generation);
 
         tokio::spawn(async move {
             let resolved_source = match source {
@@ -472,16 +507,39 @@ impl App {
                 }
             };
 
+            // Resolving the stream URL above can take seconds; bail out rather
+            // than spawn an mpv nobody asked for any more.
+            if player_generation.load(Ordering::SeqCst) != generation {
+                info!(video_id = %video_id, "playback request superseded before spawn");
+                return;
+            }
+
             match Player::spawn(&resolved_source, start_pos).await {
                 Ok(player) => {
                     let _ = player.set_speed(speed).await;
                     let _ = player.set_volume(volume).await;
-                    // Start position polling as independent task
+                    // Start position polling as independent task. It reports
+                    // back when mpv exits on its own so the app can drop the
+                    // dead `Player` instead of keeping a stale one around.
                     let socket_path = player.socket_path.clone();
-                    tokio::spawn(player::poll_position_loop(socket_path, pos_tx));
+                    let poll_task_tx = task_tx.clone();
+                    let poll_generation = Arc::clone(&player_generation);
+                    tokio::spawn(async move {
+                        let mpv_exited = player::poll_position_loop(
+                            socket_path,
+                            pos_tx,
+                            generation,
+                            poll_generation,
+                        )
+                        .await;
+                        if mpv_exited {
+                            let _ = poll_task_tx.send(TaskMsg::PlayerGone { generation });
+                        }
+                    });
                     let _ = task_tx.send(TaskMsg::PlayerReady {
                         video_id,
                         player: Box::new(player),
+                        generation,
                     });
                 }
                 Err(e) => {
@@ -567,15 +625,23 @@ impl App {
                 // When the target playlist path is not the currently displayed one, add
                 // the track there instead of the currently displayed playlist.
                 if owning_path != self.playlist_path {
+                    // Bail out before starting the download if the track could
+                    // not be recorded anywhere: a download completing against a
+                    // playlist that has no such row leaves an untracked file in
+                    // the audio cache that nothing will ever clean up.
                     match Playlist::load(&owning_path) {
                         Ok(mut target_pl) => {
                             target_pl.add_track(track);
                             if let Err(e) = target_pl.save(&owning_path) {
                                 error!(err = %e, "failed to save target playlist after URL add");
+                                self.set_status("Could not save to target playlist");
+                                return;
                             }
                         }
                         Err(e) => {
                             error!(err = %e, path = %owning_path.display(), "target playlist not found, track not added");
+                            self.set_status("Target playlist not found");
+                            return;
                         }
                     }
                     self.set_status(format!("Added to playlist: {status_title}"));
@@ -656,14 +722,14 @@ impl App {
                 self.set_status("Download failed");
             }
 
-            TaskMsg::PlayerReady { video_id, player } => {
-                // Ignore if user already switched to a different track
-                let matches_playing = self
-                    .playing
-                    .as_ref()
-                    .is_some_and(|p| p.track().video_id == video_id);
-                if !matches_playing {
-                    info!(video_id = %video_id, "player ready but track changed, discarding");
+            TaskMsg::PlayerReady { video_id, player, generation } => {
+                // Discard a player that finished starting after the user already
+                // moved on. Comparing generations (rather than video ids) also
+                // covers replaying the *same* track and the stream→local-file
+                // hot switch, where the id alone cannot tell the two apart.
+                // Dropping `player` here kills its mpv.
+                if generation != self.player_generation.load(Ordering::SeqCst) {
+                    info!(video_id = %video_id, generation, "player ready but superseded, discarding");
                     return;
                 }
                 info!(video_id = %video_id, "player started");
@@ -675,6 +741,22 @@ impl App {
             TaskMsg::PlayerError { video_id, err } => {
                 error!(video_id = %video_id, err = %err, "player failed to start");
                 self.set_status("Player error");
+            }
+
+            TaskMsg::PlayerGone { generation } => {
+                // mpv exits by itself at the end of a track (it runs without
+                // --idle/--keep-open). Drop the dead `Player` so the UI stops
+                // claiming it is playing and no keypress tries to talk to a
+                // socket nobody is listening on. `self.playing` is deliberately
+                // left in place: it still records which track was last playing,
+                // which the footer and resume-on-replay rely on.
+                if generation != self.player_generation.load(Ordering::SeqCst) {
+                    return;
+                }
+                info!(generation, "mpv exited on its own");
+                self.player = None;
+                self.is_paused = false;
+                self.set_status("Playback finished");
             }
         }
     }
@@ -992,7 +1074,7 @@ impl App {
         // also exist in an unrelated playing session elsewhere.
         let is_current = self.is_playing_track(&self.playlist_path, &video_id);
         if is_current {
-            self.player = None; // Drop kills mpv process
+            self.stop_player(); // kills mpv and retires its position poller
             self.playing = None;
             self.playlist.current_track = None;
             self.is_paused = false;
@@ -1057,10 +1139,71 @@ enum PlaySource {
     Stream(String),
 }
 
+// ── Shutdown plumbing ─────────────────────────────────────────────────────
+
+/// Restores the terminal when `run` returns for *any* reason, including an early
+/// `?`. `ratatui::init()` installs a panic hook that already covers panics, but
+/// an error propagating out of the event loop would otherwise leave the terminal
+/// in raw mode on the alternate screen — indistinguishable from a hard crash.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
+/// Flip `flag` when the process is asked to terminate, so the event loop can run
+/// its normal shutdown path (flush position → save playlist → kill mpv →
+/// restore terminal) instead of dying without unwinding and leaving mpv playing
+/// with no UI attached.
+///
+/// `SIGHUP` is the one that matters most in practice: it is what arrives when the
+/// user closes the terminal window mid-playback.
+fn spawn_signal_listener(flag: Arc<AtomicBool>) {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    tokio::spawn(async move {
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(err = %e, "failed to register SIGINT handler");
+                return;
+            }
+        };
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(err = %e, "failed to register SIGTERM handler");
+                return;
+            }
+        };
+        let mut sighup = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(err = %e, "failed to register SIGHUP handler");
+                return;
+            }
+        };
+
+        tokio::select! {
+            _ = sigint.recv() => info!("SIGINT received"),
+            _ = sigterm.recv() => info!("SIGTERM received"),
+            _ = sighup.recv() => info!("SIGHUP received"),
+        }
+
+        flag.store(true, Ordering::SeqCst);
+    });
+}
+
 // ── Event loop ────────────────────────────────────────────────────────────
 
 pub async fn run(app: &mut App) -> Result<()> {
     let mut terminal = ratatui::init();
+    let _terminal_guard = TerminalGuard;
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    spawn_signal_listener(Arc::clone(&shutdown));
 
     loop {
         app.sync_channels();
@@ -1074,13 +1217,19 @@ pub async fn run(app: &mut App) -> Result<()> {
             }
         }
 
+        if shutdown.load(Ordering::SeqCst) {
+            app.should_quit = true;
+        }
+
         if app.should_quit {
             break;
         }
     }
 
     app.flush_playing_position();
+    // Kill mpv before the terminal is restored, so a slow teardown can never
+    // leave audio playing over a shell prompt.
+    app.stop_player();
 
-    ratatui::restore();
     Ok(())
 }

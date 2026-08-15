@@ -9,7 +9,7 @@ mod ytdlp;
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::io::Write;
-use tracing::info;
+use tracing::{error, info};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
@@ -78,6 +78,10 @@ async fn main() -> Result<()> {
 
     deps::check()?;
     cache::ensure_dirs()?;
+
+    // Clean up after any previous instance that was killed hard enough to skip
+    // its own teardown, so a stranded mpv is not still playing over this one.
+    player::reap_orphaned_players().await;
 
     let config = config::Config::load()?;
 
@@ -192,7 +196,7 @@ async fn main() -> Result<()> {
         app.fetch_url(url);
     }
 
-    tui::run(&mut app).await?;
+    let run_result = tui::run(&mut app).await;
 
     // Save state on clean exit
     // #region agent log
@@ -213,8 +217,19 @@ async fn main() -> Result<()> {
     // IMPORTANT: use app.playlist_path here because it can change at runtime
     // (e.g. when renaming the active playlist). Saving to the original startup
     // path can recreate a deleted playlist file with copied contents.
-    app.playlist.save(&app.playlist_path)?;
-    app.config.save()?;
+    //
+    // This runs whether or not the event loop returned an error. It used to sit
+    // behind a `?` on `run`, so any error bubbling out of the loop threw away
+    // every playlist edit made during the session — the invisible half of the
+    // "it just crashed" symptom.
+    if let Err(e) = app.playlist.save(&app.playlist_path) {
+        error!(err = %e, "failed to save playlist on exit");
+    }
+    if let Err(e) = app.config.save() {
+        error!(err = %e, "failed to save config on exit");
+    }
+
+    run_result?;
     info!("exiting cleanly");
 
     Ok(())
