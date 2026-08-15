@@ -5602,6 +5602,77 @@ tracks = []
         );
     }
 
+    #[tokio::test]
+    async fn browsing_away_from_a_playing_playlist_does_not_undo_its_own_edits() {
+        // `PlayingSession.playlist` is a clone taken once, in `request_playback`.
+        // While the session's path still matches the displayed playlist, edits
+        // (e.g. `DownloadDone`'s cache-status patch) go through `self.playlist`
+        // and are saved by `save_playlist()` — the clone is never touched and
+        // stays correct as long as nobody reads it. But `switch_to_playlist`
+        // replaces `self.playlist` without telling the session, so the clone
+        // goes stale at the exact moment it becomes the thing that matters:
+        // `save_playing_session_playlist()` (periodic flush, or on quit) then
+        // writes that stale snapshot back over the file, reverting every edit
+        // made to it since the session started.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let cached_file = dir.path().join("X.opus");
+        std::fs::write(&cached_file, b"fake audio").expect("write fake audio");
+
+        let mut active = make_playlist("Active");
+        active.add_track(make_track("X", "Track X"));
+        let active_path = dir.path().join("Active.toml");
+        active.save(&active_path).expect("save active");
+
+        let mut other = make_playlist("Other");
+        other.add_track(make_track("Y", "Track Y"));
+        let other_path = dir.path().join("Other.toml");
+        other.save(&other_path).expect("save other");
+
+        let mut app = crate::tui::App::new(
+            active.clone(),
+            crate::config::Config::default(),
+            vec![
+                ("Active".to_string(), active_path.clone()),
+                ("Other".to_string(), other_path.clone()),
+            ],
+            active_path.clone(),
+        );
+
+        // X starts playing while "Active" is the displayed playlist.
+        app.playing = Some(crate::tui::PlayingSession {
+            path: active_path.clone(),
+            playlist: app.playlist.clone(),
+            track_idx: 0,
+        });
+
+        // A download completes: same-path branch of `patch_and_save_playlist`
+        // mutates `self.playlist` in place and saves it.
+        let file_for_patch = cached_file.clone();
+        app.patch_and_save_playlist(&active_path, "X", move |t| {
+            t.cache_status = crate::playlist::CacheStatus::Cached;
+            t.file = Some(file_for_patch);
+        });
+
+        // The user browses to "Other" while X keeps playing in the background.
+        app.switch_to_playlist("Other", &other_path).expect("switch");
+
+        // A periodic position flush (or the one at quit).
+        app.save_playing_session_playlist();
+
+        let on_disk = crate::playlist::Playlist::load(&active_path).expect("reload active");
+        assert_eq!(
+            on_disk.tracks[0].cache_status,
+            crate::playlist::CacheStatus::Cached,
+            "switching away and flushing position must not revert the cache status"
+        );
+        assert_eq!(
+            on_disk.tracks[0].file,
+            Some(cached_file),
+            "switching away and flushing position must not drop the cached file"
+        );
+    }
+
     // ── Phase 3: auto-advance at end of track ───────────────────────────────
 
     #[tokio::test]

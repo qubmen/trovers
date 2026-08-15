@@ -1367,6 +1367,23 @@ impl App {
         let new_playlist = Playlist::load(path)
             .with_context(|| format!("failed to load playlist '{name}' from {}", path.display()))?;
 
+        // If the track that's playing lives in the playlist we're about to
+        // stop displaying, its `PlayingSession.playlist` clone has been
+        // sitting untouched while `self.playlist` was the copy actually
+        // receiving in-place edits (cache status on download completion,
+        // position, loop/shuffle toggles, add/delete — everything that
+        // mutates `self.playlist` directly rather than through
+        // `playing_track_mut()`). Refresh the clone now, at the last moment
+        // the two still refer to the same file, so a later
+        // `save_playing_session_playlist()` — from the periodic position
+        // flush or on quit — does not write this now-stale snapshot back
+        // over those edits.
+        if let Some(session) = self.playing.as_mut() {
+            if session.path == self.playlist_path {
+                session.playlist = self.playlist.clone();
+            }
+        }
+
         // Replace playlist state
         self.playlist = new_playlist;
         self.playlist_path = path.to_path_buf();
