@@ -9177,6 +9177,176 @@ tracks = []
         assert_eq!(status_of(&app), Some("Not linked to a folder"));
     }
 
+    // ── Imports and switches keep the rows in step ─────────────────────────
+
+    /// An import the user just asked for arrives open. It is the one album whose
+    /// contents they have already said they want to see.
+    #[test]
+    fn a_fresh_import_appears_as_an_open_album_under_the_cursor() {
+        use crate::tui::ImportTarget;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[]);
+        let root = dir.path().join("Kino");
+
+        app.apply_import(
+            root.clone(),
+            ImportTarget::NewAlbum {
+                parent: Some(app.displayed_playlist_name()),
+            },
+            vec![imported_file(&root.join("one.mp3"), "One")],
+        );
+
+        assert_eq!(app.albums.len(), 1);
+        assert!(
+            !app.albums[0].playlist.collapsed,
+            "an import you cannot see did nothing"
+        );
+        assert_eq!(row_shapes(&app), vec!["own:0", "header:Kino", "album0:0"]);
+    }
+
+    /// An import whose parent is some other playlist must not appear here — the
+    /// rows show the displayed playlist's albums, not every album there is.
+    #[test]
+    fn an_import_under_another_playlist_does_not_join_these_rows() {
+        use crate::tui::ImportTarget;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[]);
+        let root = dir.path().join("Kino");
+
+        app.apply_import(
+            root.clone(),
+            ImportTarget::NewAlbum {
+                parent: Some("Elsewhere".to_string()),
+            },
+            vec![imported_file(&root.join("one.mp3"), "One")],
+        );
+
+        assert!(app.albums.is_empty());
+        assert_eq!(row_shapes(&app), vec!["own:0"]);
+    }
+
+    #[test]
+    fn switching_playlist_loads_that_playlists_own_albums() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+
+        // A second top-level playlist with an album of its own.
+        let second_path = dir.path().join("Second.toml");
+        let mut second = make_playlist("Second");
+        add_track(&mut second, make_track("s1", "s1"));
+        second.save(&second_path).expect("save second");
+        let mut zed = make_playlist("Zed");
+        zed.kind = crate::playlist::PlaylistKind::Album;
+        zed.parent = Some("Second".to_string());
+        add_track(&mut zed, make_track("z1", "z1"));
+        zed.save(&dir.path().join("Zed.toml")).expect("save Zed");
+        app.available_playlists =
+            crate::playlist::Playlist::list_entries(dir.path()).expect("list");
+        refresh_library(&mut app);
+
+        assert_eq!(album_names(&app), vec!["Kino"]);
+
+        app.switch_to_playlist("Second", &second_path)
+            .expect("switch");
+
+        assert_eq!(album_names(&app), vec!["Zed"]);
+        assert_eq!(row_shapes(&app), vec!["own:0", "header:Zed"]);
+    }
+
+    /// Renaming a parent has to reach the copies of its albums held in memory. A
+    /// stale `parent` there is written back by the next thing that saves the album
+    /// — a fold, a play — and the album orphans out of the list it belongs to.
+    #[tokio::test]
+    async fn renaming_the_displayed_playlist_follows_its_loaded_albums() {
+        use crate::tui::input::handle_playlist_rename;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        app.sidebar_selected = app
+            .sidebar_items()
+            .iter()
+            .position(
+                |i| matches!(i, crate::tui::SidebarItem::Playlist { name, .. } if name == "aBooks"),
+            )
+            .expect("the parent is in the sidebar");
+        app.input_mode = crate::tui::InputMode::PlaylistRename;
+        app.input_buf = "Books".to_string();
+        handle_playlist_rename(&mut app, key(KeyCode::Enter))
+            .await
+            .expect("renamed");
+
+        assert_eq!(
+            app.albums[0].playlist.parent.as_deref(),
+            Some("Books"),
+            "in memory"
+        );
+        // And it survives the next save of the album, which is what would have
+        // written the stale name back.
+        app.toggle_album(0);
+        assert_eq!(
+            crate::playlist::Playlist::load(&app.albums[0].path)
+                .expect("load")
+                .parent
+                .as_deref(),
+            Some("Books"),
+            "and on disk"
+        );
+        assert_eq!(row_shapes(&app), vec!["own:0", "header:Kino", "album0:0"]);
+    }
+
+    /// An album whose parent is itself an album is not something trovers writes —
+    /// two levels only (ADR-016) — but a hand-edited file can say it, and then the
+    /// album is both listed in the sidebar and drawn as a row here. Deleting it
+    /// from the sidebar has to take the row with it, not leave a header pointing at
+    /// a file that is gone.
+    #[tokio::test]
+    async fn deleting_an_album_from_the_sidebar_takes_its_row_too() {
+        use crate::tui::input::handle_playlist_delete;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        // Display the album, and hang another album off it.
+        let kino_path = app.albums[0].path.clone();
+        let mut nested = make_playlist("Nested");
+        nested.kind = crate::playlist::PlaylistKind::Album;
+        nested.parent = Some("Kino".to_string());
+        add_track(&mut nested, make_track("n1", "n1"));
+        let nested_path = dir.path().join("Nested.toml");
+        nested.save(&nested_path).expect("save nested");
+        app.available_playlists =
+            crate::playlist::Playlist::list_entries(dir.path()).expect("list");
+        refresh_library(&mut app);
+        app.switch_to_playlist("Kino", &kino_path).expect("switch");
+        assert_eq!(album_names(&app), vec!["Nested"]);
+
+        app.sidebar_selected = app
+            .sidebar_items()
+            .iter()
+            .position(
+                |i| matches!(i, crate::tui::SidebarItem::Playlist { name, .. } if name == "Nested"),
+            )
+            .expect("an album under an album is still reachable in the sidebar");
+        handle_playlist_delete(&mut app, key(KeyCode::Char('y')))
+            .await
+            .expect("deleted");
+
+        assert!(!nested_path.exists());
+        assert!(app.albums.is_empty(), "and the loaded copy goes with it");
+        assert_eq!(row_shapes(&app), vec!["own:0"]);
+    }
+
+    /// The names of the loaded albums, in row order.
+    fn album_names(app: &crate::tui::App) -> Vec<&str> {
+        app.albums
+            .iter()
+            .map(|loaded| loaded.name.as_str())
+            .collect()
+    }
+
     /// `m` moves a row into another list. A header *is* a list; there is nothing
     /// to move, and silently opening the menu on the row below would be worse.
     #[tokio::test]

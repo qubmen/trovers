@@ -930,11 +930,30 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
 /// listed, it has merely orphaned to the top level, which the user can fix by
 /// hand. Losing the rename over it would be worse.
 fn repoint_albums(app: &mut App, old_name: &str, new_name: &str) {
+    // The displayed playlist's own albums are held in memory, and that copy is the
+    // authority on its contents — a fold, a reorder, a play may not be on disk
+    // yet. Repoint it and save it from there; re-reading the file would both miss
+    // the rename in memory and risk writing a stale copy back over those edits.
+    let mut in_memory = Vec::new();
+    for loaded in &mut app.albums {
+        in_memory.push(loaded.path.clone());
+        if loaded.playlist.parent.as_deref() != Some(old_name) {
+            continue;
+        }
+        loaded.playlist.parent = Some(new_name.to_string());
+        if let Err(e) = loaded.playlist.save(&loaded.path) {
+            error!(err = %e, album = %loaded.name, "failed to save album's new parent");
+        }
+    }
+
     for entry in &mut app.available_playlists {
         if entry.kind != PlaylistKind::Album || entry.parent.as_deref() != Some(old_name) {
             continue;
         }
         entry.parent = Some(new_name.to_string());
+        if in_memory.contains(&entry.path) {
+            continue;
+        }
         match Playlist::load(&entry.path) {
             Ok(mut album) => {
                 album.parent = Some(new_name.to_string());
@@ -985,8 +1004,17 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
                         // document it was started for.
                         // Its albums are playlists in their own right: their files
                         // stay put and they orphan to the top level, which is what
-                        // `nested_order` does with a parent that is not there.
+                        // `sidebar_entries` does with a parent that is not there.
                         app.available_playlists.retain(|entry| entry.name != name);
+                        // The sidebar can reach an album that is also drawn as a row
+                        // here — one whose parent is itself an album, which trovers
+                        // does not write but a hand-edited file can say. Drop the
+                        // loaded copy so the header does not outlive its file.
+                        if app.albums.iter().any(|loaded| loaded.path == path) {
+                            app.albums.retain(|loaded| loaded.path != path);
+                            app.rebuild_rows();
+                            app.clamp_scroll();
+                        }
                         // Move sidebar selection up if needed
                         let new_items = app.sidebar_items();
                         if app.sidebar_selected >= new_items.len() {
