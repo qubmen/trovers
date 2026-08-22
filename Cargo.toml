@@ -1,6 +1,6 @@
 [package]
 name = "trovers"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A keyboard-driven terminal media player/downloader built on mpv + yt-dlp"
 license = "Apache-2.0"
