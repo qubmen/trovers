@@ -2,6 +2,9 @@ mod cache;
 mod config;
 mod deps;
 mod library;
+mod library_scan;
+#[cfg(test)]
+mod library_scan_test;
 #[cfg(test)]
 mod library_test;
 mod player;
