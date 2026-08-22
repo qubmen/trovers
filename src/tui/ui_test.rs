@@ -5536,7 +5536,7 @@ tracks = []
 
         let _serial = REAL_MPV_LOCK.lock().await;
 
-        let player = crate::player::Player::spawn(SHORT_SILENT_SOURCE, None)
+        let player = crate::player::Player::spawn(SHORT_SILENT_SOURCE, None, false, &[])
             .await
             .expect("mpv must be on PATH for this test");
         let socket_path = player.socket_path.clone();
@@ -5578,7 +5578,7 @@ tracks = []
 
         let _serial = REAL_MPV_LOCK.lock().await;
 
-        let player = crate::player::Player::spawn(SHORT_SILENT_SOURCE, None)
+        let player = crate::player::Player::spawn(SHORT_SILENT_SOURCE, None, false, &[])
             .await
             .expect("mpv must be on PATH for this test");
 
@@ -5652,7 +5652,7 @@ tracks = []
         // to return — then drop the future.
         let cancelled = tokio::time::timeout(
             std::time::Duration::from_millis(80),
-            crate::player::Player::spawn(ENDLESS_SILENT_SOURCE, None),
+            crate::player::Player::spawn(ENDLESS_SILENT_SOURCE, None, false, &[]),
         )
         .await;
         assert!(
@@ -9364,5 +9364,72 @@ tracks = []
 
         assert_eq!(app.input_mode, crate::tui::InputMode::Normal);
         assert_eq!(status_of(&app), Some("Move tracks, not albums"));
+    }
+
+    // ── Video rows say so ─────────────────────────────────────────────────
+
+    /// A local track of `media`, titled `title`, already in the library.
+    fn media_track(title: &str, media: crate::library::MediaKind) -> crate::library::Track {
+        let mut track = local_track(std::path::Path::new(&format!("/movies/{title}.mkv")));
+        track.title = title.to_string();
+        track.media = media;
+        track
+    }
+
+    #[tokio::test]
+    async fn a_video_row_is_marked_with_a_media_glyph() {
+        use crate::library::MediaKind;
+
+        let mut app = make_app_with_playlists("Films", &["Films"]);
+        push_track(&mut app, media_track("Blade Runner", MediaKind::Video));
+
+        let screen = render_to_lines(&mut app, 80, 24);
+
+        assert!(
+            screen.iter().any(|line| line.contains("▣ Blade Runner")),
+            "a video row must say it will open a window, {screen:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_audio_row_carries_no_media_glyph() {
+        use crate::library::MediaKind;
+
+        let mut app = make_app_with_playlists("Films", &["Films"]);
+        push_track(&mut app, media_track("Day One", MediaKind::Audio));
+
+        let screen = render_to_lines(&mut app, 80, 24);
+
+        assert!(
+            screen.iter().any(|line| line.contains(" Day One")),
+            "the row is there, {screen:#?}"
+        );
+        assert!(
+            !screen.iter().any(|line| line.contains("▣")),
+            "and nothing marks it, {screen:#?}"
+        );
+    }
+
+    /// The glyph belongs to the title, so inside an album it follows the indent
+    /// rather than un-nesting the row.
+    #[tokio::test]
+    async fn a_video_row_inside_an_album_keeps_its_indent() {
+        use crate::library::MediaKind;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1"])]);
+        let mut track = media_track("Igla", MediaKind::Video);
+        track.id = "k1".to_string();
+        app.library.upsert(track).expect("write document");
+        open_all(&mut app);
+
+        let screen = render_to_lines(&mut app, 80, 24);
+        let glyph = column_of(&screen, "▣ Igla");
+        let header = column_of(&screen, "▾ Kino");
+
+        assert!(
+            glyph > header,
+            "an album's video row is indented past its header, {screen:#?}"
+        );
     }
 }

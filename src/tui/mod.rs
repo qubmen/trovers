@@ -812,6 +812,7 @@ impl App {
             .or(session.playlist.default_speed)
             .unwrap_or(self.config.default_speed);
         let source = play_source_for(track);
+        let media = track.media;
 
         if let Some(session) = self.playing.as_mut() {
             session.track_id = id.clone();
@@ -828,7 +829,7 @@ impl App {
                 error!(err = %e, path = %path.display(), "failed to save the playing session's playlist");
             }
         }
-        self.spawn_player_for(id, source, speed, start_pos);
+        self.spawn_player_for(id, source, speed, start_pos, media);
     }
 
     /// Play the row the cursor is on, whichever list it belongs to, resuming from
@@ -858,7 +859,7 @@ impl App {
     /// auto-advance all stay inside the album (ADR-019).
     pub fn play_from_list(&mut self, source: RowSource, idx: usize, start_pos: Option<f64>) {
         // Collect all track data before any mutations (borrow checker)
-        let (list_path, id, speed, source_media) = {
+        let (list_path, id, speed, source_media, media) = {
             let Some((playlist, path)) = self.source_playlist(source) else {
                 return;
             };
@@ -889,7 +890,7 @@ impl App {
                 self.set_status("File not found");
                 return;
             }
-            (path, id, speed, play_source_for(track))
+            (path, id, speed, play_source_for(track), track.media)
         };
 
         // Save position of the track we're leaving (not applicable when switching
@@ -954,7 +955,7 @@ impl App {
         self.position = start_pos.unwrap_or(0.0);
         let _ = self.pos_tx.send(self.position);
 
-        self.spawn_player_for(id, source_media, speed, start_pos);
+        self.spawn_player_for(id, source_media, speed, start_pos, media);
     }
 
     /// If `id` is the track actually driving playback right now (per
@@ -972,7 +973,7 @@ impl App {
             return;
         }
 
-        let speed = {
+        let (speed, media) = {
             // Fall back to the *playing* playlist's default speed, not the
             // displayed one — they may differ once playback is decoupled
             // from the displayed playlist.
@@ -982,12 +983,21 @@ impl App {
             let track = self
                 .playing_track()
                 .expect("just verified a playing track exists");
-            effective_speed(track, playing_playlist, &self.config)
+            (
+                effective_speed(track, playing_playlist, &self.config),
+                track.media,
+            )
         };
         let pos = self.position;
         info!(id = %id, pos = pos, "switching stream → local file");
         self.is_paused = false;
-        self.spawn_player_for(id.to_string(), PlaySource::File(file), speed, Some(pos));
+        self.spawn_player_for(
+            id.to_string(),
+            PlaySource::File(file),
+            speed,
+            Some(pos),
+            media,
+        );
     }
 
     /// Resolve the stream/local-file source and spawn mpv, wiring up position
@@ -1004,10 +1014,14 @@ impl App {
         source: PlaySource,
         speed: f32,
         start_pos: Option<f64>,
+        media: MediaKind,
     ) {
         let generation = self.stop_player();
         let volume = self.config.default_volume;
         let quality = self.config.audio_quality.clone();
+        // A window, and the user's own flags for it, only for something to show.
+        let video = media == MediaKind::Video;
+        let video_args = self.config.video_mpv_args.clone();
         let task_tx = self.task_tx.clone();
         let pos_tx = self.pos_tx.clone();
         let player_generation = Arc::clone(&self.player_generation);
@@ -1034,7 +1048,7 @@ impl App {
                 return;
             }
 
-            match Player::spawn(&resolved_source, start_pos).await {
+            match Player::spawn(&resolved_source, start_pos, video, &video_args).await {
                 Ok(player) => {
                     let _ = player.set_speed(speed).await;
                     let _ = player.set_volume(volume).await;

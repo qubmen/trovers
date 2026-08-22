@@ -1,5 +1,7 @@
 mod cache;
 mod config;
+#[cfg(test)]
+mod config_test;
 mod deps;
 mod library;
 mod library_import;
@@ -11,6 +13,8 @@ mod library_scan_test;
 #[cfg(test)]
 mod library_test;
 mod player;
+#[cfg(test)]
+mod player_test;
 mod playlist;
 #[cfg(test)]
 mod playlist_test;

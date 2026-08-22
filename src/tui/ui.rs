@@ -3,7 +3,7 @@ use super::{
     SETTINGS_ITEMS,
 };
 use crate::config::AudioQuality;
-use crate::library::CacheStatus;
+use crate::library::{CacheStatus, MediaKind};
 use crate::playlist::LoopMode;
 use crate::tui::input::validate_playlist_name;
 use ratatui::{
@@ -478,9 +478,17 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default()
             };
 
+            // Video rows say so before they are played, because playing one opens
+            // a window over the terminal — a surprise worth one glyph's warning.
+            // It goes in the title, after the indent: an album's video row is
+            // still one of the album's rows.
+            let media_glyph = match track.media {
+                MediaKind::Video => "▣ ",
+                MediaKind::Audio => "",
+            };
             let title_str = truncate(
                 &format!(
-                    "{indent}{}",
+                    "{indent}{media_glyph}{}",
                     track.user_title.as_deref().unwrap_or(&track.title)
                 ),
                 title_width,
