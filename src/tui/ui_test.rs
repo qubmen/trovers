@@ -61,6 +61,10 @@ mod tests {
         let id = track.id.clone();
         app.library.upsert(track).expect("write track document");
         app.playlist.tracks.push(id);
+        // A new row is a new row on screen: production adds one through a path that
+        // rebuilds, and a test whose rows were left stale would not be testing the
+        // list the user sees.
+        app.rebuild_rows();
     }
 
     /// The raw TOML of `id`'s document. For assertions that must see exactly what
@@ -2477,8 +2481,9 @@ mod tests {
         );
         // Select last track
         app.selected = 2;
-        // Simulate what move does: remove track and clamp
+        // Simulate what move does: remove track, rebuild the rows and clamp
         app.playlist.remove_track_by_id("vid3");
+        app.rebuild_rows();
         let new_count = app.visible_track_count();
         if app.selected >= new_count && app.selected > 0 {
             app.selected -= 1;
@@ -2586,7 +2591,7 @@ mod tests {
     fn switch_to_playlist_clears_search_state() {
         let mut app = make_app_with_playlists("Alpha", &["Alpha", "Beta"]);
         app.input_buf = "search text".to_string();
-        app.filtered_indices = vec![0, 2, 4];
+        app.search_query = "search text".to_string();
 
         let beta = make_playlist("Beta");
         let (_dir, path) = write_temp_playlist(&beta);
@@ -2594,10 +2599,7 @@ mod tests {
         app.switch_to_playlist("Beta", &path).expect("switch");
 
         assert!(app.input_buf.is_empty(), "input_buf should be cleared");
-        assert!(
-            app.filtered_indices.is_empty(),
-            "filtered_indices should be cleared"
-        );
+        assert!(!app.has_filter(), "the search filter should be cleared");
     }
 
     #[test]
@@ -4320,7 +4322,7 @@ tracks = []
         app.playing = Some(session_at(alpha_path, alpha, 0));
 
         assert!(
-            !row_is_playing(&app, "shared"),
+            !row_is_playing(&app, crate::tui::RowSource::Own, "shared"),
             "must not highlight a row just because the id matches across different playlist files"
         );
     }
@@ -4340,7 +4342,7 @@ tracks = []
         ));
 
         assert!(
-            row_is_playing(&app, "vid1"),
+            row_is_playing(&app, crate::tui::RowSource::Own, "vid1"),
             "must highlight the row when the playing session's track belongs to the displayed playlist"
         );
     }
@@ -4353,7 +4355,7 @@ tracks = []
         push_track(&mut app, make_track("vid1", "Track One"));
 
         assert!(
-            !row_is_playing(&app, "vid1"),
+            !row_is_playing(&app, crate::tui::RowSource::Own, "vid1"),
             "no highlight when app.playing is None"
         );
     }
@@ -5057,7 +5059,7 @@ tracks = []
         app.position = 99.0;
 
         // Switch to B — A is the leaving track.
-        app.request_playback(1, None);
+        app.play_from_list(crate::tui::RowSource::Own, 1, None);
 
         assert_eq!(
             app.library.get("A").map(|t| t.last_position),
@@ -5089,7 +5091,7 @@ tracks = []
 
         // Switch to B in the displayed playlist — A (in Elsewhere.toml) is
         // the leaving track.
-        app.request_playback(0, None);
+        app.play_from_list(crate::tui::RowSource::Own, 0, None);
 
         // The displayed playlist must be untouched by the leaving-track save.
         assert_eq!(app.playlist.tracks, vec!["B"]);
@@ -5345,7 +5347,7 @@ tracks = []
         app.player = Some(make_dead_player(dead_player_socket("switch")));
         let before = app.player_generation.load(Ordering::SeqCst);
 
-        app.request_playback(1, None);
+        app.play_from_list(crate::tui::RowSource::Own, 1, None);
 
         assert!(
             app.player_generation.load(Ordering::SeqCst) > before,
@@ -5964,7 +5966,7 @@ tracks = []
         add_track(&mut pl, track);
         let (_dir, _path, mut app) = app_on_disk(pl);
 
-        app.recache_track(0);
+        app.recache_track(&app.playlist.tracks[0].clone());
 
         assert!(
             app.downloading.contains("A"),
@@ -5982,7 +5984,7 @@ tracks = []
         let (_dir, _path, mut app) = app_with_tracks(1);
         app.downloading.insert("A".to_string());
 
-        app.recache_track(0);
+        app.recache_track(&app.playlist.tracks[0].clone());
 
         assert_eq!(
             app.status_message.as_ref().map(|(m, _)| m.as_str()),
@@ -6549,7 +6551,7 @@ tracks = []
         app.position = 70.0;
 
         // Start the displayed playlist's own row for the same track.
-        app.request_playback(0, None);
+        app.play_from_list(crate::tui::RowSource::Own, 0, None);
 
         assert_eq!(
             test_library().get("shared").map(|t| t.last_position),
@@ -6942,11 +6944,22 @@ tracks = []
     async fn shuffle_is_ignored_while_a_search_filter_is_active() {
         use crate::tui::input::handle_tracklist;
 
-        let (_dir, _path, mut app) = app_with_tracks(6);
+        // Every other track matches, so the filter shows playlist rows 1, 3 and 5
+        // in that order.
+        let mut pl = make_playlist("Active");
+        for (i, id) in ["A", "B", "C", "D", "E", "F"].iter().enumerate() {
+            let title = if i % 2 == 1 {
+                format!("keeper {id}")
+            } else {
+                format!("Track {id}")
+            };
+            add_track(&mut pl, make_track(id, &title));
+        }
+        let (_dir, _path, mut app) = app_on_disk(pl);
         app.playlist.shuffle = true;
         app.rebuild_shuffle_order();
-        // Rows 1, 3 and 5 of the playlist, in that order.
-        app.filtered_indices = vec![1, 3, 5];
+        app.search_query = "keeper".to_string();
+        app.rebuild_rows();
         app.selected = 0;
 
         handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('n')))
@@ -7542,7 +7555,7 @@ tracks = []
         pl.tracks.push("youtube:gone".to_string());
         let (_dir, _tracks, _path, mut app) = app_with_own_library(pl, &[]);
 
-        app.request_playback(0, None);
+        app.play_from_list(crate::tui::RowSource::Own, 0, None);
 
         assert!(
             app.playing.is_none(),
@@ -7865,7 +7878,12 @@ tracks = []
         );
 
         assert_eq!(app.playlist.tracks.len(), 1, "the displayed rows changed");
-        assert!(app.track_at(0).is_some(), "and the row resolves");
+        assert!(
+            app.row_track_id(0)
+                .and_then(|id| app.library.get(&id))
+                .is_some(),
+            "and the row resolves"
+        );
         let saved = Playlist::load(&path).expect("load");
         assert_eq!(saved.tracks, app.playlist.tracks, "and reached disk");
         // No second album for a folder that already has one.
@@ -8006,7 +8024,7 @@ tracks = []
         let id = track.id.clone();
         push_track(&mut app, track);
 
-        app.recache_track(0);
+        app.recache_track(&app.playlist.tracks[0].clone());
 
         assert!(
             app.downloading.is_empty(),
@@ -8029,7 +8047,7 @@ tracks = []
         let id = track.id.clone();
         push_track(&mut app, track);
 
-        app.request_playback(0, None);
+        app.play_from_list(crate::tui::RowSource::Own, 0, None);
 
         assert!(app.playing.is_none(), "nothing may start playing");
         assert_eq!(status_of(&app), Some("File not found"));
@@ -8049,7 +8067,7 @@ tracks = []
         let id = track.id.clone();
         push_track(&mut app, track);
 
-        app.request_playback(0, None);
+        app.play_from_list(crate::tui::RowSource::Own, 0, None);
 
         assert_eq!(
             app.playing.as_ref().map(|p| p.track_id.as_str()),
@@ -8064,7 +8082,7 @@ tracks = []
         use crate::tui::ui::track_panel_title;
 
         assert_eq!(
-            track_panel_title("Live Sets", 42, 12, 20, 6 * 3600 + 12 * 60),
+            track_panel_title("Live Sets", 42, 12, 20, 42, 6 * 3600 + 12 * 60),
             " Live Sets · 42 tracks · 6h 12m  [ 12–20 / 42 ] "
         );
     }
@@ -8074,7 +8092,7 @@ tracks = []
         use crate::tui::ui::track_panel_title;
 
         assert_eq!(
-            track_panel_title("Live Sets", 1, 1, 1, 90),
+            track_panel_title("Live Sets", 1, 1, 1, 1, 90),
             " Live Sets · 1 track · 1m  [ 1–1 / 1 ] "
         );
     }
@@ -8086,7 +8104,7 @@ tracks = []
         use crate::tui::ui::track_panel_title;
 
         assert_eq!(
-            track_panel_title("Live Sets", 3, 1, 3, 0),
+            track_panel_title("Live Sets", 3, 1, 3, 3, 0),
             " Live Sets · 3 tracks  [ 1–3 / 3 ] "
         );
     }
@@ -8096,7 +8114,7 @@ tracks = []
         use crate::tui::ui::track_panel_title;
 
         assert_eq!(
-            track_panel_title("Live Sets", 1, 1, 1, 30),
+            track_panel_title("Live Sets", 1, 1, 1, 1, 30),
             " Live Sets · 1 track · <1m  [ 1–1 / 1 ] "
         );
     }
@@ -8105,7 +8123,7 @@ tracks = []
     fn the_panel_title_of_an_empty_playlist_is_just_its_name() {
         use crate::tui::ui::track_panel_title;
 
-        assert_eq!(track_panel_title("Live Sets", 0, 1, 0, 0), " Live Sets ");
+        assert_eq!(track_panel_title("Live Sets", 0, 1, 0, 0, 0), " Live Sets ");
     }
 
     /// The count and the total have to agree with each other, so a filter that
@@ -8125,14 +8143,11 @@ tracks = []
         });
         let (_dir, _path, mut app) = app_on_disk(pl);
 
-        assert_eq!(app.visible_duration_secs(), 1000, "unfiltered, everything");
+        assert_eq!(app.total_duration_secs(), 1000, "unfiltered, everything");
 
-        app.filtered_indices = vec![0];
-        assert_eq!(
-            app.visible_duration_secs(),
-            100,
-            "filtered, only what shows"
-        );
+        app.search_query = "keeper".to_string();
+        app.rebuild_rows();
+        assert_eq!(app.total_duration_secs(), 100, "filtered, only what shows");
     }
 
     #[tokio::test]
@@ -8209,7 +8224,8 @@ tracks = []
         add_track(&mut pl, make_track("mv2", "Second"));
         add_track(&mut pl, make_track("mv3", "Third"));
         let (_dir, _path, mut app) = app_on_disk(pl);
-        app.filtered_indices = vec![0, 2];
+        app.search_query = "ir".to_string(); // First and Third
+        app.rebuild_rows();
         app.selected = 0;
 
         handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('J')))
@@ -8218,5 +8234,600 @@ tracks = []
 
         assert_eq!(app.playlist.tracks, vec!["mv1", "mv2", "mv3"]);
         assert_eq!(status_of(&app), Some("Clear the search to reorder"));
+    }
+
+    // ── Albums as rows in the track list ──────────────────────────────────
+
+    /// An `App` on disk showing a playlist of `own` tracks with `albums` under it.
+    ///
+    /// Every id doubles as its track's title, so a search expectation reads as the
+    /// id it is meant to match. Albums start folded, which is what a file with no
+    /// `collapsed` key loads as.
+    fn app_with_albums(
+        dir: &std::path::Path,
+        own: &[&str],
+        albums: &[(&str, &[&str])],
+    ) -> crate::tui::App {
+        let mut parent = make_playlist("aBooks");
+        for id in own {
+            add_track(&mut parent, make_track(id, id));
+        }
+        let parent_path = dir.join("aBooks.toml");
+        parent.save(&parent_path).expect("save parent");
+
+        for (name, ids) in albums {
+            let mut album = make_playlist(name);
+            album.kind = crate::playlist::PlaylistKind::Album;
+            album.parent = Some("aBooks".to_string());
+            for id in *ids {
+                add_track(&mut album, make_track(id, id));
+            }
+            album
+                .save(&dir.join(format!("{name}.toml")))
+                .expect("save album");
+        }
+
+        crate::tui::App::new(
+            parent,
+            crate::config::Config::default(),
+            crate::playlist::Playlist::list_entries(dir).expect("list"),
+            parent_path,
+            test_library(),
+        )
+    }
+
+    /// Each row as `own:<index>`, `album<n>:<index>` or `header:<name>` — the whole
+    /// of what a row means, one readable line per row.
+    fn row_shapes(app: &crate::tui::App) -> Vec<String> {
+        use crate::tui::{RowSource, VisibleRow};
+        app.rows
+            .iter()
+            .map(|row| match row {
+                VisibleRow::Track {
+                    source: RowSource::Own,
+                    index,
+                } => format!("own:{index}"),
+                VisibleRow::Track {
+                    source: RowSource::Album(a),
+                    index,
+                } => format!("album{a}:{index}"),
+                VisibleRow::AlbumHeader { album } => {
+                    format!("header:{}", app.albums[*album].name)
+                }
+            })
+            .collect()
+    }
+
+    /// The whole UI drawn into a `width × height` buffer, one `String` per line.
+    ///
+    /// The only way to assert on indentation and per-album numbering: both are
+    /// decided inside `render_track_table`, which builds ratatui `Row`s whose cell
+    /// contents are not readable back out of them.
+    fn render_to_lines(app: &mut crate::tui::App, width: u16, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, app))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// Unfold every album, as pressing `enter` on each header would.
+    fn open_all(app: &mut crate::tui::App) {
+        for i in 0..app.albums.len() {
+            app.albums[i].playlist.collapsed = false;
+        }
+        app.rebuild_rows();
+    }
+
+    #[test]
+    fn the_rows_are_the_parents_own_tracks_and_then_its_albums() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a", "b"], &[("Kino", &["k1", "k2"])]);
+        assert_eq!(
+            row_shapes(&app),
+            vec!["own:0", "own:1", "header:Kino"],
+            "a folded album is one row"
+        );
+
+        open_all(&mut app);
+        assert_eq!(
+            row_shapes(&app),
+            vec!["own:0", "own:1", "header:Kino", "album0:0", "album0:1"]
+        );
+    }
+
+    /// The parent's own tracks keep the order the user gave them; the albums below
+    /// go by name, which is the only order they have.
+    #[test]
+    fn albums_come_after_the_parents_tracks_in_alphabetical_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = app_with_albums(dir.path(), &["a"], &[("Zed", &["z"]), ("Ace", &["x"])]);
+        assert_eq!(row_shapes(&app), vec!["own:0", "header:Ace", "header:Zed"]);
+        assert_eq!(
+            app.albums
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Ace", "Zed"]
+        );
+    }
+
+    /// The album exists and the header row is how the user reaches it — to rename
+    /// it, to rescan its folder, or to delete it.
+    #[test]
+    fn an_empty_album_still_has_a_header_to_reach_it_by() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = app_with_albums(dir.path(), &[], &[("Empty", &[])]);
+        assert_eq!(row_shapes(&app), vec!["header:Empty"]);
+    }
+
+    /// An album of another playlist has no business in this one's rows.
+    #[test]
+    fn only_the_displayed_playlists_own_albums_are_loaded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+
+        let mut elsewhere = make_playlist("Elsewhere");
+        elsewhere.kind = crate::playlist::PlaylistKind::Album;
+        elsewhere.parent = Some("Some Other List".to_string());
+        elsewhere
+            .save(&dir.path().join("Elsewhere.toml"))
+            .expect("save");
+        app.available_playlists =
+            crate::playlist::Playlist::list_entries(dir.path()).expect("list");
+        app.load_albums();
+        app.rebuild_rows();
+
+        assert_eq!(
+            app.albums
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Kino"]
+        );
+    }
+
+    #[test]
+    fn a_search_hides_an_album_with_no_matches_header_and_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["alpha"], &[("Kino", &["beta"])]);
+        app.search_query = "alpha".to_string();
+        app.rebuild_rows();
+        assert_eq!(row_shapes(&app), vec!["own:0"]);
+    }
+
+    /// A search that quietly left its hits folded away inside an album would read
+    /// as a search that missed them.
+    #[test]
+    fn a_search_opens_a_folded_album_that_has_a_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["alpha"], &[("Kino", &["beta", "alpha two"])]);
+        assert!(app.albums[0].playlist.collapsed, "folded to begin with");
+
+        app.search_query = "alpha".to_string();
+        app.rebuild_rows();
+
+        assert_eq!(
+            row_shapes(&app),
+            vec!["own:0", "header:Kino", "album0:1"],
+            "only the matching track, with its header above it"
+        );
+    }
+
+    /// Asking for the album means asking for the album, not for whichever of its
+    /// tracks happen to repeat its name in their titles.
+    #[test]
+    fn a_search_matching_an_albums_name_shows_all_of_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["alpha"], &[("Kino", &["beta", "gamma"])]);
+        app.search_query = "kino".to_string();
+        app.rebuild_rows();
+        assert_eq!(
+            row_shapes(&app),
+            vec!["header:Kino", "album0:0", "album0:1"]
+        );
+    }
+
+    /// The summary describes what the playlist holds; folding is a view, so it must
+    /// not change the number. The bracketed counter beside it is the scroll window
+    /// and does count rows — that is `visible_track_count`.
+    #[test]
+    fn the_title_counts_every_track_the_playlist_holds_folded_or_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = app_with_albums(dir.path(), &["a", "b"], &[("Kino", &["k1", "k2"])]);
+        assert_eq!(app.total_track_count(), 4);
+        assert_eq!(app.total_duration_secs(), 4 * 180);
+        assert_eq!(app.visible_track_count(), 3, "rows, not tracks");
+    }
+
+    #[test]
+    fn under_a_filter_the_title_counts_only_what_is_shown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["alpha"], &[("Kino", &["beta"])]);
+        app.search_query = "alpha".to_string();
+        app.rebuild_rows();
+        assert_eq!(app.total_track_count(), 1);
+        assert_eq!(app.total_duration_secs(), 180);
+    }
+
+    /// `row_track_id` is what every key that acts on a row goes through, so it has
+    /// to read out of the row's own list rather than always the displayed one.
+    #[test]
+    fn a_row_names_the_track_of_the_list_it_belongs_to() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1", "k2"])]);
+        open_all(&mut app);
+        assert_eq!(app.row_track_id(0).as_deref(), Some("a"));
+        assert_eq!(app.row_track_id(1), None, "a header names no track");
+        assert_eq!(app.row_track_id(2).as_deref(), Some("k1"));
+        assert_eq!(app.row_track_id(3).as_deref(), Some("k2"));
+        assert_eq!(app.row_track_id(4), None, "past the end");
+    }
+
+    #[test]
+    fn a_header_row_reports_which_album_it_is_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Ace", &["x"]), ("Zed", &["z"])]);
+        open_all(&mut app);
+        // own:0, header:Ace, album0:0, header:Zed, album1:0
+        assert_eq!(app.album_of(0), None);
+        assert_eq!(app.album_of(1), Some(0));
+        assert_eq!(app.album_of(2), None);
+        assert_eq!(app.album_of(3), Some(1));
+    }
+
+    /// The cursor is restored from `current_track`, which is an id in the
+    /// playlist's own list — and rows are not that list any more.
+    #[test]
+    fn the_cursor_opens_on_the_row_of_the_last_played_own_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parent = make_playlist("aBooks");
+        add_track(&mut parent, make_track("a", "First"));
+        add_track(&mut parent, make_track("b", "Second"));
+        parent.current_track = Some("b".to_string());
+        let parent_path = dir.path().join("aBooks.toml");
+        parent.save(&parent_path).expect("save");
+
+        let app = crate::tui::App::new(
+            parent,
+            crate::config::Config::default(),
+            crate::playlist::Playlist::list_entries(dir.path()).expect("list"),
+            parent_path,
+            test_library(),
+        );
+        assert_eq!(app.selected, 1);
+    }
+
+    // ── Rendering an album ────────────────────────────────────────────────
+
+    /// The glyphs are `▸`/`▾`, not the sidebar's `▶`/`▼`: `▶` is the playing
+    /// marker and the two must never be confused.
+    #[test]
+    fn a_folded_album_header_points_right_and_an_open_one_points_down() {
+        use crate::tui::ui::album_header_cells;
+
+        let (title, _, _) = album_header_cells("Kino", 10, 2760, false, 40);
+        assert_eq!(title, "▸ Kino");
+        let (title, _, _) = album_header_cells("Kino", 10, 2760, true, 40);
+        assert_eq!(title, "▾ Kino");
+    }
+
+    /// A header spends the artist and duration columns on what the group holds,
+    /// which is the only summary of it the user gets while it is folded.
+    #[test]
+    fn an_album_header_reports_its_size_where_the_artist_and_duration_go() {
+        use crate::tui::ui::album_header_cells;
+
+        let (_, count, duration) = album_header_cells("Kino", 10, 2760, false, 40);
+        assert_eq!(count, "10 tracks");
+        assert_eq!(duration, "46m");
+
+        let (_, count, _) = album_header_cells("Solo", 1, 60, false, 40);
+        assert_eq!(count, "1 track");
+    }
+
+    /// An import without ffprobe knows no durations. `0m` would read as a claim
+    /// that the album is empty of time rather than as an absence.
+    #[test]
+    fn an_album_header_of_unknown_length_says_nothing_about_it() {
+        use crate::tui::ui::album_header_cells;
+
+        let (_, count, duration) = album_header_cells("Kino", 3, 0, false, 40);
+        assert_eq!(count, "3 tracks");
+        assert_eq!(duration, "");
+    }
+
+    /// The name is what the sidebar could not fit, so the whole point is that it
+    /// gets the title column — but it still has to fit inside it, glyph included.
+    #[test]
+    fn a_long_album_name_is_truncated_to_the_title_column() {
+        use crate::tui::ui::album_header_cells;
+
+        let (title, _, _) = album_header_cells("Суржиков Роман – Полари 06", 20, 0, true, 12);
+        assert_eq!(title.chars().count(), 12);
+        assert!(title.starts_with("▾ "), "the glyph survives truncation");
+    }
+
+    /// With albums present the bracketed counter (rows) and the summary count
+    /// (tracks) have different denominators, and each has to say what it means.
+    #[test]
+    fn the_panel_title_counts_tracks_in_its_summary_and_rows_in_its_window() {
+        use crate::tui::ui::track_panel_title;
+
+        assert_eq!(
+            track_panel_title("aBooks", 23, 1, 12, 14, 32 * 3600 + 41 * 60),
+            " aBooks · 23 tracks · 32h 41m  [ 1–12 / 14 ] "
+        );
+    }
+
+    /// A playlist that is nothing but one folded album still has a row on screen,
+    /// so the panel must not fall back to the bare-name form.
+    #[test]
+    fn a_playlist_whose_only_row_is_a_header_still_gets_a_counter() {
+        use crate::tui::ui::track_panel_title;
+
+        assert_eq!(
+            track_panel_title("aBooks", 10, 1, 1, 1, 600),
+            " aBooks · 10 tracks · 10m  [ 1–1 / 1 ] "
+        );
+    }
+
+    /// `▶` marks the row that is actually playing, and identity is
+    /// `(playlist file, id)` — so the same id in the parent and in an album under
+    /// it must not both light up.
+    #[test]
+    fn the_playing_marker_follows_the_list_the_row_belongs_to() {
+        use crate::tui::ui::row_is_playing;
+        use crate::tui::RowSource;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["shared"], &[("Kino", &["shared"])]);
+        open_all(&mut app);
+
+        app.playing = Some(crate::tui::PlayingSession {
+            path: app.albums[0].path.clone(),
+            playlist: app.albums[0].playlist.clone(),
+            track_id: "shared".to_string(),
+        });
+
+        assert!(
+            row_is_playing(&app, RowSource::Album(0), "shared"),
+            "the album's row is the one playing"
+        );
+        assert!(
+            !row_is_playing(&app, RowSource::Own, "shared"),
+            "the parent's own row holds the same id but is not what is playing"
+        );
+    }
+
+    /// Numbering says where a track sits in the list that plays it, so it restarts
+    /// at 1 inside each album; the indent is what makes the group read as a group.
+    /// Where `needle` starts on `line`, counted in columns rather than bytes — the
+    /// panel borders either side of it are multi-byte.
+    fn column_of(screen: &[String], needle: &str) -> usize {
+        let line = screen
+            .iter()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("'{needle}' is nowhere in {screen:#?}"));
+        let byte = line.find(needle).expect("just found it");
+        line[..byte].chars().count()
+    }
+
+    /// What is before the title on the row holding `needle` — where the number is.
+    fn number_cell_of(screen: &[String], needle: &str) -> String {
+        let line = screen
+            .iter()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("'{needle}' is nowhere in {screen:#?}"));
+        let byte = line.find(needle).expect("just found it");
+        line[..byte].to_string()
+    }
+
+    #[test]
+    fn album_tracks_are_indented_and_numbered_within_their_album() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["p1", "p2"], &[("Kino", &["k1", "k2"])]);
+        open_all(&mut app);
+
+        let screen = render_to_lines(&mut app, 78, 16);
+
+        assert_eq!(
+            column_of(&screen, "k1"),
+            column_of(&screen, "p1") + 4,
+            "an album's tracks are indented so the group reads as one thing: {screen:#?}"
+        );
+
+        // Numbering says where the track sits in the list that plays it, so `k2` is
+        // the album's second track and not the playlist's fourth row.
+        assert!(number_cell_of(&screen, "p1").contains('1'), "{screen:#?}");
+        assert!(
+            number_cell_of(&screen, "k1").contains('1'),
+            "the album's numbering restarts at 1: {screen:#?}"
+        );
+        let second = number_cell_of(&screen, "k2");
+        assert!(second.contains('2'), "{screen:#?}");
+        assert!(
+            !second.contains('4'),
+            "numbered within the album, not across the screen: {screen:#?}"
+        );
+    }
+
+    /// The header is drawn from the album's own file, so what is on screen is what
+    /// the group holds.
+    #[test]
+    fn a_header_is_drawn_with_its_name_count_and_total() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1", "k2"])]);
+
+        let screen = render_to_lines(&mut app, 78, 16);
+        let header = screen
+            .iter()
+            .find(|line| line.contains("Kino"))
+            .unwrap_or_else(|| panic!("no header row in {screen:#?}"));
+        assert!(header.contains("▸ Kino"), "{header}");
+        assert!(header.contains("2 tracks"), "{header}");
+        assert!(header.contains("6m"), "2 × 180s: {header}");
+    }
+
+    // ── An album plays as its own list ────────────────────────────────────
+
+    #[tokio::test]
+    async fn playing_an_album_row_builds_a_session_on_the_albums_own_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1", "k2"])]);
+        open_all(&mut app);
+
+        assert!(app.play_row(3), "album0:1 is playable");
+
+        let session = app.playing.as_ref().expect("a session");
+        assert_eq!(
+            session.path, app.albums[0].path,
+            "the album's file, not aBooks"
+        );
+        assert_eq!(session.track_id, "k2");
+        assert_eq!(
+            session.playlist.tracks,
+            vec!["k1", "k2"],
+            "the running order auto-advance will walk is the album's"
+        );
+    }
+
+    /// The album is loaded in memory, so nothing else would ever write this — and
+    /// without it the cursor would not come back to where the user left off.
+    #[tokio::test]
+    async fn playing_an_album_row_records_current_track_in_the_albums_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1", "k2"])]);
+        open_all(&mut app);
+
+        app.play_row(2);
+
+        assert_eq!(
+            app.albums[0].playlist.current_track.as_deref(),
+            Some("k1"),
+            "in memory"
+        );
+        assert_eq!(
+            crate::playlist::Playlist::load(&app.albums[0].path)
+                .expect("load")
+                .current_track
+                .as_deref(),
+            Some("k1"),
+            "and on disk"
+        );
+        assert_eq!(
+            app.playlist.current_track, None,
+            "the parent played nothing, so it must not claim to have"
+        );
+    }
+
+    /// A header names a group, not a track. `Enter` on it folds and unfolds
+    /// (see the key tests); it must never start something.
+    #[tokio::test]
+    async fn a_header_row_is_not_playable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+
+        assert!(!app.play_row(1), "the header refuses");
+        assert!(app.playing.is_none());
+    }
+
+    #[tokio::test]
+    async fn next_from_an_albums_last_track_wraps_to_its_first() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a", "b"], &[("Kino", &["k1", "k2"])]);
+        open_all(&mut app);
+        // own:0, own:1, header:Kino, album0:0, album0:1
+        app.selected = 4;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('n')))
+            .await
+            .expect("handled");
+
+        assert_eq!(
+            app.selected, 3,
+            "back to the album's first track, not past it"
+        );
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_id.as_str()),
+            Some("k1")
+        );
+    }
+
+    /// The parent's own tracks are their own running order too: `n` off the end of
+    /// them wraps within them rather than falling into the first album.
+    #[tokio::test]
+    async fn next_from_the_parents_last_track_wraps_within_the_parent() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a", "b"], &[("Kino", &["k1"])]);
+        open_all(&mut app);
+        app.selected = 1; // own:1, the last of the parent's own tracks
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('n')))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.playing.as_ref().map(|p| p.track_id.as_str()), Some("a"));
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.path.clone()),
+            Some(app.playlist_path.clone()),
+            "still playing out of the parent's file"
+        );
+    }
+
+    /// A header belongs to no running order, so there is nothing for `n` to step.
+    #[tokio::test]
+    async fn next_on_a_header_does_nothing() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        app.selected = 1;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('n')))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.selected, 1, "the cursor stays put");
+        assert!(app.playing.is_none());
+    }
+
+    /// Shuffle is per file, so an album shuffles on its own order without the
+    /// parent's setting having anything to do with it.
+    #[tokio::test]
+    async fn an_album_follows_its_own_shuffled_order() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1", "k2", "k3"])]);
+        open_all(&mut app);
+        app.albums[0].playlist.shuffle = true;
+        // Pin the order so following it cannot pass by coincidence.
+        app.shuffle_order = vec![2, 0, 1];
+        app.shuffle_order_path = Some(app.albums[0].path.clone());
+        app.selected = 2; // album0:0
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('n')))
+            .await
+            .expect("handled");
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_id.as_str()),
+            Some("k2"),
+            "0 is followed by 1 in the pinned order"
+        );
     }
 }

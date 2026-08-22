@@ -220,9 +220,12 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         // Enter: select track and start playback (resuming from
         // `last_position` if the track has one).
         KeyCode::Enter => {
-            if let Some(idx) = app.track_index_at(app.selected) {
-                let start_pos = app.track_at(idx).and_then(resume_start_pos);
-                app.request_playback(idx, start_pos);
+            // On an album header this folds or unfolds the group instead: a header
+            // names a list, and there is nothing to play about a list.
+            if let Some(album) = app.album_of(app.selected) {
+                app.toggle_album(album);
+            } else {
+                app.play_row(app.selected);
             }
         }
 
@@ -241,9 +244,8 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                     None => None,
                 };
                 note_ipc_result(app, "pause", res);
-            } else if let Some(idx) = app.track_index_at(app.selected) {
-                let start_pos = app.track_at(idx).and_then(resume_start_pos);
-                app.request_playback(idx, start_pos);
+            } else {
+                app.play_row(app.selected);
             }
         }
 
@@ -337,8 +339,10 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         // Recache: force a fresh download of the selected track, whatever its
         // current cache status.
         KeyCode::Char('c') => {
-            if let Some(idx) = app.track_index_at(app.selected) {
-                app.recache_track(idx);
+            if app.album_of(app.selected).is_some() {
+                app.set_status("Nothing to recache for an album");
+            } else if let Some(id) = app.row_track_id(app.selected) {
+                app.recache_track(&id);
             }
         }
 
@@ -346,7 +350,7 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         KeyCode::Char('/') => {
             app.input_mode = InputMode::SearchInput;
             app.input_buf.clear();
-            app.filtered_indices.clear();
+            app.clear_search();
         }
 
         // New playlist
@@ -396,34 +400,48 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
 /// around inside it at random reads as a bug rather than a feature — so a filter
 /// steps sequentially through what it shows, and shuffle resumes once cleared.
 fn step_track(app: &mut App, forward: bool) {
-    let count = app.visible_track_count();
-    if count == 0 {
+    // The rows of the list the cursor's row belongs to — the parent's own tracks,
+    // or one album's. Stepping never crosses that boundary: from an album's last
+    // track `n` wraps to its first (ADR-019). A header belongs to no list, so
+    // there is nothing to step.
+    let Some((source, group)) = app.row_group(app.selected) else {
         return;
-    }
+    };
+    let Some(pos) = group.iter().position(|&cursor| cursor == app.selected) else {
+        return;
+    };
+    let count = group.len();
 
-    let filtered = !app.filtered_indices.is_empty();
-    let next_cursor = if filtered || !app.playlist.shuffle {
-        if forward {
-            (app.selected + 1) % count
+    let shuffle = app
+        .source_playlist(source)
+        .is_some_and(|(playlist, _)| playlist.shuffle);
+    let next_cursor = if app.has_filter() || !shuffle {
+        let next = if forward {
+            (pos + 1) % count
         } else {
-            app.selected.checked_sub(1).unwrap_or(count - 1)
-        }
+            pos.checked_sub(1).unwrap_or(count - 1)
+        };
+        group[next]
     } else {
-        // Unfiltered, so cursor position and track index are the same thing and
-        // the shuffled step is directly usable as a cursor position.
-        let path = app.playlist_path.clone();
-        match app.step_index(&path, count, true, app.selected, forward) {
-            Some(idx) => idx,
+        // Unfiltered, a list's rows are its tracks in order, so its own index and
+        // its position within the group are the same number — and the shuffled
+        // step is directly usable as one.
+        let Some((_, path)) = app.source_playlist(source) else {
+            return;
+        };
+        let path = path.to_path_buf();
+        match app.step_index(&path, count, true, pos, forward) {
+            Some(idx) => match group.get(idx) {
+                Some(&cursor) => cursor,
+                None => return,
+            },
             None => return,
         }
     };
 
     app.selected = next_cursor;
     app.clamp_scroll();
-    if let Some(idx) = app.track_index_at(next_cursor) {
-        let start_pos = app.track_at(idx).and_then(resume_start_pos);
-        app.request_playback(idx, start_pos);
-    }
+    app.play_row(next_cursor);
 }
 
 /// Adjust the speed of the track actually driving playback right now (per
@@ -658,9 +676,7 @@ fn handle_search(app: &mut App, key: KeyEvent) -> Result<Action> {
         KeyCode::Enter | KeyCode::Esc => {
             if key.code == KeyCode::Esc {
                 app.input_buf.clear();
-                app.filtered_indices.clear();
-                app.selected = 0;
-                app.track_offset = 0;
+                app.clear_search();
             }
             app.input_mode = InputMode::Normal;
         }
@@ -674,19 +690,32 @@ fn handle_search(app: &mut App, key: KeyEvent) -> Result<Action> {
 
 pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
     if key.code == KeyCode::Char('y') {
-        if let Some(idx) = app.track_index_at(app.selected) {
-            let id = app.playlist.tracks[idx].clone();
+        // The row's own list: an album's row leaves the album's file, not the
+        // playlist showing it.
+        let row = app.row_at(app.selected).copied();
+        if let Some(crate::tui::VisibleRow::Track { source, index: idx }) = row {
+            let Some(id) = app
+                .source_playlist(source)
+                .and_then(|(playlist, _)| playlist.tracks.get(idx))
+                .cloned()
+            else {
+                app.input_mode = InputMode::Normal;
+                return Ok(Action::Continue);
+            };
+            let owner_path = app
+                .source_playlist(source)
+                .map(|(_, path)| path.to_path_buf())
+                .unwrap_or_default();
             // Only stop playback if the track being deleted is literally the
             // one actually driving playback right now (identity is `(path,
             // id)`) — not just any track with a matching id that
             // happens to exist in a differently-playing session elsewhere.
-            let is_current = app.is_playing_track(&app.playlist_path, &id);
+            let is_current = app.is_playing_track(&owner_path, &id);
 
             if is_current {
                 // Stop playback immediately when deleting current track
                 app.stop_player(); // kills mpv and retires its position poller
                 app.playing = None;
-                app.playlist.current_track = None;
                 app.is_paused = false;
                 // Nothing is playing any more, so the elapsed time belongs to
                 // no track. Left as it was, it kept counting against whatever
@@ -705,16 +734,16 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
                 .get(&id)
                 .filter(|t| t.origin != crate::library::TrackOrigin::Local)
                 .and_then(|t| t.file.clone());
-            app.playlist.tracks.remove(idx);
+            app.remove_row(source, idx);
             // A download still running for this row has nowhere to land now.
             app.clear_download_state(&id);
-            // Clear any active search filter; stale indices would point to wrong tracks
-            app.filtered_indices.clear();
+            // Clear any active search filter; it was built over rows that no
+            // longer describe the list.
+            app.drop_filter();
             if app.selected >= app.visible_track_count() && app.selected > 0 {
                 app.selected -= 1;
             }
             app.clamp_scroll();
-            app.save_playlist();
 
             // Only the row is definitely gone. The track's document and its
             // cached audio are shared by every playlist listing it, so they go

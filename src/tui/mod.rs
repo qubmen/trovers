@@ -215,6 +215,44 @@ impl PlayingSession {
     }
 }
 
+// ── Visible rows ──────────────────────────────────────────────────────────
+
+/// Which list a visible row's track comes out of.
+///
+/// A row on screen is no longer an index into one vector: the displayed playlist
+/// and each album under it are separate files with separate running orders, so a
+/// row has to say which one it means before anything can play, delete or reorder
+/// it (ADR-019).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RowSource {
+    /// The displayed playlist's own tracks.
+    Own,
+    /// An album under it, by index into `App::albums`.
+    Album(usize),
+}
+
+/// One line of the track table.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VisibleRow {
+    /// `index` indexes the `tracks` of whichever list `source` names — never the
+    /// screen, which is what `App::rows` itself is.
+    Track { source: RowSource, index: usize },
+    /// An album's own line: its name, its size, and whether it is open.
+    AlbumHeader { album: usize },
+}
+
+/// An album under the displayed playlist, held in memory while it is on screen.
+///
+/// The `Playlist` is the same struct as any other, because an album *is* an
+/// ordinary playlist file — which is what lets one play as its own list without
+/// the rest of playback knowing that albums exist at all.
+pub struct LoadedAlbum {
+    /// The file stem, which is what `parent` and a rename address it by.
+    pub name: String,
+    pub path: PathBuf,
+    pub playlist: Playlist,
+}
+
 // ── App ───────────────────────────────────────────────────────────────────
 
 pub struct App {
@@ -254,7 +292,15 @@ pub struct App {
     pub selected: usize,
     pub track_offset: usize,
     pub track_list_height: u16,
-    pub filtered_indices: Vec<usize>,
+    /// The albums hanging under the displayed playlist, alphabetically.
+    pub albums: Vec<LoadedAlbum>,
+    /// Every row on screen, in display order — the cursor's coordinate system.
+    /// Derived from `playlist`, `albums`, `search_query` and each album's
+    /// `collapsed`; `rebuild_rows` is its only writer.
+    pub rows: Vec<VisibleRow>,
+    /// The active search text, lowercased on use. Held apart from `input_buf`,
+    /// which is cleared the moment the prompt closes while the filter stays on.
+    pub search_query: String,
 
     // Sidebar
     pub sidebar_selected: usize,
@@ -335,7 +381,9 @@ impl App {
             selected: 0,
             track_offset: 0,
             track_list_height: 10,
-            filtered_indices: Vec::new(),
+            albums: Vec::new(),
+            rows: Vec::new(),
+            search_query: String::new(),
             sidebar_selected: 0,
             playlists_expanded: true,
             available_playlists,
@@ -352,8 +400,15 @@ impl App {
             context_menu_selected: 0,
             target_playlist_for_url: None,
         };
-        if let Some(idx) = app.current_track_index() {
-            app.selected = idx;
+        app.load_albums();
+        app.rebuild_rows();
+        // `current_track` is an index into the playlist's own list, and the cursor
+        // counts rows, so it has to be translated rather than assigned.
+        if let Some(cursor) = app
+            .current_track_index()
+            .and_then(|index| app.cursor_of_own_index(index))
+        {
+            app.selected = cursor;
         }
         app
     }
@@ -366,13 +421,6 @@ impl App {
     pub fn current_track_index(&self) -> Option<usize> {
         let id = self.playlist.current_track.as_deref()?;
         self.playlist.tracks.iter().position(|t| t == id)
-    }
-
-    /// The track a displayed row resolves to, or `None` when its document has
-    /// gone missing from the library — a row is an id, and the document it names
-    /// can be deleted from under it (by another instance, or by hand).
-    pub fn track_at(&self, idx: usize) -> Option<&Track> {
-        self.library.get(self.playlist.tracks.get(idx)?)
     }
 
     /// Returns true if the track identified by `(path, id)` is
@@ -473,8 +521,8 @@ impl App {
     /// A no-op, with a status message, if a download for it is already running —
     /// or if the track is the user's own file, which has no remote to fetch it
     /// from and whose bytes are not ours to overwrite.
-    pub fn recache_track(&mut self, idx: usize) {
-        let Some(track) = self.track_at(idx) else {
+    pub fn recache_track(&mut self, id: &str) {
+        let Some(track) = self.library.get(id) else {
             return;
         };
         let id = track.id.clone();
@@ -523,6 +571,11 @@ impl App {
     /// Deliberately answers "yes" whenever a playlist cannot be read: a stray
     /// cached file costs disk, whereas another playlist's deleted audio costs a
     /// re-download.
+    ///
+    /// The lists held in memory — the displayed playlist and its loaded albums —
+    /// are consulted from memory and their files skipped on disk. They carry edits
+    /// that have not been written yet, and reading the row just removed back off
+    /// disk would always answer "still referenced" and leak the document.
     pub fn platform_id_referenced_elsewhere(&self, platform_id: &str) -> bool {
         let lists = |ids: &[String]| {
             ids.iter()
@@ -531,9 +584,19 @@ impl App {
         if lists(&self.playlist.tracks) {
             return true;
         }
+        if self
+            .albums
+            .iter()
+            .any(|loaded| lists(&loaded.playlist.tracks))
+        {
+            return true;
+        }
+        let in_memory = |path: &Path| {
+            path == self.playlist_path || self.albums.iter().any(|loaded| loaded.path == path)
+        };
         self.available_playlists
             .iter()
-            .filter(|entry| entry.path != self.playlist_path)
+            .filter(|entry| !in_memory(&entry.path))
             .any(|entry| match Playlist::load(&entry.path) {
                 Ok(pl) => lists(&pl.tracks),
                 Err(e) => {
@@ -717,11 +780,16 @@ impl App {
             return;
         };
 
-        // Same file as the one on screen: go through the normal path so the
-        // displayed copy, its `current_track` and the cursor stay in step.
-        if session.path == self.playlist_path {
-            let start_pos = self.track_at(idx).and_then(input::resume_start_pos);
-            self.request_playback(idx, start_pos);
+        // A file that is on screen — the displayed playlist or one of its albums
+        // — goes through the normal path, so that copy, its `current_track` and
+        // the cursor all stay in step.
+        if let Some(source) = self.source_of_path(&session.path.clone()) {
+            let start_pos = self
+                .source_playlist(source)
+                .and_then(|(playlist, _)| playlist.tracks.get(idx))
+                .and_then(|id| self.library.get(id))
+                .and_then(input::resume_start_pos);
+            self.play_from_list(source, idx, start_pos);
             return;
         }
 
@@ -758,14 +826,39 @@ impl App {
         self.spawn_player_for(id, source, speed, start_pos);
     }
 
-    /// Start playback of the track at Vec index `idx` within the displayed
-    /// playlist (`self.playlist`).
-    /// `start_pos`: resume at this position in seconds (used when switching
-    /// from stream to local file mid-play; pass `None` for a fresh start).
-    pub fn request_playback(&mut self, idx: usize, start_pos: Option<f64>) {
+    /// Play the row the cursor is on, whichever list it belongs to, resuming from
+    /// the track's `last_position` when it has one. Returns whether there was
+    /// anything to play: a header names a group, not a track.
+    ///
+    /// The one door `Enter`, `Space` and `n`/`b` go through, so all three agree
+    /// about what a row means.
+    pub fn play_row(&mut self, cursor: usize) -> bool {
+        let Some(&VisibleRow::Track { source, index }) = self.row_at(cursor) else {
+            return false;
+        };
+        let start_pos = self
+            .source_playlist(source)
+            .and_then(|(playlist, _)| playlist.tracks.get(index))
+            .and_then(|id| self.library.get(id))
+            .and_then(input::resume_start_pos);
+        self.play_from_list(source, index, start_pos);
+        true
+    }
+
+    /// Start playback of index `idx` within the list `source` names — the
+    /// displayed playlist or one of the albums under it.
+    ///
+    /// An album plays as its own list: the session it builds carries the album's
+    /// path and its running order, so `n`/`b`, `loop_mode`, `shuffle` and
+    /// auto-advance all stay inside the album (ADR-019).
+    pub fn play_from_list(&mut self, source: RowSource, idx: usize, start_pos: Option<f64>) {
         // Collect all track data before any mutations (borrow checker)
-        let (id, speed, source) = {
-            let Some(id) = self.playlist.tracks.get(idx).cloned() else {
+        let (list_path, id, speed, source_media) = {
+            let Some((playlist, path)) = self.source_playlist(source) else {
+                return;
+            };
+            let (path, default_speed) = (path.to_path_buf(), playlist.default_speed);
+            let Some(id) = playlist.tracks.get(idx).cloned() else {
                 return;
             };
             // A row whose document has gone missing cannot be played, and must
@@ -777,7 +870,7 @@ impl App {
             };
             let speed = track
                 .speed
-                .or(self.playlist.default_speed)
+                .or(default_speed)
                 .unwrap_or(self.config.default_speed);
             // A remote track always has a stream to fall back on. A local one has
             // only the file, so if that has moved or its drive is unplugged there
@@ -791,7 +884,7 @@ impl App {
                 self.set_status("File not found");
                 return;
             }
-            (id, speed, play_source_for(track))
+            (path, id, speed, play_source_for(track))
         };
 
         // Save position of the track we're leaving (not applicable when switching
@@ -806,7 +899,7 @@ impl App {
             // position still has to be written. Comparing ids alone silently
             // dropped that position.
             let leaving = (session.path.clone(), session.track_id.clone());
-            if leaving != (self.playlist_path.clone(), id.clone()) {
+            if leaving != (list_path.clone(), id.clone()) {
                 let pos = self.position as u64;
                 if let Some(t) = self.playing_track_mut() {
                     t.last_position = pos;
@@ -817,17 +910,32 @@ impl App {
             }
         }
 
+        // `current_track` means strictly "last track selected/played in *this*
+        // playlist file" — used only to restore the cursor on load. Record it on
+        // the list the row actually came out of.
+        //
+        // An album's file is written straight away: it lives in memory here and
+        // nothing else would ever save it, so the fold-and-restart case would lose
+        // the cursor. The displayed playlist is saved by the ordinary paths.
+        match source {
+            RowSource::Own => self.playlist.current_track = Some(id.clone()),
+            RowSource::Album(album) => {
+                if let Some(loaded) = self.albums.get_mut(album) {
+                    loaded.playlist.current_track = Some(id.clone());
+                    if let Err(e) = loaded.playlist.save(&loaded.path) {
+                        error!(err = %e, path = %loaded.path.display(), "failed to save an album's current track");
+                    }
+                }
+            }
+        }
+        let Some((snapshot, _)) = self.source_playlist(source) else {
+            return;
+        };
         self.playing = Some(PlayingSession {
-            path: self.playlist_path.clone(),
-            playlist: self.playlist.clone(),
+            path: list_path,
+            playlist: snapshot.clone(),
             track_id: id.clone(),
         });
-        // `current_track` on the displayed playlist means strictly "last
-        // track selected/played in *this* playlist file" — used only to
-        // restore the cursor on load. Since `idx` always indexes into
-        // `self.playlist` here, the playing track does live in the
-        // displayed playlist, so record it.
-        self.playlist.current_track = Some(id.clone());
         self.is_paused = false;
         // Set the position to wherever this player is actually about to start.
         //
@@ -841,7 +949,7 @@ impl App {
         self.position = start_pos.unwrap_or(0.0);
         let _ = self.pos_tx.send(self.position);
 
-        self.spawn_player_for(id, source, speed, start_pos);
+        self.spawn_player_for(id, source_media, speed, start_pos);
     }
 
     /// If `id` is the track actually driving playback right now (per
@@ -1097,7 +1205,28 @@ impl App {
                 self.save_playlist();
                 // New rows mean the shuffled order no longer covers the list.
                 self.rebuild_shuffle_order();
+                self.rebuild_rows();
                 let name = self.displayed_playlist_name();
+                self.report_import(&name, report);
+            }
+            // An album on screen is held in memory, so the merge has to go through
+            // that copy: rewriting the file underneath it would be overwritten by
+            // the next thing that saves the album, and the rows would not move.
+            ImportTarget::Existing(path) if self.source_of_path(&path).is_some() => {
+                let Some(RowSource::Album(album)) = self.source_of_path(&path) else {
+                    return;
+                };
+                let mut loaded = self.albums[album].playlist.clone();
+                let report =
+                    library_import::merge_scan(&mut self.library, &mut loaded, &root, files);
+                if let Err(e) = loaded.save(&path) {
+                    error!(err = %e, path = %path.display(), "failed to save a rescanned album");
+                    self.set_status("Could not save the album");
+                    return;
+                }
+                let name = loaded.name.clone();
+                self.albums[album].playlist = loaded;
+                self.rebuild_rows();
                 self.report_import(&name, report);
             }
             ImportTarget::Existing(path) => {
@@ -1134,6 +1263,9 @@ impl App {
                 let mut album = Playlist::empty(&name);
                 album.kind = PlaylistKind::Album;
                 album.parent = parent.clone();
+                // Stored open: an import the user just asked for should be visibly
+                // there, not folded away behind one row.
+                album.collapsed = false;
                 let report =
                     library_import::merge_scan(&mut self.library, &mut album, &root, files);
                 if let Err(e) = album.save(&path) {
@@ -1144,11 +1276,22 @@ impl App {
 
                 self.available_playlists.push(PlaylistEntry {
                     name: name.clone(),
-                    path,
+                    path: path.clone(),
                     kind: PlaylistKind::Album,
-                    parent,
+                    parent: parent.clone(),
                 });
                 self.available_playlists.sort_by(|a, b| a.name.cmp(&b.name));
+                // A new album under the playlist on screen is a new group in it, so
+                // it has to join the loaded ones rather than only exist on disk.
+                if parent.as_deref() == Some(&*self.displayed_playlist_name()) {
+                    self.albums.push(LoadedAlbum {
+                        name: name.clone(),
+                        path,
+                        playlist: album,
+                    });
+                    self.albums.sort_by(|a, b| a.name.cmp(&b.name));
+                    self.rebuild_rows();
+                }
                 self.report_import(&name, report);
             }
         }
@@ -1287,6 +1430,7 @@ impl App {
                         // row index that the filter does not even display.
                         self.playlist.add_track(id.clone());
                         self.save_playlist();
+                        self.rebuild_rows();
                         self.set_status(format!("Added: {status_title}"));
                     }
                 }
@@ -1422,26 +1566,281 @@ impl App {
         }
     }
 
-    pub fn visible_track_count(&self) -> usize {
-        if self.filtered_indices.is_empty() {
-            self.playlist.tracks.len()
-        } else {
-            self.filtered_indices.len()
+    /// Load the albums that name the displayed playlist as their parent.
+    ///
+    /// Read from `available_playlists`, so it costs one small file per album
+    /// rather than a directory scan. An album that will not parse is skipped with
+    /// a warning: a broken file must not take the playlist down with it.
+    pub fn load_albums(&mut self) {
+        let parent = self.displayed_playlist_name();
+        let mut albums = Vec::new();
+        for entry in &self.available_playlists {
+            if entry.kind != PlaylistKind::Album || entry.parent.as_deref() != Some(&*parent) {
+                continue;
+            }
+            match Playlist::load(&entry.path) {
+                Ok(playlist) => albums.push(LoadedAlbum {
+                    name: entry.name.clone(),
+                    path: entry.path.clone(),
+                    playlist,
+                }),
+                Err(e) => {
+                    warn!(err = %e, path = %entry.path.display(), "skipping an album that will not load")
+                }
+            }
+        }
+        albums.sort_by(|a, b| a.name.cmp(&b.name));
+        self.albums = albums;
+    }
+
+    /// Whether a search filter is narrowing the rows.
+    pub fn has_filter(&self) -> bool {
+        !self.search_query.is_empty()
+    }
+
+    /// Rebuild `rows` from the playlist, its albums, the filter and each album's
+    /// fold state. The only writer of `rows`.
+    ///
+    /// The parent's own tracks come first, then the albums alphabetically — so the
+    /// list the user built by hand stays where they left it and the folders they
+    /// imported sit below it in a predictable order.
+    pub fn rebuild_rows(&mut self) {
+        let query = self.search_query.to_lowercase();
+        // A row whose document is missing matches nothing: there is no title to
+        // match against.
+        let hit = |id: &String| {
+            query.is_empty()
+                || self
+                    .library
+                    .get(id)
+                    .is_some_and(|track| track_matches(track, &query))
+        };
+
+        let mut rows = Vec::new();
+        for (index, id) in self.playlist.tracks.iter().enumerate() {
+            if hit(id) {
+                rows.push(VisibleRow::Track {
+                    source: RowSource::Own,
+                    index,
+                });
+            }
+        }
+
+        for (album, loaded) in self.albums.iter().enumerate() {
+            // A name match shows the whole album: the user asked for the album,
+            // not for whichever of its tracks repeat its name in their titles.
+            let by_name = !query.is_empty() && loaded.name.to_lowercase().contains(&query);
+            let indices: Vec<usize> = loaded
+                .playlist
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, id)| by_name || hit(id))
+                .map(|(index, _)| index)
+                .collect();
+            // An empty album keeps its header — the album exists, and the row is
+            // how the user reaches it. Under a filter it does not: nothing in it
+            // was asked for.
+            if self.has_filter() && indices.is_empty() {
+                continue;
+            }
+            rows.push(VisibleRow::AlbumHeader { album });
+            // A filter overrides the fold. Hits left folded away inside an album
+            // would read as a search that missed them.
+            if !loaded.playlist.collapsed || self.has_filter() {
+                for index in indices {
+                    rows.push(VisibleRow::Track {
+                        source: RowSource::Album(album),
+                        index,
+                    });
+                }
+            }
+        }
+        self.rows = rows;
+    }
+
+    pub fn row_at(&self, cursor: usize) -> Option<&VisibleRow> {
+        self.rows.get(cursor)
+    }
+
+    /// The list a row comes out of, and the file that list lives in.
+    pub fn source_playlist(&self, source: RowSource) -> Option<(&Playlist, &Path)> {
+        match source {
+            RowSource::Own => Some((&self.playlist, self.playlist_path.as_path())),
+            RowSource::Album(album) => self
+                .albums
+                .get(album)
+                .map(|loaded| (&loaded.playlist, loaded.path.as_path())),
         }
     }
 
-    /// What the rows currently on screen add up to, in seconds.
+    /// The library id a row names, whichever list it comes from. `None` on a
+    /// header, which names an album rather than a track.
+    pub fn row_track_id(&self, cursor: usize) -> Option<String> {
+        let &VisibleRow::Track { source, index } = self.row_at(cursor)? else {
+            return None;
+        };
+        let (playlist, _) = self.source_playlist(source)?;
+        playlist.tracks.get(index).cloned()
+    }
+
+    /// Which of the lists on screen lives at `path`, if either.
     ///
-    /// Only the visible ones, so the panel title's total and its count describe
-    /// the same set of rows under a search filter. A row whose document is gone,
+    /// What lets auto-advance route back through the in-memory copy when the
+    /// playing list happens to be one the user is looking at.
+    pub fn source_of_path(&self, path: &Path) -> Option<RowSource> {
+        if path == self.playlist_path {
+            return Some(RowSource::Own);
+        }
+        self.albums
+            .iter()
+            .position(|loaded| loaded.path == path)
+            .map(RowSource::Album)
+    }
+
+    /// The list the row at `cursor` belongs to, and every cursor position showing
+    /// a row of that same list. `None` on a header, which belongs to no list.
+    ///
+    /// This is the running order `n`/`b` steps: from an album's last track they
+    /// wrap to its first rather than falling into the parent's tracks.
+    pub fn row_group(&self, cursor: usize) -> Option<(RowSource, Vec<usize>)> {
+        let &VisibleRow::Track { source, .. } = self.row_at(cursor)? else {
+            return None;
+        };
+        let group = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, VisibleRow::Track { source: s, .. } if *s == source))
+            .map(|(cursor, _)| cursor)
+            .collect();
+        Some((source, group))
+    }
+
+    /// The album a header row is for — `None` on any other row.
+    pub fn album_of(&self, cursor: usize) -> Option<usize> {
+        match self.row_at(cursor)? {
+            VisibleRow::AlbumHeader { album } => Some(*album),
+            VisibleRow::Track { .. } => None,
+        }
+    }
+
+    /// Fold or unfold album `album`, remembering it in the album's own file so the
+    /// state survives a restart.
+    pub fn toggle_album(&mut self, album: usize) {
+        let Some(loaded) = self.albums.get_mut(album) else {
+            return;
+        };
+        loaded.playlist.collapsed = !loaded.playlist.collapsed;
+        if let Err(e) = loaded.playlist.save(&loaded.path) {
+            error!(err = %e, path = %loaded.path.display(), "failed to save an album's fold state");
+        }
+        self.rebuild_rows();
+        self.clamp_scroll();
+    }
+
+    /// Drop row `index` from the list `source` names and save that file.
+    ///
+    /// The track's document is untouched — whether it survives is decided by
+    /// whether anything else still lists it (see
+    /// `platform_id_referenced_elsewhere`).
+    pub fn remove_row(&mut self, source: RowSource, index: usize) {
+        match source {
+            RowSource::Own => {
+                let Some(id) = self.playlist.tracks.get(index).cloned() else {
+                    return;
+                };
+                self.playlist.tracks.remove(index);
+                if self.playlist.current_track.as_deref() == Some(&*id) {
+                    self.playlist.current_track = None;
+                }
+                self.save_playlist();
+            }
+            RowSource::Album(album) => {
+                let Some(loaded) = self.albums.get_mut(album) else {
+                    return;
+                };
+                if index >= loaded.playlist.tracks.len() {
+                    return;
+                }
+                let id = loaded.playlist.tracks.remove(index);
+                if loaded.playlist.current_track.as_deref() == Some(&*id) {
+                    loaded.playlist.current_track = None;
+                }
+                if let Err(e) = loaded.playlist.save(&loaded.path) {
+                    error!(err = %e, path = %loaded.path.display(), "failed to save an album after a row was removed");
+                }
+            }
+        }
+        self.rebuild_rows();
+    }
+
+    /// Drop the search filter without moving the cursor.
+    ///
+    /// For an edit that invalidated the filter rather than the user closing it:
+    /// the row they were holding is still the row they were holding.
+    pub fn drop_filter(&mut self) {
+        self.search_query.clear();
+        self.rebuild_rows();
+    }
+
+    /// Where an own-track index sits on screen, for restoring a cursor.
+    pub fn cursor_of_own_index(&self, index: usize) -> Option<usize> {
+        self.rows.iter().position(|row| {
+            matches!(row, VisibleRow::Track { source: RowSource::Own, index: i } if *i == index)
+        })
+    }
+
+    /// How many rows the cursor and the scroll window count — headers included.
+    pub fn visible_track_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Every track the playlist holds, folded away or not — or, under a filter,
+    /// every track row on screen, so the panel title agrees with what is there.
+    ///
+    /// Folding is a view, so it must not change the number. That does mean this is
+    /// smaller than `visible_track_count` by the number of headers whenever an
+    /// album is present; the two are separate readings, and the panel title keeps
+    /// them apart.
+    pub fn total_track_count(&self) -> usize {
+        if self.has_filter() {
+            return self
+                .rows
+                .iter()
+                .filter(|row| matches!(row, VisibleRow::Track { .. }))
+                .count();
+        }
+        self.playlist.tracks.len()
+            + self
+                .albums
+                .iter()
+                .map(|loaded| loaded.playlist.tracks.len())
+                .sum::<usize>()
+    }
+
+    /// What `total_track_count` covers, in seconds. A row whose document is gone,
     /// or whose duration was never learned, contributes nothing.
-    pub fn visible_duration_secs(&self) -> u64 {
-        (0..self.visible_track_count())
-            .filter_map(|cursor| self.track_index_at(cursor))
-            .filter_map(|index| self.playlist.tracks.get(index))
-            .filter_map(|id| self.library.get(id))
-            .map(|track| track.duration)
-            .sum()
+    pub fn total_duration_secs(&self) -> u64 {
+        let sum = |ids: &[String]| -> u64 {
+            ids.iter()
+                .filter_map(|id| self.library.get(id))
+                .map(|track| track.duration)
+                .sum()
+        };
+        if self.has_filter() {
+            return (0..self.rows.len())
+                .filter_map(|cursor| self.row_track_id(cursor))
+                .filter_map(|id| self.library.get(&id))
+                .map(|track| track.duration)
+                .sum();
+        }
+        sum(&self.playlist.tracks)
+            + self
+                .albums
+                .iter()
+                .map(|loaded| sum(&loaded.playlist.tracks))
+                .sum::<u64>()
     }
 
     /// Move the selected row one place down (`down`) or up within the playlist.
@@ -1450,63 +1849,72 @@ impl App {
     /// ±1 would jump the row over whatever the filter hides. At either end it is
     /// simply a no-op — nothing to say about a row already where it can go.
     pub fn move_selected_row(&mut self, down: bool) {
-        if !self.filtered_indices.is_empty() {
+        if self.has_filter() {
             self.set_status("Clear the search to reorder");
             return;
         }
-
-        let from = self.selected;
-        let to = if down { from + 1 } else { from.wrapping_sub(1) };
-        if from >= self.playlist.tracks.len() || to >= self.playlist.tracks.len() {
+        // Albums have no hand-made order to move a row within — they are sorted by
+        // name, which is the only order they have.
+        if self.album_of(self.selected).is_some() {
+            self.set_status("Albums are sorted by name");
             return;
         }
 
-        self.playlist.tracks.swap(from, to);
+        let Some((source, group)) = self.row_group(self.selected) else {
+            return;
+        };
+        let &VisibleRow::Track { index: from, .. } = self.row_at(self.selected).expect("a row")
+        else {
+            return;
+        };
+        let to = if down { from + 1 } else { from.wrapping_sub(1) };
+        let len = match self.source_playlist(source) {
+            Some((playlist, _)) => playlist.tracks.len(),
+            None => return,
+        };
+        if from >= len || to >= len {
+            return;
+        }
+
+        match source {
+            RowSource::Own => {
+                self.playlist.tracks.swap(from, to);
+                self.save_playlist();
+            }
+            RowSource::Album(album) => {
+                let Some(loaded) = self.albums.get_mut(album) else {
+                    return;
+                };
+                loaded.playlist.tracks.swap(from, to);
+                if let Err(e) = loaded.playlist.save(&loaded.path) {
+                    error!(err = %e, path = %loaded.path.display(), "failed to save a reordered album");
+                }
+            }
+        }
+        self.rebuild_rows();
         // The cursor stays on the row the user was holding, not on the position.
-        self.selected = to;
+        // Unfiltered, a list's rows are its tracks in order, so the row that now
+        // holds `to` is the group's `to`-th.
+        self.selected = group.get(to).copied().unwrap_or(self.selected);
         self.clamp_scroll();
-        self.save_playlist();
         // `shuffle_order` is deliberately left alone. It holds indices, so after a
         // swap it is still a permutation of `0..len` — no track is skipped or
         // repeated, only two of them trade places in the shuffled run. Rebuilding
         // would throw away a run the user is in the middle of to fix nothing.
     }
 
-    pub fn track_index_at(&self, cursor: usize) -> Option<usize> {
-        if self.filtered_indices.is_empty() {
-            if cursor < self.playlist.tracks.len() {
-                Some(cursor)
-            } else {
-                None
-            }
-        } else {
-            self.filtered_indices.get(cursor).copied()
-        }
+    /// Adopt whatever the search prompt currently holds as the filter.
+    pub fn update_search(&mut self) {
+        self.search_query = self.input_buf.clone();
+        self.rebuild_rows();
+        self.selected = 0;
+        self.track_offset = 0;
     }
 
-    pub fn update_search(&mut self) {
-        let query = self.input_buf.to_lowercase();
-        if query.is_empty() {
-            self.filtered_indices.clear();
-        } else {
-            // Collected into a local first: the filter reads `self.library` while
-            // `self.filtered_indices` is being assigned.
-            let matches: Vec<usize> = self
-                .playlist
-                .tracks
-                .iter()
-                .enumerate()
-                // A row whose document is missing matches nothing — there is no
-                // title to match against.
-                .filter(|(_, id)| {
-                    self.library
-                        .get(id)
-                        .is_some_and(|t| track_matches(t, &query))
-                })
-                .map(|(i, _)| i)
-                .collect();
-            self.filtered_indices = matches;
-        }
+    /// Drop the search filter and show everything again.
+    pub fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.rebuild_rows();
         self.selected = 0;
         self.track_offset = 0;
     }
@@ -1706,12 +2114,22 @@ impl App {
         // Reset track list state
         self.selected = 0;
         self.track_offset = 0;
-        self.filtered_indices.clear();
+        self.search_query.clear();
         self.input_buf.clear();
 
-        // Restore cursor to last-played track when available
-        if let Some(idx) = self.current_track_index() {
-            self.selected = idx;
+        // The albums hanging under the new playlist are a different set entirely,
+        // and the rows are built from them.
+        self.load_albums();
+        self.rebuild_rows();
+
+        // Restore cursor to last-played track when available. `current_track` is an
+        // index into the playlist's own list and the cursor counts rows, so it has
+        // to be translated rather than assigned.
+        if let Some(cursor) = self
+            .current_track_index()
+            .and_then(|index| self.cursor_of_own_index(index))
+        {
+            self.selected = cursor;
         }
 
         // Move focus to track list so user can immediately interact
@@ -1720,11 +2138,27 @@ impl App {
         Ok(())
     }
 
-    /// Returns playlist names available as move targets (excludes the currently active playlist).
+    /// The file stem of the list the selected row belongs to — the displayed
+    /// playlist, or the album the row sits under.
+    fn selected_row_list_name(&self) -> String {
+        match self.row_group(self.selected).map(|(source, _)| source) {
+            Some(RowSource::Album(album)) => self
+                .albums
+                .get(album)
+                .map(|loaded| loaded.name.clone())
+                .unwrap_or_else(|| self.playlist.name.clone()),
+            _ => self.playlist.name.clone(),
+        }
+    }
+
+    /// Returns playlist names available as move targets — everything but the list
+    /// the selected row already belongs to, which for an album row means the album
+    /// rather than the playlist showing it.
     pub fn available_playlist_names(&self) -> Vec<String> {
+        let own = self.selected_row_list_name();
         self.available_playlists
             .iter()
-            .filter(|entry| entry.name != self.playlist.name)
+            .filter(|entry| entry.name != own)
             .map(|entry| entry.name.clone())
             .collect()
     }
@@ -1739,12 +2173,23 @@ impl App {
     pub fn move_track_to_playlist(&mut self, target_name: &str) -> anyhow::Result<()> {
         use anyhow::Context as _;
 
-        // Determine the real track index for the cursor position
-        let track_idx = self
-            .track_index_at(self.selected)
+        // The row's own list — which may be an album under the displayed playlist,
+        // and then it is the album's file the row leaves.
+        let &VisibleRow::Track { source, index } = self
+            .row_at(self.selected)
+            .with_context(|| "no track at current selection")?
+        else {
+            anyhow::bail!("no track at current selection");
+        };
+        let (from_playlist, from_path) = self
+            .source_playlist(source)
             .with_context(|| "no track at current selection")?;
-
-        let id = self.playlist.tracks[track_idx].clone();
+        let from_path = from_path.to_path_buf();
+        let id = from_playlist
+            .tracks
+            .get(index)
+            .cloned()
+            .with_context(|| "no track at current selection")?;
 
         // Resolve the target playlist path
         let target_path = self
@@ -1771,22 +2216,25 @@ impl App {
         // actually driving playback right now — identity is `(path,
         // id)`, not just a matching `id` that might coincidentally
         // also exist in an unrelated playing session elsewhere.
-        let is_current = self.is_playing_track(&self.playlist_path, &id);
+        let is_current = self.is_playing_track(&from_path, &id);
         if is_current {
             self.stop_player(); // kills mpv and retires its position poller
             self.playing = None;
-            self.playlist.current_track = None;
             self.is_paused = false;
             self.position = 0.0;
         }
 
-        // Remove from source playlist. Only the row moves — the track's document
+        // Remove from the row's own list. Only the row moves — the track's document
         // stays exactly where it is, which is why an in-flight download for it
         // needs no bookkeeping any more.
-        anyhow::ensure!(
-            self.playlist.remove_track_by_id(&id),
-            "track '{id}' not found in source playlist"
-        );
+        let removed = match source {
+            RowSource::Own => self.playlist.remove_track_by_id(&id),
+            RowSource::Album(album) => self
+                .albums
+                .get_mut(album)
+                .is_some_and(|loaded| loaded.playlist.remove_track_by_id(&id)),
+        };
+        anyhow::ensure!(removed, "track '{id}' not found in source playlist");
 
         // Append to target playlist
         target_playlist.add_track(id);
@@ -1795,12 +2243,16 @@ impl App {
         target_playlist
             .save(&target_path)
             .with_context(|| format!("failed to save target playlist '{target_name}'"))?;
-        self.playlist
-            .save(&self.playlist_path)
+        let (from_playlist, _) = self
+            .source_playlist(source)
+            .with_context(|| "the row's own list went away mid-move")?;
+        from_playlist
+            .save(&from_path)
             .with_context(|| "failed to save source playlist after move")?;
 
-        // Clear any active search filter: the index set is now stale after the removal.
-        self.filtered_indices.clear();
+        // Clear any active search filter: it was built over rows that no longer
+        // describe the list.
+        self.drop_filter();
 
         // Clamp the selection cursor so it stays in bounds
         let new_count = self.visible_track_count();

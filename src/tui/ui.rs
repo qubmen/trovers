@@ -1,4 +1,7 @@
-use super::{effective_speed, App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
+use super::{
+    effective_speed, App, Focus, InputMode, RowSource, SettingsItem, SidebarItem, VisibleRow,
+    SETTINGS_ITEMS,
+};
 use crate::config::AudioQuality;
 use crate::library::CacheStatus;
 use crate::playlist::LoopMode;
@@ -205,14 +208,20 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
 // ── Track table ───────────────────────────────────────────────────────────
 
-/// Whether the track table row for `id` should show the `▶`
-/// highlight — true only when the playing session's track actually belongs
-/// to the currently *displayed* playlist file, not just when the id happens
-/// to match (ids can collide across playlist files).
-pub(crate) fn row_is_playing(app: &App, id: &str) -> bool {
+/// Whether the track table row for `id` should show the `▶` highlight — true
+/// only when the playing session's track actually belongs to the list this row
+/// came out of, not just when the id happens to match.
+///
+/// `source` is what makes that answerable now that a row can belong to the
+/// displayed playlist or to an album under it: the same id can sit in both, and
+/// only the one playback is running out of gets the marker.
+pub(crate) fn row_is_playing(app: &App, source: RowSource, id: &str) -> bool {
+    let Some((_, path)) = app.source_playlist(source) else {
+        return false;
+    };
     app.playing
         .as_ref()
-        .is_some_and(|p| p.path == app.playlist_path && p.track_id == id)
+        .is_some_and(|p| p.path == path && p.track_id == id)
 }
 
 /// The row shown for a playlist entry whose track document is gone. It cannot
@@ -221,6 +230,7 @@ pub(crate) fn row_is_playing(app: &App, id: &str) -> bool {
 fn missing_document_row<'a>(
     num_str: &str,
     id: &str,
+    indent: &str,
     title_width: usize,
     is_selected: bool,
 ) -> Row<'a> {
@@ -232,7 +242,7 @@ fn missing_document_row<'a>(
     Row::new(vec![
         Cell::from(Line::from(vec![Span::raw("  "), Span::raw("✕")])),
         Cell::from(num_str.to_string()),
-        Cell::from(truncate(&format!("missing: {id}"), title_width)),
+        Cell::from(truncate(&format!("{indent}missing: {id}"), title_width)),
         Cell::from(""),
         Cell::from("--:--"),
     ])
@@ -242,18 +252,25 @@ fn missing_document_row<'a>(
 /// The track panel's title: the list's name, what it holds in total, and which
 /// slice of it is on screen.
 ///
-/// `total_secs` is what the visible rows add up to, so it agrees with `total`
-/// under a search filter. Zero means nothing on screen knows its length — an
-/// import without ffprobe — and is left out rather than shown as `0m`, which
-/// would read as a claim instead of an absence.
+/// `total` and `total_secs` describe what the list *holds* — its own tracks plus
+/// every album's, folded or not — because folding is a view. `rows` is what is on
+/// screen, headers included, and is the denominator of the scroll counter: with an
+/// album present the two genuinely differ, and each says what it means.
+///
+/// A `total_secs` of zero means nothing on screen knows its length — an import
+/// without ffprobe — and is left out rather than shown as `0m`, which would read
+/// as a claim instead of an absence.
 pub(crate) fn track_panel_title(
     name: &str,
     total: usize,
     first: usize,
     last: usize,
+    rows: usize,
     total_secs: u64,
 ) -> String {
-    if total == 0 {
+    // Nothing on screen at all: a bare name. An album's header is a row even when
+    // the album is empty, so `rows` is what decides this, not `total`.
+    if rows == 0 {
         return format!(" {name} ");
     }
 
@@ -265,7 +282,7 @@ pub(crate) fn track_panel_title(
     }
     // Two spaces: the counter is a separate reading from the summary, not
     // another item in its `·` list.
-    format!("{title}  [ {first}–{last} / {total} ] ")
+    format!("{title}  [ {first}–{last} / {rows} ] ")
 }
 
 /// A running time at the resolution a total wants: `6h 12m`, `47m`, `<1m`.
@@ -285,17 +302,71 @@ fn coarse_duration(secs: u64) -> String {
     }
 }
 
+/// The three text cells of an album header: the disclosure glyph with the album's
+/// name, how many tracks it holds, and how long they run.
+///
+/// `▸`/`▾` rather than the sidebar's `▶`/`▼` — `▶` is the playing marker, and a
+/// folded album must not read as a playing one. The name is the whole point of
+/// moving albums here, so it gets the title column, truncated to fit it.
+pub(crate) fn album_header_cells(
+    name: &str,
+    tracks: usize,
+    total_secs: u64,
+    open: bool,
+    title_width: usize,
+) -> (String, String, String) {
+    let glyph = if open { "▾" } else { "▸" };
+    let title = truncate(&format!("{glyph} {name}"), title_width);
+    let count = format!("{tracks} {}", if tracks == 1 { "track" } else { "tracks" });
+    // Nothing here knows its length (an import with no ffprobe). `0m` would claim
+    // the album runs no time at all rather than admit to not knowing.
+    let duration = if total_secs > 0 {
+        coarse_duration(total_secs)
+    } else {
+        String::new()
+    };
+    (title, count, duration)
+}
+
+/// An album's own line in the track table.
+fn album_header_row<'a>(
+    name: &str,
+    tracks: usize,
+    total_secs: u64,
+    open: bool,
+    title_width: usize,
+    is_selected: bool,
+) -> Row<'a> {
+    let (title, count, duration) = album_header_cells(name, tracks, total_secs, open, title_width);
+    let row_style = if is_selected {
+        Style::new().fg(Color::White).bg(ROW_SELECTED_BG).bold()
+    } else {
+        Style::new().fg(GOLD).bold()
+    };
+    Row::new(vec![
+        // The icon and number columns stay empty: a group has no cache status and
+        // no place in a running order.
+        Cell::from("  "),
+        Cell::from(""),
+        Cell::from(title),
+        Cell::from(Span::styled(count, Style::new().fg(TEXT_DIM))),
+        Cell::from(Span::styled(duration, Style::new().fg(TEXT_DIM))),
+    ])
+    .style(row_style)
+}
+
 fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
-    let total = app.visible_track_count();
+    let rows_total = app.visible_track_count();
     let first = app.track_offset + 1;
-    let last = (app.track_offset + app.track_list_height as usize).min(total);
+    let last = (app.track_offset + app.track_list_height as usize).min(rows_total);
 
     let title = track_panel_title(
         &app.playlist.name,
-        total,
+        app.total_track_count(),
         first,
         last,
-        app.visible_duration_secs(),
+        rows_total,
+        app.total_duration_secs(),
     );
 
     let block = make_panel_block(&title, app.focus == Focus::TrackList);
@@ -318,18 +389,52 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let rows: Vec<Row> = (app.track_offset..app.track_offset + app.track_list_height as usize)
         .filter_map(|cursor| {
-            let track_idx = app.track_index_at(cursor)?;
-            let id = app.playlist.tracks.get(track_idx)?;
-            let is_playing = row_is_playing(app, id);
             let is_selected = cursor == app.selected;
-            let num_str = format!("{:>3} ", track_idx + 1);
+            let (source, index) = match *app.row_at(cursor)? {
+                VisibleRow::AlbumHeader { album } => {
+                    let loaded = app.albums.get(album)?;
+                    let secs = loaded
+                        .playlist
+                        .tracks
+                        .iter()
+                        .filter_map(|id| app.library.get(id))
+                        .map(|track| track.duration)
+                        .sum();
+                    return Some(album_header_row(
+                        &loaded.name,
+                        loaded.playlist.tracks.len(),
+                        secs,
+                        !loaded.playlist.collapsed,
+                        title_width,
+                        is_selected,
+                    ));
+                }
+                VisibleRow::Track { source, index } => (source, index),
+            };
+            // An album's tracks are indented so the group reads as one thing, and
+            // numbered from 1 within it: the number says where the track sits in
+            // the list that plays it.
+            let indent = match source {
+                RowSource::Own => "",
+                RowSource::Album(_) => "    ",
+            };
+            let (playlist, _) = app.source_playlist(source)?;
+            let id = playlist.tracks.get(index)?;
+            let is_playing = row_is_playing(app, source, id);
+            let num_str = format!("{:>3} ", index + 1);
 
             // A row holds an id, and the document it names can go missing —
             // deleted by hand, or by another instance. Render it dimmed rather
             // than hiding it, so the row the user can see is the row they can
             // delete.
             let Some(track) = app.library.get(id) else {
-                return Some(missing_document_row(&num_str, id, title_width, is_selected));
+                return Some(missing_document_row(
+                    &num_str,
+                    id,
+                    indent,
+                    title_width,
+                    is_selected,
+                ));
             };
 
             let play_icon = if is_playing { "▶" } else { " " };
@@ -368,7 +473,10 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             let title_str = truncate(
-                track.user_title.as_deref().unwrap_or(&track.title),
+                &format!(
+                    "{indent}{}",
+                    track.user_title.as_deref().unwrap_or(&track.title)
+                ),
                 title_width,
             );
             let artist_str = truncate(track.user_artist.as_deref().unwrap_or(&track.artist), 15);
@@ -402,8 +510,8 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
     frame.render_stateful_widget(Table::new(rows, widths), table_area, &mut table_state);
 
-    if total > 0 {
-        let mut scrollbar_state = ScrollbarState::new(total).position(app.track_offset);
+    if rows_total > 0 {
+        let mut scrollbar_state = ScrollbarState::new(rows_total).position(app.track_offset);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("▲"))
@@ -953,7 +1061,7 @@ pub(crate) fn footer_right_counters(app: &App) -> String {
         parts.push("⇄ Shuffle".to_string());
     }
 
-    if !app.filtered_indices.is_empty() {
+    if app.has_filter() {
         parts.push("Filter".to_string());
     }
 
