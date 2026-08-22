@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::library::{make_id, platform_id_of, source_slug, CacheStatus, Library, Track};
+    use crate::library::{
+        make_id, platform_id_of, source_slug, CacheStatus, Library, MediaKind, Track, TrackOrigin,
+    };
 
     fn track_with_id(id: &str) -> Track {
         Track {
@@ -18,6 +20,9 @@ mod tests {
             user_title: None,
             user_artist: None,
             added_at: chrono::Utc::now(),
+            origin: TrackOrigin::Remote,
+            media: MediaKind::Audio,
+            resume: true,
         }
     }
 
@@ -364,6 +369,155 @@ added_at = "2025-06-01T08:00:00Z"
         assert_eq!(
             reloaded.get("youtube:abc").expect("present").cache_status,
             CacheStatus::Failed
+        );
+    }
+
+    // ── local tracks: origin, media kind, resume ──────────────────────────
+
+    /// A local track: the user's own file, played from where it already sits.
+    fn local_track(id: &str, file: &std::path::Path) -> Track {
+        Track {
+            url: file.to_string_lossy().to_string(),
+            source: "local".to_string(),
+            origin: TrackOrigin::Local,
+            cache_status: CacheStatus::Cached,
+            file: Some(file.to_path_buf()),
+            ..track_with_id(id)
+        }
+    }
+
+    /// Every document written before local media existed carries none of the three
+    /// new fields, and must keep loading as exactly what it was: a remote audio
+    /// track that resumes where it was left.
+    #[test]
+    fn a_document_without_the_new_fields_is_a_remote_resumable_audio_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path()).expect("mkdir");
+        std::fs::write(
+            dir.path().join("bandcamp-min001.toml"),
+            r#"
+id = "bandcamp:min001"
+url = "https://example.com/minimal"
+source = "bandcamp.com"
+title = "Minimal Track"
+artist = "Minimal Artist"
+channel = "MinChannel"
+duration = 120
+cache_status = "streaming"
+last_position = 0
+added_at = "2025-06-01T08:00:00Z"
+"#,
+        )
+        .expect("write");
+
+        let lib = Library::load(dir.path()).expect("load");
+        let got = lib.get("bandcamp:min001").expect("track present");
+        assert_eq!(got.origin, TrackOrigin::Remote);
+        assert_eq!(got.media, MediaKind::Audio);
+        assert!(got.resume, "resuming is the default, not opting in");
+    }
+
+    #[test]
+    fn origin_media_and_resume_survive_a_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let video = dir.path().join("clip.mkv");
+        std::fs::write(&video, b"video").expect("write video");
+
+        let mut track = local_track("local:deadbeef", &video);
+        track.media = MediaKind::Video;
+        track.resume = false;
+        write_track(dir.path(), track);
+
+        let reloaded = Library::load(dir.path()).expect("reload");
+        let got = reloaded.get("local:deadbeef").expect("present");
+        assert_eq!(got.origin, TrackOrigin::Local);
+        assert_eq!(got.media, MediaKind::Video);
+        assert!(!got.resume);
+    }
+
+    /// An unplugged drive or a file moved behind trovers' back. The row stays —
+    /// `Missing` is what lets the UI say so instead of silently dropping it.
+    #[test]
+    fn load_marks_a_local_track_whose_file_is_gone_as_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let track = local_track("local:deadbeef", &dir.path().join("gone.flac"));
+        write_track(dir.path(), track);
+
+        let reloaded = Library::load(dir.path()).expect("reload");
+        let got = reloaded.get("local:deadbeef").expect("present");
+        assert_eq!(got.cache_status, CacheStatus::Missing);
+        assert!(
+            got.file.is_some(),
+            "the path must be kept — it is how the row heals when the drive is back"
+        );
+    }
+
+    /// The other half of the same behaviour: remounting the drive is all it takes.
+    #[test]
+    fn load_heals_a_missing_local_track_once_its_file_is_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audio = dir.path().join("back-again.flac");
+        let mut track = local_track("local:deadbeef", &audio);
+        track.cache_status = CacheStatus::Missing;
+        write_track(dir.path(), track);
+        std::fs::write(&audio, b"audio").expect("write audio");
+
+        let reloaded = Library::load(dir.path()).expect("reload");
+        assert_eq!(
+            reloaded
+                .get("local:deadbeef")
+                .expect("present")
+                .cache_status,
+            CacheStatus::Cached
+        );
+    }
+
+    #[test]
+    fn load_keeps_a_local_track_whose_file_is_present_cached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audio = dir.path().join("present.flac");
+        std::fs::write(&audio, b"audio").expect("write audio");
+        write_track(dir.path(), local_track("local:deadbeef", &audio));
+
+        let reloaded = Library::load(dir.path()).expect("reload");
+        let got = reloaded.get("local:deadbeef").expect("present");
+        assert_eq!(got.cache_status, CacheStatus::Cached);
+        assert_eq!(got.file.as_deref(), Some(audio.as_path()));
+    }
+
+    /// A local track's file is the only copy there is. Downgrading it to
+    /// `Streaming` the way a remote row is downgraded would promise a stream that
+    /// cannot exist, so a local row with no file is `Missing`.
+    #[test]
+    fn load_never_downgrades_a_local_track_to_streaming() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut track = local_track("local:deadbeef", &dir.path().join("gone.flac"));
+        track.file = None;
+        write_track(dir.path(), track);
+
+        let reloaded = Library::load(dir.path()).expect("reload");
+        assert_eq!(
+            reloaded
+                .get("local:deadbeef")
+                .expect("present")
+                .cache_status,
+            CacheStatus::Missing
+        );
+    }
+
+    /// `Missing` says "the only copy is gone", which is never true of a remote
+    /// track — that one can always be streamed again.
+    #[test]
+    fn load_turns_a_missing_remote_track_back_into_streaming() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut track = track_with_id("youtube:abc");
+        track.cache_status = CacheStatus::Missing;
+        write_track(dir.path(), track);
+
+        let reloaded = Library::load(dir.path()).expect("reload");
+        assert_eq!(
+            reloaded.get("youtube:abc").expect("present").cache_status,
+            CacheStatus::Streaming
         );
     }
 

@@ -2217,7 +2217,7 @@ mod tests {
     // ── Task 2: track moving between playlists ────────────────────────────────
 
     fn make_track(id: &str, title: &str) -> crate::library::Track {
-        use crate::library::CacheStatus;
+        use crate::library::{CacheStatus, MediaKind, TrackOrigin};
         crate::library::Track {
             url: format!("https://example.com/{id}"),
             source: "youtube.com".to_string(),
@@ -2233,6 +2233,9 @@ mod tests {
             user_title: None,
             user_artist: None,
             added_at: chrono::Utc::now(),
+            origin: TrackOrigin::Remote,
+            media: MediaKind::Audio,
+            resume: true,
         }
     }
 

@@ -24,6 +24,40 @@ pub enum CacheStatus {
     /// `Downloading`, never `Failed`. Cleared only by a fresh download,
     /// automatic (re-adding the track) or manual (the recache hotkey).
     Failed,
+    /// A local track whose file is not there: an unplugged drive, a file moved
+    /// or renamed behind trovers' back. Only ever set on `TrackOrigin::Local`,
+    /// because it means "the only copy is gone" — a remote track can always be
+    /// streamed again. The row stays and the recorded path is kept, so
+    /// `Library::load` heals it back to `Cached` the moment the file reappears.
+    Missing,
+}
+
+/// Where a track's audio comes from.
+///
+/// The distinction earns its keep in exactly two places, and both matter:
+/// deleting a row must never delete a *user's* file, and a local file that has
+/// gone is `Missing` rather than something to stream.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackOrigin {
+    /// Fetched from a URL by yt-dlp, cached under `audio/`. The only kind that
+    /// existed before local folders, hence the default.
+    #[default]
+    Remote,
+    /// A file the user already had. trovers plays it where it sits and never
+    /// writes to or deletes it.
+    Local,
+}
+
+/// Whether a track needs a video window. Decided by ffprobe when it is on PATH
+/// (an `.mkv` with no video stream is audio), otherwise guessed from the
+/// extension.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    #[default]
+    Audio,
+    Video,
 }
 
 /// One track, as stored in its own document. The unit playlists reference by id
@@ -47,6 +81,23 @@ pub struct Track {
     pub user_title: Option<String>,
     pub user_artist: Option<String>,
     pub added_at: DateTime<Utc>,
+    /// The three below are `default`ed so every document written before local
+    /// media existed loads as what it is: a remote audio track that resumes.
+    #[serde(default)]
+    pub origin: TrackOrigin,
+    #[serde(default)]
+    pub media: MediaKind,
+    /// Whether to pick up from `last_position` rather than always starting at 0.
+    /// Recording the position is the point of the whole design, so this is on
+    /// unless the user turns it off for a particular track.
+    #[serde(default = "resume_by_default")]
+    pub resume: bool,
+}
+
+/// `serde(default)` for `Track::resume`. `bool`'s own default is `false`, which
+/// is the wrong way round here.
+fn resume_by_default() -> bool {
+    true
 }
 
 impl Track {
@@ -246,11 +297,22 @@ fn sanitize(s: &str) -> String {
 
 /// Bring a freshly read document's `cache_status` back in line with reality.
 ///
+/// The two origins have nothing in common here, so they are handled apart: a
+/// remote track's recorded status is mostly trustworthy and only needs crash
+/// recovery, while a local track's status is entirely a function of whether the
+/// user's file is where it was.
+fn repair_cache_status(track: &mut Track) {
+    match track.origin {
+        TrackOrigin::Remote => repair_remote(track),
+        TrackOrigin::Local => repair_local(track),
+    }
+}
+
 /// `Downloading` is crash recovery: no download survives a restart, so a document
 /// still claiming one would spin forever. A `Cached` track whose file has gone
 /// falls back to streaming rather than failing to play. `Failed` is deliberately
 /// left alone — it is a real terminal state, not a crash artifact.
-fn repair_cache_status(track: &mut Track) {
+fn repair_remote(track: &mut Track) {
     match track.cache_status {
         CacheStatus::Downloading => track.cache_status = CacheStatus::Streaming,
         CacheStatus::Cached => {
@@ -260,8 +322,25 @@ fn repair_cache_status(track: &mut Track) {
                 track.file = None;
             }
         }
+        // `Missing` is a local track's state and says "the only copy is gone",
+        // which is never true here. Reaching this means a hand-edited document.
+        CacheStatus::Missing => track.cache_status = CacheStatus::Streaming,
         CacheStatus::Streaming | CacheStatus::Failed => {}
     }
+}
+
+/// A local track has exactly two states and the filesystem decides which, every
+/// launch: the file is there (`Cached`) or it is not (`Missing`). Nothing else is
+/// reachable — there is no download to crash mid-way and no stream to fall back
+/// on. The recorded path is kept either way, which is what lets a row heal itself
+/// when a drive is plugged back in.
+fn repair_local(track: &mut Track) {
+    let exists = track.file.as_ref().is_some_and(|p| p.exists());
+    track.cache_status = if exists {
+        CacheStatus::Cached
+    } else {
+        CacheStatus::Missing
+    };
 }
 
 /// The short, stable name for a track's origin platform, derived from a
@@ -348,6 +427,11 @@ impl LegacyTrack {
             user_title: self.user_title,
             user_artist: self.user_artist,
             added_at: self.added_at,
+            // Everything the old format could hold was a remote audio track that
+            // resumed, so these are not guesses.
+            origin: TrackOrigin::Remote,
+            media: MediaKind::Audio,
+            resume: true,
         }
     }
 }

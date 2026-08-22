@@ -282,6 +282,10 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     CacheStatus::Streaming => ("◌", None),
                     CacheStatus::Downloading => ("⟳", Some(GOLD)),
                     CacheStatus::Failed => ("✕", Some(ERROR_RED)),
+                    // Dim rather than red: the file being on an unplugged drive
+                    // is not an error the user has to act on, and it heals by
+                    // itself on the next launch once the drive is back.
+                    CacheStatus::Missing => ("⊘", Some(TEXT_DIM)),
                 }
             };
             let status_span = match status_color {
@@ -576,6 +580,7 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
             CacheStatus::Streaming => CacheState::Streaming,
             CacheStatus::Downloading => CacheState::Downloading(track_progress()),
             CacheStatus::Failed => CacheState::Failed,
+            CacheStatus::Missing => CacheState::Missing,
         }
     };
 
@@ -607,6 +612,8 @@ pub(crate) enum CacheState {
     Downloading(f64),
     /// Every retry attempt was exhausted. Recoverable with the recache key.
     Failed,
+    /// A local file that is not where it was recorded.
+    Missing,
 }
 
 /// Build the integrated playback bar line for row 3 of the now-playing area.
@@ -629,6 +636,7 @@ pub(crate) fn build_playback_bar_line<'a>(
         CacheState::Cached => ("◈ Cached", SEA_GREEN),
         CacheState::Streaming => ("◌ Stream", TEXT_DIM),
         CacheState::Failed => ("✕ Failed", ERROR_RED),
+        CacheState::Missing => ("⊘ No file", TEXT_DIM),
         CacheState::Downloading(_) => unreachable!("Downloading handled above"),
     };
 

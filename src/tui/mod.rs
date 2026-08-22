@@ -7,7 +7,7 @@ mod ui_test;
 use crate::cache;
 use crate::config::{AudioQuality, Config};
 use crate::library::{self, Library};
-use crate::library::{CacheStatus, Track};
+use crate::library::{CacheStatus, MediaKind, Track, TrackOrigin};
 use crate::player::{self, Player};
 use crate::playlist::{self, LoopMode, Playlist};
 use crate::ytdlp::{self, TrackMeta};
@@ -1008,6 +1008,9 @@ impl App {
                         user_title: None,
                         user_artist: None,
                         added_at: Utc::now(),
+                        origin: TrackOrigin::Remote,
+                        media: MediaKind::Audio,
+                        resume: true,
                     };
                     if let Err(e) = self.library.upsert(track) {
                         error!(err = %e, id = %id, "failed to write the track document");
