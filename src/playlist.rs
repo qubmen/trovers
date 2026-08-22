@@ -53,6 +53,20 @@ pub struct Playlist {
     /// is what makes an album rescannable.
     #[serde(default)]
     pub source_folder: Option<PathBuf>,
+    /// Whether this album's rows are folded away in its parent's track list.
+    ///
+    /// Folded by default, which is what an album file written before this field
+    /// existed loads as: a folder of two hundred files should arrive as one row
+    /// and open when asked. A normal playlist carries the field and ignores it —
+    /// cheaper than a second struct for one bool.
+    #[serde(default = "collapsed_by_default")]
+    pub collapsed: bool,
+}
+
+/// `#[serde(default)]` on a `bool` means `false`; an absent `collapsed` means
+/// folded, so it needs a default of its own.
+fn collapsed_by_default() -> bool {
+    true
 }
 
 /// A playlist as the sidebar needs it: enough to draw and address it, without
@@ -169,6 +183,7 @@ impl Playlist {
             kind: PlaylistKind::Normal,
             parent: None,
             source_folder: None,
+            collapsed: collapsed_by_default(),
         }
     }
 
@@ -235,44 +250,26 @@ impl Playlist {
     }
 }
 
-/// Playlist entries in display order, each paired with its indent level.
+/// The playlists the sidebar lists, alphabetically.
 ///
-/// Top-level playlists come alphabetically, each immediately followed by its own
-/// albums, also alphabetically. Only an album nests, and only under a *normal*
-/// playlist that is actually present — which keeps the tree two deep and gives
-/// every broken link the same harmless answer: an album whose parent was deleted,
-/// or which names another album (or itself), comes back as a top-level row.
+/// Everything except an album that some *normal* playlist actually claims: that
+/// one is drawn as a collapsible group inside its parent's track list instead,
+/// where there is room for its name (ADR-019).
 ///
-/// Reorders rows; never adds or drops one.
-pub fn nested_order(entries: &[PlaylistEntry]) -> Vec<(&PlaylistEntry, usize)> {
-    let can_parent = |name: &str| {
-        entries
-            .iter()
-            .any(|e| e.name == name && e.kind == PlaylistKind::Normal)
+/// An album whose parent is gone — deleted, or naming another album, or itself —
+/// stays here. With albums out of the sidebar it is the only way left to reach one,
+/// so every broken link gets the same harmless answer: a top-level row.
+pub fn sidebar_entries(entries: &[PlaylistEntry]) -> Vec<&PlaylistEntry> {
+    let claimed = |entry: &PlaylistEntry| {
+        entry.kind == PlaylistKind::Album
+            && entry.parent.as_ref().is_some_and(|parent| {
+                entries
+                    .iter()
+                    .any(|e| &e.name == parent && e.kind == PlaylistKind::Normal)
+            })
     };
-    let parent_of = |entry: &PlaylistEntry| -> Option<String> {
-        if entry.kind != PlaylistKind::Album {
-            return None;
-        }
-        entry.parent.clone().filter(|p| can_parent(p))
-    };
-
-    let mut sorted: Vec<&PlaylistEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut rows = Vec::with_capacity(sorted.len());
-    for entry in &sorted {
-        // Anything with a real parent is emitted below that parent instead.
-        if parent_of(entry).is_some() {
-            continue;
-        }
-        rows.push((*entry, 0));
-        for child in &sorted {
-            if parent_of(child).as_deref() == Some(entry.name.as_str()) {
-                rows.push((*child, 1));
-            }
-        }
-    }
+    let mut rows: Vec<&PlaylistEntry> = entries.iter().filter(|e| !claimed(e)).collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
     rows
 }
 

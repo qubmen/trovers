@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::playlist::{nested_order, LoopMode, Playlist, PlaylistEntry, PlaylistKind};
+    use crate::playlist::{sidebar_entries, LoopMode, Playlist, PlaylistEntry, PlaylistKind};
     use std::path::{Path, PathBuf};
 
     fn playlist(name: &str) -> Playlist {
@@ -15,6 +15,7 @@ mod tests {
             kind: PlaylistKind::Normal,
             parent: None,
             source_folder: None,
+            collapsed: true,
         }
     }
 
@@ -34,11 +35,12 @@ mod tests {
         path
     }
 
-    /// Name and depth of each row, which is the whole of what the sidebar needs.
-    fn shape(entries: &[PlaylistEntry]) -> Vec<(&str, usize)> {
-        nested_order(entries)
+    /// The name of each sidebar row, which is the whole of what the sidebar needs
+    /// now that albums are drawn inside their parent's track list instead.
+    fn shape(entries: &[PlaylistEntry]) -> Vec<&str> {
+        sidebar_entries(entries)
             .into_iter()
-            .map(|(entry, depth)| (entry.name.as_str(), depth))
+            .map(|entry| entry.name.as_str())
             .collect()
     }
 
@@ -57,6 +59,42 @@ mod tests {
 
     fn album(name: &str, parent: &str) -> PlaylistEntry {
         entry(name, PlaylistKind::Album, Some(parent))
+    }
+
+    // ── collapsed ─────────────────────────────────────────────────────────
+
+    /// Folded is the useful default and also the safe one: an album file written
+    /// before this field existed must not unfold two hundred rows into the
+    /// playlist the user was looking at.
+    #[test]
+    fn a_playlist_file_without_a_collapsed_key_loads_folded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Ultra 2026.toml");
+        std::fs::write(
+            &path,
+            r#"
+name = "Ultra 2026"
+created = "2026-04-01T12:06:59Z"
+loop_mode = "none"
+tracks = []
+kind = "album"
+parent = "Live Sets"
+"#,
+        )
+        .expect("write");
+
+        assert!(Playlist::load(&path).expect("load").collapsed);
+    }
+
+    #[test]
+    fn a_collapse_toggle_survives_a_save_and_a_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Ultra 2026.toml");
+        let mut pl = playlist("Ultra 2026");
+        pl.collapsed = false;
+        pl.save(&path).expect("save");
+
+        assert!(!Playlist::load(&path).expect("load").collapsed);
     }
 
     // ── the new fields ────────────────────────────────────────────────────
@@ -189,69 +227,57 @@ tracks = ["youtube:vK2io4J708A"]
         assert_eq!(entries[0].parent, None);
     }
 
-    // ── nested_order ──────────────────────────────────────────────────────
+    // ── sidebar_entries ───────────────────────────────────────────────────
 
+    /// An album with a live parent is shown inside that parent's track list, so
+    /// listing it in the sidebar too would be saying the same thing twice — in the
+    /// one panel with no room to say it.
     #[test]
-    fn nested_order_puts_each_album_under_its_parent() {
+    fn sidebar_entries_hides_an_album_that_has_a_live_parent() {
         let entries = vec![
             album("Ultra 2026", "Live Sets"),
             normal("Ambient"),
             normal("Live Sets"),
         ];
-        assert_eq!(
-            shape(&entries),
-            vec![("Ambient", 0), ("Live Sets", 0), ("Ultra 2026", 1)]
-        );
+        assert_eq!(shape(&entries), vec!["Ambient", "Live Sets"]);
     }
 
+    /// Deleting a playlist leaves its albums on disk. The sidebar is now the only
+    /// route to one whose parent is gone, so it must keep listing it.
     #[test]
-    fn nested_order_sorts_the_albums_under_one_parent_by_name() {
-        let entries = vec![
-            album("Zurich", "Live Sets"),
-            album("Amsterdam", "Live Sets"),
-            normal("Live Sets"),
-        ];
-        assert_eq!(
-            shape(&entries),
-            vec![("Live Sets", 0), ("Amsterdam", 1), ("Zurich", 1)]
-        );
-    }
-
-    /// Deleting a playlist leaves its albums on disk. They must still be
-    /// reachable — as top-level rows — rather than disappearing with the parent.
-    #[test]
-    fn nested_order_shows_an_orphaned_album_at_the_top_level() {
+    fn sidebar_entries_keeps_an_orphaned_album() {
         let entries = vec![normal("Ambient"), album("Ultra 2026", "Gone")];
-        assert_eq!(shape(&entries), vec![("Ambient", 0), ("Ultra 2026", 0)]);
+        assert_eq!(shape(&entries), vec!["Ambient", "Ultra 2026"]);
     }
 
-    /// Two levels only. An album naming another album as its parent would be a
-    /// third, so it is treated as unparented instead of nested deeper.
+    /// Two levels only. An album naming another album is not drawn inside it, so
+    /// the sidebar has to keep it reachable.
     #[test]
-    fn nested_order_does_not_nest_an_album_under_an_album() {
+    fn sidebar_entries_keeps_an_album_parented_to_an_album() {
         let entries = vec![
             normal("Live Sets"),
             album("Ultra 2026", "Live Sets"),
             album("Day Two", "Ultra 2026"),
         ];
-        assert_eq!(
-            shape(&entries),
-            vec![("Day Two", 0), ("Live Sets", 0), ("Ultra 2026", 1)]
-        );
+        assert_eq!(shape(&entries), vec!["Day Two", "Live Sets"]);
     }
 
-    /// An album claiming itself as its parent cannot be placed under itself —
-    /// and must not vanish or loop.
+    /// An album claiming itself as its parent must not vanish or loop.
     #[test]
-    fn nested_order_survives_an_album_that_is_its_own_parent() {
+    fn sidebar_entries_survives_an_album_that_is_its_own_parent() {
         let entries = vec![album("Ultra 2026", "Ultra 2026")];
-        assert_eq!(shape(&entries), vec![("Ultra 2026", 0)]);
+        assert_eq!(shape(&entries), vec!["Ultra 2026"]);
     }
 
-    /// The invariant behind every case above: nesting reorders rows, it never
-    /// adds or loses one.
     #[test]
-    fn nested_order_lists_every_entry_exactly_once() {
+    fn sidebar_entries_is_sorted_by_name() {
+        let entries = vec![normal("Rock"), normal("Ambient"), normal("Jazz")];
+        assert_eq!(shape(&entries), vec!["Ambient", "Jazz", "Rock"]);
+    }
+
+    /// The invariant: it filters and sorts, and never duplicates a row.
+    #[test]
+    fn sidebar_entries_lists_every_row_it_keeps_exactly_once() {
         let entries = vec![
             album("Ultra 2026", "Live Sets"),
             normal("Live Sets"),
@@ -259,11 +285,6 @@ tracks = ["youtube:vK2io4J708A"]
             normal("Ambient"),
             album("Amsterdam", "Live Sets"),
         ];
-        let mut names: Vec<&str> = shape(&entries).into_iter().map(|(name, _)| name).collect();
-        names.sort_unstable();
-        assert_eq!(
-            names,
-            vec!["Ambient", "Amsterdam", "Live Sets", "Orphan", "Ultra 2026"]
-        );
+        assert_eq!(shape(&entries), vec!["Ambient", "Live Sets", "Orphan"]);
     }
 }

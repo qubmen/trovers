@@ -58,11 +58,9 @@ pub enum SidebarItem {
     Playlist {
         name: String,
         path: PathBuf,
-        /// Indent level: 0 for a top-level playlist, 1 for an album under one.
-        depth: usize,
-        /// Whether to mark the row as an album. Not the same question as `depth`:
-        /// an album whose parent is gone renders at the top level and is still an
-        /// album.
+        /// Whether to mark the row as an album. Only an *orphaned* album is
+        /// listed here at all — one with a live parent is drawn inside that
+        /// parent's track list — but it is still an album and says so.
         is_album: bool,
     },
     Separator,
@@ -965,11 +963,10 @@ impl App {
         let mut items = Vec::new();
         items.push(SidebarItem::PlaylistsHeader);
         if self.playlists_expanded {
-            for (entry, depth) in playlist::nested_order(&self.available_playlists) {
+            for entry in playlist::sidebar_entries(&self.available_playlists) {
                 items.push(SidebarItem::Playlist {
                     name: entry.name.clone(),
                     path: entry.path.clone(),
-                    depth,
                     is_album: entry.kind == PlaylistKind::Album,
                 });
             }

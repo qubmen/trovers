@@ -25,6 +25,8 @@ mod tests {
             kind: PlaylistKind::Album,
             parent: Some("Live Sets".to_string()),
             source_folder: Some(root.to_path_buf()),
+            // A fresh import arrives open, so what it brought in is visible.
+            collapsed: false,
         }
     }
 

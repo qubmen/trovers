@@ -21,6 +21,7 @@ mod tests {
             kind: crate::playlist::PlaylistKind::Normal,
             parent: None,
             source_folder: None,
+            collapsed: true,
         }
     }
 
@@ -3115,17 +3116,12 @@ mod tests {
 
     // ── Albums in the sidebar ─────────────────────────────────────────────
 
-    /// Name, indent and album-ness of every playlist row in the sidebar.
-    fn sidebar_playlist_rows(app: &crate::tui::App) -> Vec<(String, usize, bool)> {
+    /// Name and album-ness of every playlist row in the sidebar.
+    fn sidebar_playlist_rows(app: &crate::tui::App) -> Vec<(String, bool)> {
         app.sidebar_items()
             .into_iter()
             .filter_map(|item| match item {
-                crate::tui::SidebarItem::Playlist {
-                    name,
-                    depth,
-                    is_album,
-                    ..
-                } => Some((name, depth, is_album)),
+                crate::tui::SidebarItem::Playlist { name, is_album, .. } => Some((name, is_album)),
                 _ => None,
             })
             .collect()
@@ -3144,8 +3140,10 @@ mod tests {
         }
     }
 
+    /// An album with a live parent is drawn inside that parent's track list, so
+    /// the sidebar leaves it out rather than repeating it in fourteen columns.
     #[test]
-    fn sidebar_indents_an_album_under_its_parent() {
+    fn sidebar_leaves_out_an_album_that_has_a_parent() {
         let mut app = make_app_with_playlists("Live Sets", &["Ambient", "Live Sets"]);
         app.available_playlists.push(album_entry(
             "Ultra 2026",
@@ -3156,16 +3154,15 @@ mod tests {
         assert_eq!(
             sidebar_playlist_rows(&app),
             vec![
-                ("Ambient".to_string(), 0, false),
-                ("Live Sets".to_string(), 0, false),
-                ("Ultra 2026".to_string(), 1, true),
+                ("Ambient".to_string(), false),
+                ("Live Sets".to_string(), false),
             ]
         );
     }
 
-    /// An album whose parent has been deleted is still an album, but it has
-    /// nothing left to sit under — so it becomes a top-level row rather than
-    /// disappearing from the sidebar.
+    /// An album whose parent has been deleted has no track list left to appear
+    /// in, so the sidebar is the only route to it. It stays listed — and still
+    /// says it is an album.
     #[test]
     fn sidebar_shows_an_orphaned_album_at_the_top_level() {
         let mut app = make_app_with_playlists("Ambient", &["Ambient"]);
@@ -3178,8 +3175,8 @@ mod tests {
         assert_eq!(
             sidebar_playlist_rows(&app),
             vec![
-                ("Ambient".to_string(), 0, false),
-                ("Ultra 2026".to_string(), 0, true),
+                ("Ambient".to_string(), false),
+                ("Ultra 2026".to_string(), true),
             ]
         );
     }
@@ -3225,11 +3222,9 @@ mod tests {
         );
         assert_eq!(
             sidebar_playlist_rows(&app),
-            vec![
-                ("Warehouse".to_string(), 0, false),
-                ("Ultra 2026".to_string(), 1, true),
-            ],
-            "and it must still render underneath it, without a relaunch"
+            vec![("Warehouse".to_string(), false)],
+            "and the sidebar must still leave it out, without a relaunch: it now \
+             belongs inside Warehouse's track list"
         );
     }
 
@@ -3280,10 +3275,10 @@ mod tests {
         assert_eq!(
             sidebar_playlist_rows(&app),
             vec![
-                ("Ambient".to_string(), 0, false),
-                ("Ultra 2026".to_string(), 0, true),
+                ("Ambient".to_string(), false),
+                ("Ultra 2026".to_string(), true),
             ],
-            "and it must still be reachable, now at the top level"
+            "and it must still be reachable, now that no track list holds it"
         );
     }
 

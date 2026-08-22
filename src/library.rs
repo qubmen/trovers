@@ -535,6 +535,8 @@ pub fn migrate(playlists_dir: &Path, tracks_dir: &Path) -> Result<Option<Migrati
             kind: crate::playlist::PlaylistKind::Normal,
             parent: None,
             source_folder: None,
+            // Meaningless on a normal playlist, and nothing here is one.
+            collapsed: true,
         };
         migrated.save(&pl.path)?;
     }
