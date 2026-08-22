@@ -7316,4 +7316,94 @@ tracks = []
         // user who removed it by hand must not take the download task down.
         clean_partial_downloads(std::path::Path::new("/nonexistent/trovers-audio"), "A");
     }
+
+    #[test]
+    fn known_youtube_blocking_errors_get_an_update_hint() {
+        use crate::ytdlp::blocked_by_youtube_hint;
+
+        let blocking_errors = [
+            "yt-dlp download exited with status exit status: 1: ERROR: unable to download video data: HTTP Error 403: Forbidden",
+            "ERROR: [youtube] d04frRhBx8A: Sign in to confirm you're not a bot",
+            "mweb client https formats require a GVS PO Token which was not provided. They will be skipped as they may yield HTTP Error 403.",
+            "WARNING: Only images are available for download. use --list-formats to see them",
+            "ERROR: [youtube] d04frRhBx8A: Requested format is not available. Use --list-formats for a list of available formats",
+        ];
+        for err in blocking_errors {
+            assert!(
+                blocked_by_youtube_hint(err).is_some(),
+                "expected a hint for: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_errors_get_no_youtube_hint() {
+        use crate::ytdlp::blocked_by_youtube_hint;
+
+        let unrelated_errors = [
+            "yt-dlp failed: ERROR: [generic] 'Last login: Tue Jul  7 22:00:27 on ttys000' is not a valid URL",
+            "network unreachable",
+            "boom",
+        ];
+        for err in unrelated_errors {
+            assert!(
+                blocked_by_youtube_hint(err).is_none(),
+                "expected no hint for: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn download_error_from_a_youtube_block_gets_an_update_hint_in_the_footer() {
+        use crate::tui::TaskMsg;
+
+        let mut app = make_app_with_playlists("Source", &["Source"]);
+        app.playlist.tracks.push(make_track("A", "Track A"));
+
+        app.handle_task_msg(TaskMsg::DownloadError {
+            video_id: "A".to_string(),
+            err: "yt-dlp download exited with status exit status: 1: ERROR: unable to download video data: HTTP Error 403: Forbidden".to_string(),
+        });
+
+        assert_eq!(
+            app.status_message.as_ref().map(|(m, _)| m.as_str()),
+            Some("Download failed — YouTube may have changed something — try updating yt-dlp"),
+        );
+    }
+
+    #[test]
+    fn download_error_from_an_unrelated_cause_keeps_the_plain_message() {
+        use crate::tui::TaskMsg;
+
+        let mut app = make_app_with_playlists("Source", &["Source"]);
+        app.playlist.tracks.push(make_track("A", "Track A"));
+
+        app.handle_task_msg(TaskMsg::DownloadError {
+            video_id: "A".to_string(),
+            err: "network unreachable".to_string(),
+        });
+
+        assert_eq!(
+            app.status_message.as_ref().map(|(m, _)| m.as_str()),
+            Some("Download failed"),
+        );
+    }
+
+    #[test]
+    fn player_error_from_a_youtube_block_gets_an_update_hint_in_the_footer() {
+        use crate::tui::TaskMsg;
+
+        let mut app = make_app_with_playlists("Source", &["Source"]);
+
+        app.handle_task_msg(TaskMsg::PlayerError {
+            video_id: "A".to_string(),
+            err: "WARNING: Only images are available for download. use --list-formats to see them"
+                .to_string(),
+        });
+
+        assert_eq!(
+            app.status_message.as_ref().map(|(m, _)| m.as_str()),
+            Some("Player error — YouTube may have changed something — try updating yt-dlp"),
+        );
+    }
 }

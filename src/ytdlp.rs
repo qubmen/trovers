@@ -357,6 +357,28 @@ pub(crate) fn find_downloaded_file(audio_dir: &Path, video_id: &str) -> Option<P
         .cloned()
 }
 
+/// Substrings that show up in yt-dlp's stderr when YouTube itself is the
+/// obstacle — a changed signature scheme, a new bot check, a client that now
+/// needs a PO Token — rather than a local problem (network, disk, a bad URL).
+/// yt-dlp usually ships a fix within days of YouTube breaking something, so
+/// the hint points at updating it rather than anything to fix in trovers.
+const YOUTUBE_BLOCKING_SIGNATURES: [&str; 5] = [
+    "HTTP Error 403",
+    "Sign in to confirm you're not a bot",
+    "PO Token",
+    "Only images are available for download",
+    "Requested format is not available",
+];
+
+/// A short, user-facing hint when `err` looks like YouTube changed something
+/// on its end (rather than a local failure) — `None` otherwise.
+pub(crate) fn blocked_by_youtube_hint(err: &str) -> Option<&'static str> {
+    YOUTUBE_BLOCKING_SIGNATURES
+        .iter()
+        .any(|sig| err.contains(sig))
+        .then_some("YouTube may have changed something — try updating yt-dlp")
+}
+
 /// Extract the bare domain from a URL (e.g. "youtube.com" from "https://www.youtube.com/...").
 fn extract_domain(url: &str) -> String {
     url.trim_start_matches("https://")

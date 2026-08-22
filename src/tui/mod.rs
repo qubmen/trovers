@@ -1151,7 +1151,10 @@ impl App {
                     track.cache_status = CacheStatus::Failed;
                 });
                 self.clear_download_state(&video_id);
-                self.set_status("Download failed");
+                self.set_status(match ytdlp::blocked_by_youtube_hint(&err) {
+                    Some(hint) => format!("Download failed — {hint}"),
+                    None => "Download failed".to_string(),
+                });
             }
 
             TaskMsg::PlayerReady {
@@ -1176,7 +1179,10 @@ impl App {
 
             TaskMsg::PlayerError { video_id, err } => {
                 error!(video_id = %video_id, err = %err, "player failed to start");
-                self.set_status("Player error");
+                self.set_status(match ytdlp::blocked_by_youtube_hint(&err) {
+                    Some(hint) => format!("Player error — {hint}"),
+                    None => "Player error".to_string(),
+                });
             }
 
             TaskMsg::PlayerGone { generation } => {
