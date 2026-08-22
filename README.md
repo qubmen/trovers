@@ -79,9 +79,10 @@ Manage multiple playlists without leaving the keyboard:
 Point trovers at a folder and it becomes an **album** — a sub-list nested under
 the playlist you're looking at, holding everything in there that mpv can play.
 
-- **Import**: `F` in the track list (or sidebar → `+ Folder`) → type a path
-  (`~` works) → Enter. Subfolders are included; the album is named after the
-  folder.
+- **Import**: `F` in the track list (or sidebar → `+ Folder`) → type or paste a
+  path → Enter. Subfolders are included; the album is named after the folder.
+  Paste whatever your Mac gives you — a `file://` URL full of `%D0%9A` escapes, a
+  dragged path with `\ ` in it, quotes around the lot, or a plain `~/Music/…`.
 - **Rescan**: `R` on a linked album picks up files added since. New files land at
   the end, files that have vanished go dim (`⊘`) instead of disappearing, and
   **nothing is ever deleted or reshuffled**.

@@ -309,6 +309,26 @@ title/artist from the filename (`Artist - Title`, track-number prefixes
 stripped), and `duration` stays `0`, which the row shows as `--:--` and
 auto-advance already tolerates.
 
+**What counts as a path.** `library_import::path_from_input` is the one place
+typed text becomes a `PathBuf`, and it has to be forgiving, because "copy" on a
+folder does not put a path on the clipboard — it puts one of several *spellings*
+of one, and none of them is what `PathBuf::from` wants:
+
+| Pasted | Where it comes from |
+|---|---|
+| `file:///Users/me/Music/%D0%9A%D0%B8%D0%BD%D0%BE%20-%201988/` | macOS copy/drag — percent-encoded, so every space and every non-ASCII letter is an escape |
+| `/Users/me/Music/Group\ blood\ \(1988\)` | dragging a folder into a terminal |
+| `'/Users/me/Music/Group blood'` | a shell quoting a path with spaces |
+| `~/Music/Ultra` | typed by hand |
+
+Each of these silently failed `is_dir()` before, which showed up as a four-second
+footer message and read as nothing happening at all. Two rules keep the
+normalisation from corrupting a real name: **percent-decoding happens only for a
+`file://` URL** (a `%` in a plain path is a literal `%`), and a backslash is
+dropped **only before a character a shell actually escapes** (so `AC\DC` keeps
+its backslash). Decoding is byte-wise before UTF-8, because one Cyrillic letter
+is two escapes.
+
 **Import and rescan.** `F` prompts for a folder and creates an album named after
 it, uniquified like any duplicate playlist name; `R` rescans the folder an album
 is linked to. A rescan **never deletes or reorders**: files already in the library
@@ -560,7 +580,7 @@ route flushes state and kills mpv.
 |-----|------------------------------------------------------|
 | `m` | Move selected track: open context menu with playlist targets |
 | `N` | Create new playlist (name input prompt)              |
-| `F` | Import a local folder as an album under the displayed playlist (path prompt, `~` expanded) |
+| `F` | Import a local folder as an album under the displayed playlist (path prompt; see "What counts as a path" below) |
 | `R` | Rescan the folder this album mirrors — new files are appended, vanished ones go `Missing`, nothing is deleted or reordered |
 
 In URL input mode (`a` key):
@@ -580,7 +600,7 @@ In URL input mode (`a` key):
 | Track context menu| `↑`/`↓` navigate · `Enter` confirm · `Esc` cancel |
 | Playlist rename   | type new name · `Enter` confirm · `Esc` cancel |
 | Playlist delete   | `y`/`Enter` confirm · `n`/`Esc` cancel |
-| Folder input      | type a path (`~` expanded) · `Enter` import · `Esc` cancel |
+| Folder input      | type or paste a path · `Enter` import · `Esc` cancel |
 
 ---
 

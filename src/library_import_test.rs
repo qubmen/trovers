@@ -2,8 +2,8 @@
 mod tests {
     use crate::library::{CacheStatus, Library, MediaKind, Track, TrackOrigin};
     use crate::library_import::{
-        album_name_for_folder, expand_tilde, merge_scan, scan_and_probe, unique_album_name,
-        ImportedFile,
+        album_name_for_folder, expand_tilde, merge_scan, path_from_input, scan_and_probe,
+        unique_album_name, ImportedFile,
     };
     use crate::library_scan::{local_id, ProbedMeta};
     use crate::playlist::{LoopMode, Playlist, PlaylistKind};
@@ -123,6 +123,106 @@ mod tests {
     #[test]
     fn expand_tilde_leaves_the_tilde_when_there_is_no_home_directory() {
         assert_eq!(expand_tilde("~/Music", None), PathBuf::from("~/Music"));
+    }
+
+    // ── path_from_input: what the clipboard actually hands over ────────────
+
+    #[test]
+    fn a_file_url_becomes_the_path_it_points_at() {
+        let home = Path::new("/Users/den");
+        assert_eq!(
+            path_from_input("file:///Users/den/Music/Ultra", Some(home)),
+            PathBuf::from("/Users/den/Music/Ultra")
+        );
+    }
+
+    /// The reported case: macOS puts a percent-encoded URL on the clipboard, so
+    /// every Cyrillic letter and every space arrives as an escape.
+    #[test]
+    fn a_file_url_is_percent_decoded() {
+        let home = Path::new("/Users/den");
+        assert_eq!(
+            path_from_input(
+                "file:///Users/den/Downloads/%D0%9A%D0%B8%D0%BD%D0%BE%20-%201988/",
+                Some(home)
+            ),
+            PathBuf::from("/Users/den/Downloads/Кино - 1988")
+        );
+    }
+
+    #[test]
+    fn a_file_url_may_name_localhost_as_its_host() {
+        let home = Path::new("/Users/den");
+        assert_eq!(
+            path_from_input("file://localhost/Users/den/Music/Ultra", Some(home)),
+            PathBuf::from("/Users/den/Music/Ultra")
+        );
+    }
+
+    /// The guard that keeps decoding safe: a `%` in a *path* is a literal `%`.
+    /// Only a `file://` URL is percent-encoded by definition.
+    #[test]
+    fn a_plain_path_is_never_percent_decoded() {
+        let home = Path::new("/Users/den");
+        assert_eq!(
+            path_from_input("/Users/den/Music/%D0%9A%20100%", Some(home)),
+            PathBuf::from("/Users/den/Music/%D0%9A%20100%")
+        );
+    }
+
+    /// A malformed escape is not an escape. `%` with nothing usable after it
+    /// stays as it is rather than eating the next character or panicking.
+    #[test]
+    fn an_incomplete_escape_in_a_url_survives_decoding() {
+        let home = Path::new("/Users/den");
+        assert_eq!(
+            path_from_input("file:///Users/den/Music/100%%2Fdone%2", Some(home)),
+            PathBuf::from("/Users/den/Music/100%/done%2")
+        );
+    }
+
+    /// Dragging a folder into a terminal escapes the spaces, and the escaping is
+    /// the shell's, not part of the name.
+    #[test]
+    fn a_shell_escaped_space_is_unescaped() {
+        let home = Path::new("/Users/den");
+        assert_eq!(
+            path_from_input("/Users/den/Music/Group\\ blood\\ \\(1988\\)", Some(home)),
+            PathBuf::from("/Users/den/Music/Group blood (1988)")
+        );
+    }
+
+    /// A backslash before something no shell escapes is part of the name, not
+    /// escaping — unescaping everything would quietly rewrite it.
+    #[test]
+    fn a_backslash_that_is_part_of_a_name_survives() {
+        let home = Path::new("/Users/den");
+        assert_eq!(
+            path_from_input("/Users/den/Music/AC\\DC", Some(home)),
+            PathBuf::from("/Users/den/Music/AC\\DC")
+        );
+    }
+
+    #[test]
+    fn surrounding_quotes_are_not_part_of_the_path() {
+        let home = Path::new("/Users/den");
+        assert_eq!(
+            path_from_input("'/Users/den/Music/Group blood'", Some(home)),
+            PathBuf::from("/Users/den/Music/Group blood")
+        );
+        assert_eq!(
+            path_from_input("\"/Users/den/Music/Group blood\"", Some(home)),
+            PathBuf::from("/Users/den/Music/Group blood")
+        );
+    }
+
+    #[test]
+    fn a_tilde_still_expands_through_the_same_door() {
+        let home = Path::new("/Users/den");
+        assert_eq!(
+            path_from_input("~/Music/Ultra", Some(home)),
+            PathBuf::from("/Users/den/Music/Ultra")
+        );
     }
 
     // ── naming the album ──────────────────────────────────────────────────

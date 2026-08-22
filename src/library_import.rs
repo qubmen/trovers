@@ -45,6 +45,113 @@ pub struct ImportReport {
     pub missing: usize,
 }
 
+/// Characters a shell escapes with a backslash, and which therefore arrive
+/// escaped when a folder is dragged into a terminal. Anything else after a
+/// backslash is taken literally — the backslash is then part of the name.
+const SHELL_ESCAPABLE: &[char] = &[
+    ' ', '\t', '(', ')', '[', ']', '{', '}', '\'', '"', '`', '$', '&', ';', '|', '<', '>', '*',
+    '?', '!', '#', '~', '\\',
+];
+
+/// Turn what the user typed or pasted into a path on this filesystem.
+///
+/// "Copy" on a folder does not put a path on the clipboard — it puts one of
+/// several *spellings* of a path, and none of them is what `PathBuf::from` wants:
+/// macOS hands over a percent-encoded `file://` URL, a terminal escapes the
+/// spaces, and a shell wraps the whole thing in quotes. Every one of those
+/// silently fails to be a directory, so they are all normalised here, in the one
+/// place typed text becomes a path.
+pub fn path_from_input(input: &str, home: Option<&Path>) -> PathBuf {
+    let trimmed = strip_quotes(input.trim());
+    match file_url_path(trimmed) {
+        // A `file://` URL is percent-encoded by definition and absolute by
+        // construction: no unescaping, no tilde.
+        Some(decoded) => PathBuf::from(decoded),
+        None => expand_tilde(&unescape_shell(trimmed), home),
+    }
+}
+
+/// The path half of a `file://` URL, percent-decoded — or `None` when the input
+/// is not one, which is what keeps a literal `%` in an ordinary path literal.
+///
+/// A host other than `localhost` is left in place rather than guessed at: a
+/// remote `file://host/share` is not something trovers can open, and turning it
+/// into a plausible-looking local path would be worse than failing.
+fn file_url_path(input: &str) -> Option<String> {
+    let rest = input.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    Some(percent_decode(rest))
+}
+
+/// Decode `%XX` escapes. Bytes first, then UTF-8: one Cyrillic letter is two
+/// escapes, so decoding per character would produce mojibake.
+///
+/// An escape that is not one — a trailing `%`, `%zz` — is left exactly as it is.
+/// Hand-rolled for the same reason as the FNV-1a in `library_scan`: it is shorter
+/// than the dependency.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Drop the backslashes a shell would have eaten. Only before a character a
+/// shell actually escapes, so a backslash that is part of a name survives.
+fn unescape_shell(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some(next) if SHELL_ESCAPABLE.contains(&next) => out.push(next),
+            Some(next) => {
+                out.push('\\');
+                out.push(next);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Unwrap one matching pair of surrounding quotes — what a shell adds around a
+/// path with spaces in it.
+fn strip_quotes(input: &str) -> &str {
+    for quote in ['\'', '"'] {
+        if let Some(inner) = input
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    input
+}
+
 /// Resolve a leading `~` against `home`.
 ///
 /// Only a bare `~` or a `~/` prefix: `~alice` is another user's home, which only

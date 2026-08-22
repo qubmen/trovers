@@ -637,8 +637,10 @@ fn handle_folder_input(app: &mut App, key: KeyEvent) -> Result<Action> {
             app.input_buf.clear();
             app.input_mode = InputMode::Normal;
             if !typed.is_empty() {
-                // `~` is what a user types; only a shell expands it for free.
-                let root = library_import::expand_tilde(&typed, dirs::home_dir().as_deref());
+                // A pasted path arrives in whichever spelling the clipboard had
+                // — a `file://` URL, escaped spaces, quotes — and none of them is
+                // a path until `path_from_input` says so.
+                let root = library_import::path_from_input(&typed, dirs::home_dir().as_deref());
                 app.import_folder(root);
             }
         }
