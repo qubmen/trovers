@@ -50,6 +50,12 @@ async fn main() -> Result<()> {
     deps::check()?;
     cache::ensure_dirs()?;
 
+    // Before any playlist is read: playlists written by an older trovers embed
+    // their tracks, and everything downstream expects id lists. Detection is by
+    // shape, so this is a no-op on every launch after the first.
+    let migration = library::migrate(&cache::playlists_dir(), &cache::tracks_dir())
+        .context("failed to migrate playlists to the track library")?;
+
     // Clean up after any previous instance that was killed hard enough to skip
     // its own teardown, so a stranded mpv is not still playing over this one.
     player::reap_orphaned_players().await;
@@ -131,6 +137,17 @@ async fn main() -> Result<()> {
         playlist_path,
         library,
     );
+
+    // Tell the user a migration happened, and where the backup went — the only
+    // moment they get to notice before the status line moves on.
+    if let Some(report) = migration {
+        app.set_status(format!(
+            "Migrated {} playlist(s), {} track(s) · backup: {}",
+            report.playlists,
+            report.tracks,
+            report.backup.display()
+        ));
+    }
 
     // If a URL was provided on CLI, queue it for fetch immediately
     if let Some(url) = cli.url {

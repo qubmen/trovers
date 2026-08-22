@@ -367,4 +367,303 @@ added_at = "2025-06-01T08:00:00Z"
             CacheStatus::Failed
         );
     }
+
+    // ── migrate ───────────────────────────────────────────────────────────
+
+    /// A `playlists/` and a `tracks/` directory side by side, as `main.rs` hands
+    /// them to `migrate`.
+    fn migration_dirs() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let playlists = dir.path().join("playlists");
+        let tracks = dir.path().join("tracks");
+        std::fs::create_dir_all(&playlists).expect("mkdir playlists");
+        (dir, playlists, tracks)
+    }
+
+    /// A playlist file in the old format: track data embedded in `[[tracks]]`,
+    /// each row carrying its own `video_id`.
+    fn write_legacy_playlist(playlists: &std::path::Path, name: &str, video_ids: &[&str]) {
+        let mut raw = format!(
+            "name = \"{name}\"\n\
+             created = \"2025-06-01T08:00:00Z\"\n\
+             loop_mode = \"playlist\"\n\
+             shuffle = true\n\
+             current_track = \"{}\"\n",
+            video_ids.first().copied().unwrap_or("")
+        );
+        for (i, video_id) in video_ids.iter().enumerate() {
+            raw.push_str(&format!(
+                "\n[[tracks]]\n\
+                 url = \"https://www.youtube.com/watch?v={video_id}\"\n\
+                 source = \"youtube.com\"\n\
+                 title = \"Track {video_id}\"\n\
+                 artist = \"Artist\"\n\
+                 channel = \"Channel\"\n\
+                 duration = 100\n\
+                 video_id = \"{video_id}\"\n\
+                 cache_status = \"streaming\"\n\
+                 last_position = {}\n\
+                 added_at = \"2025-06-01T08:00:00Z\"\n",
+                (i as u64 + 1) * 10
+            ));
+        }
+        std::fs::write(playlists.join(format!("{name}.toml")), raw).expect("write legacy playlist");
+    }
+
+    /// The single `playlists.backup-*` directory beside `playlists`.
+    fn backup_dir_beside(playlists: &std::path::Path) -> std::path::PathBuf {
+        let parent = playlists.parent().expect("parent");
+        let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(parent)
+            .expect("read parent")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("playlists.backup-"))
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "exactly one backup: {found:?}");
+        found.remove(0)
+    }
+
+    #[test]
+    fn migrate_rewrites_a_legacy_playlist_as_ids_and_writes_the_documents() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        write_legacy_playlist(&playlists, "Live Sets", &["vK2io4J708A", "abc123"]);
+
+        let report = crate::library::migrate(&playlists, &tracks)
+            .expect("migrate")
+            .expect("something to migrate");
+        assert_eq!(report.playlists, 1);
+        assert_eq!(report.tracks, 2);
+
+        let pl = crate::playlist::Playlist::load(&playlists.join("Live Sets.toml")).expect("load");
+        assert_eq!(
+            pl.tracks,
+            vec![
+                "youtube:vK2io4J708A".to_string(),
+                "youtube:abc123".to_string()
+            ],
+            "the running order must survive verbatim"
+        );
+        assert_eq!(
+            pl.current_track.as_deref(),
+            Some("youtube:vK2io4J708A"),
+            "the cursor pointer was a bare video id and has to become a library id"
+        );
+        assert_eq!(pl.name, "Live Sets");
+        assert!(pl.shuffle, "the playlist's own settings must be preserved");
+        assert_eq!(pl.loop_mode, crate::playlist::LoopMode::Playlist);
+
+        let lib = Library::load(&tracks).expect("load library");
+        let first = lib.get("youtube:vK2io4J708A").expect("first document");
+        assert_eq!(first.title, "Track vK2io4J708A");
+        assert_eq!(
+            first.last_position, 10,
+            "a track's playback position is the whole point of keeping the data"
+        );
+        assert_eq!(lib.get("youtube:abc123").map(|t| t.last_position), Some(20));
+    }
+
+    /// The one that decides whether this is safe to run on every launch.
+    #[test]
+    fn migrate_is_nothing_to_do_the_second_time() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        write_legacy_playlist(&playlists, "Live Sets", &["vK2io4J708A"]);
+
+        crate::library::migrate(&playlists, &tracks).expect("first migrate");
+        let after_first = std::fs::read_to_string(playlists.join("Live Sets.toml")).expect("read");
+
+        let second = crate::library::migrate(&playlists, &tracks).expect("second migrate");
+        assert!(second.is_none(), "an id-list playlist is not legacy");
+        assert_eq!(
+            std::fs::read_to_string(playlists.join("Live Sets.toml")).expect("read"),
+            after_first,
+            "the second run must not touch the file"
+        );
+        backup_dir_beside(&playlists); // asserts there is still exactly one
+    }
+
+    #[test]
+    fn migrate_leaves_an_already_migrated_playlist_untouched() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        write_legacy_playlist(&playlists, "Legacy", &["vK2io4J708A"]);
+        let modern_raw = "name = \"Modern\"\n\
+                          created = \"2025-06-01T08:00:00Z\"\n\
+                          loop_mode = \"none\"\n\
+                          shuffle = false\n\
+                          tracks = [\"youtube:zzz\"]\n";
+        std::fs::write(playlists.join("Modern.toml"), modern_raw).expect("write modern");
+
+        let report = crate::library::migrate(&playlists, &tracks)
+            .expect("migrate")
+            .expect("the legacy one still needs migrating");
+        assert_eq!(report.playlists, 1, "only the legacy playlist counts");
+
+        assert_eq!(
+            std::fs::read_to_string(playlists.join("Modern.toml")).expect("read"),
+            modern_raw,
+            "a playlist already holding ids must be left byte-for-byte alone"
+        );
+        assert_eq!(
+            crate::playlist::Playlist::load(&playlists.join("Legacy.toml"))
+                .expect("load")
+                .tracks,
+            vec!["youtube:vK2io4J708A".to_string()]
+        );
+    }
+
+    /// The backup exists so a migration that goes wrong is recoverable, which
+    /// means it has to hold the *original* files, not the rewritten ones.
+    #[test]
+    fn migrate_backs_up_the_playlists_before_rewriting_them() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        write_legacy_playlist(&playlists, "Live Sets", &["vK2io4J708A"]);
+        let original = std::fs::read_to_string(playlists.join("Live Sets.toml")).expect("read");
+
+        let report = crate::library::migrate(&playlists, &tracks)
+            .expect("migrate")
+            .expect("something to migrate");
+
+        let backup = backup_dir_beside(&playlists);
+        assert_eq!(report.backup, backup);
+        assert_eq!(
+            std::fs::read_to_string(backup.join("Live Sets.toml")).expect("read backup"),
+            original,
+            "the backup must hold the embedded-track original"
+        );
+    }
+
+    /// The quirk the whole model change exists to fix: one video in two
+    /// playlists was two independent copies with two independent positions.
+    #[test]
+    fn migrate_gives_two_playlists_sharing_a_video_one_document() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        write_legacy_playlist(&playlists, "A", &["vK2io4J708A"]);
+        write_legacy_playlist(&playlists, "B", &["vK2io4J708A"]);
+
+        let report = crate::library::migrate(&playlists, &tracks)
+            .expect("migrate")
+            .expect("something to migrate");
+        assert_eq!(report.playlists, 2);
+        assert_eq!(report.tracks, 1, "the second sighting is not a new track");
+
+        assert_eq!(documents_in(&tracks).len(), 1);
+        for name in ["A", "B"] {
+            assert_eq!(
+                crate::playlist::Playlist::load(&playlists.join(format!("{name}.toml")))
+                    .expect("load")
+                    .tracks,
+                vec!["youtube:vK2io4J708A".to_string()],
+                "both playlists must reference the one document"
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_with_no_playlists_dir_is_nothing_to_do() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let migrated =
+            crate::library::migrate(&dir.path().join("playlists"), &dir.path().join("tracks"))
+                .expect("migrate");
+        assert!(migrated.is_none());
+    }
+
+    #[test]
+    fn migrate_of_an_empty_playlists_dir_is_nothing_to_do() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        assert!(crate::library::migrate(&playlists, &tracks)
+            .expect("migrate")
+            .is_none());
+    }
+
+    /// An unparseable playlist is left exactly as it is: migration cannot know
+    /// what it meant, and refusing to launch over it would be worse.
+    #[test]
+    fn migrate_skips_an_unparseable_playlist_and_migrates_the_rest() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        write_legacy_playlist(&playlists, "Good", &["vK2io4J708A"]);
+        std::fs::write(playlists.join("Broken.toml"), "this is not toml {{{").expect("write");
+
+        crate::library::migrate(&playlists, &tracks)
+            .expect("migrate")
+            .expect("the good one still migrates");
+
+        assert_eq!(
+            std::fs::read_to_string(playlists.join("Broken.toml")).expect("read"),
+            "this is not toml {{{"
+        );
+        assert_eq!(
+            crate::playlist::Playlist::load(&playlists.join("Good.toml"))
+                .expect("load")
+                .tracks,
+            vec!["youtube:vK2io4J708A".to_string()]
+        );
+    }
+
+    /// A legacy `current_track` naming a video the playlist does not list is
+    /// stale; carrying it over as an id would leave a cursor pointing nowhere.
+    #[test]
+    fn migrate_drops_a_current_track_that_names_no_row() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        write_legacy_playlist(&playlists, "Live Sets", &["vK2io4J708A"]);
+        let raw = std::fs::read_to_string(playlists.join("Live Sets.toml")).expect("read");
+        std::fs::write(
+            playlists.join("Live Sets.toml"),
+            raw.replace(
+                "current_track = \"vK2io4J708A\"",
+                "current_track = \"gone\"",
+            ),
+        )
+        .expect("write");
+
+        crate::library::migrate(&playlists, &tracks).expect("migrate");
+
+        assert_eq!(
+            crate::playlist::Playlist::load(&playlists.join("Live Sets.toml"))
+                .expect("load")
+                .current_track,
+            None
+        );
+    }
+
+    /// A `tracks = []` playlist is indistinguishable from a migrated one, and
+    /// there is nothing in it to migrate either way.
+    #[test]
+    fn migrate_treats_an_empty_track_list_as_already_migrated() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        write_legacy_playlist(&playlists, "Empty", &[]);
+
+        assert!(crate::library::migrate(&playlists, &tracks)
+            .expect("migrate")
+            .is_none());
+    }
+
+    /// Re-running migration must not mint a second document for a track that
+    /// already has one — a playlist restored from the backup, say.
+    #[test]
+    fn migrate_reuses_an_existing_document_rather_than_duplicating_it() {
+        let (_dir, playlists, tracks) = migration_dirs();
+        let mut lib = Library::load(&tracks).expect("load");
+        let mut existing = track_with_id("youtube:vK2io4J708A");
+        existing.last_position = 999;
+        lib.upsert(existing).expect("upsert");
+
+        write_legacy_playlist(&playlists, "Live Sets", &["vK2io4J708A"]);
+        let report = crate::library::migrate(&playlists, &tracks)
+            .expect("migrate")
+            .expect("the playlist is still legacy");
+        assert_eq!(report.tracks, 0, "no new document was needed");
+
+        assert_eq!(documents_in(&tracks).len(), 1);
+        assert_eq!(
+            Library::load(&tracks)
+                .expect("reload")
+                .get("youtube:vK2io4J708A")
+                .map(|t| t.last_position),
+            Some(999),
+            "first writer wins — the existing document keeps its state"
+        );
+    }
 }
