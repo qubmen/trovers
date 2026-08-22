@@ -59,6 +59,7 @@ Enter	Fire! (Play media)
 m	Move track to another playlist
 F	Press your own folder into service (import as an album)
 R	Rescan that folder for new arrivals
+Enter	On an album header: open or close it
 J/K	Haul the selected track down/up the running order
 q	Abandon ship
 
@@ -83,6 +84,18 @@ the playlist you're looking at, holding everything in there that mpv can play.
   path → Enter. Subfolders are included; the album is named after the folder.
   Paste whatever your Mac gives you — a `file://` URL full of `%D0%9A` escapes, a
   dragged path with `\ ` in it, quotes around the lot, or a plain `~/Music/…`.
+- **It lives in the track list, not the sidebar**, as a folding group right below
+  the playlist's own tracks — that is where there is room for a name like
+  `Кино - Группа крови - 1988-2019`. The header shows how many tracks it holds and
+  how long they run.
+- **Open and close it** with `Enter` on its header (`▸` closed, `▾` open). An album
+  arrives folded, so a two-hundred-file folder is one row until you ask for more,
+  and the state is remembered between runs.
+- **An album plays as its own list.** Start a track inside it and `n`/`b`, loop,
+  shuffle and auto-advance all stay inside the album — they never wander out into
+  the parent playlist.
+- **Rename or forget it** with `r` and `d` on its header. `R` there rescans that
+  album's folder.
 - **Rescan**: `R` on a linked album picks up files added since. New files land at
   the end, files that have vanished go dim (`⊘`) instead of disappearing, and
   **nothing is ever deleted or reshuffled**.

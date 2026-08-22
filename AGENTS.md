@@ -256,6 +256,7 @@ current_track = "youtube:vK2io4J708A"
 kind = "normal"          # normal | album
 parent = "Progressive"   # albums only: the parent's file stem
 source_folder = "/Users/me/Music/Live Sets"   # set when linked to a folder
+collapsed = true         # albums only: folded away in the parent's track list
 ```
 
 `tracks` is the running order. `current_track` means only "the row the cursor
@@ -265,8 +266,9 @@ was last on in *this* playlist", used to restore the cursor on load — never
 A row whose document has gone missing renders dimmed rather than vanishing, so
 the row the user can see is the row they can delete.
 
-`kind`, `parent` and `source_folder` are `serde(default)`ed, so every playlist
-written before albums existed loads as a top-level normal playlist.
+`kind`, `parent`, `source_folder` and `collapsed` are `serde(default)`ed, so every
+playlist written before albums existed loads as a top-level normal playlist.
+`collapsed` defaults to `true`, not to `false` — see below.
 
 ### Albums
 
@@ -281,10 +283,57 @@ works on an album for free.
 - **`parent` names a file stem, not `Playlist.name`.** The stem is what
   `Playlist::list_entries` and the sidebar have in hand, and it is what stays
   unique on disk.
-- The sidebar renders albums indented under their parent. An album whose parent
-  was deleted **orphans to the top level** rather than disappearing — deleting a
-  playlist never takes data with it.
-- Renaming a parent rewrites its children's `parent`.
+- **An album is drawn inside its parent's track list**, as a collapsible group —
+  not in the sidebar, which has 22 columns and turned real names into `Кино - Гр…`
+  (ADR-019). `playlist::sidebar_entries` lists everything *except* an album some
+  normal playlist actually claims.
+- An album whose parent is gone — deleted, or naming another album, or itself —
+  **stays in the sidebar** at the top level. With albums otherwise out of it, that
+  row is the only way left to reach one, so every broken link gets the same
+  harmless answer.
+- Renaming a parent rewrites its children's `parent`. The parent's *loaded* albums
+  are repointed in memory and saved from there, because that copy may hold edits
+  the file does not have yet.
+- **`collapsed` remembers the fold, and defaults to folded.** It lives in the
+  album's own file rather than a global UI-state file, so it travels with the thing
+  it describes. A fresh import is stored open, so it is visibly there.
+
+**The row model.** The track list is a two-level tree, so nothing maps a cursor
+position straight into `playlist.tracks` any more:
+
+```rust
+pub enum RowSource { Own, Album(usize) }          // index into App::albums
+pub enum VisibleRow {
+    Track { source: RowSource, index: usize },    // index into that list's tracks
+    AlbumHeader { album: usize },
+}
+```
+
+- `App::albums: Vec<LoadedAlbum { name, path, playlist }>` — the displayed
+  playlist's albums, alphabetically, loaded when the displayed playlist changes.
+- `App::rows: Vec<VisibleRow>` — every row on screen in display order. Own tracks
+  first, then each album's header and, when open, its tracks.
+- **`rebuild_rows` is the only writer of `rows`**, and runs after anything that
+  changes the screen: a switch, a search keystroke, a fold, an import, a rescan, an
+  album rename or delete, a reorder, a row deletion, a URL add that lands here.
+- `App::row_at(cursor)`, `row_track_id(cursor)`, `album_of(cursor)` and
+  `source_playlist(source)` are how every call site asks a row what it is. There is
+  no `track_index_at` and no `filtered_indices`; the search filter is an *input* to
+  `rebuild_rows`, not a parallel copy of its answer.
+- `row_group(cursor)` returns the row's list plus every cursor position showing a
+  row of that same list — the running order `n`/`b` steps. `source_of_path(path)`
+  is the reverse, which is how auto-advance routes back through the in-memory copy
+  when the playing list is one on screen.
+- **An album plays as its own list.** `play_from_list(source, idx, start_pos)` is
+  the single door into playback; playing an album track builds a `PlayingSession`
+  pointing at the album's file, so `n`/`b`, loop, shuffle and auto-advance all stay
+  inside it, each album keeping its own shuffled order.
+- **Edits follow the row's owner.** `handle_confirm_delete`,
+  `move_track_to_playlist` and the `J`/`K` swap edit and save the list the row came
+  out of; `J`/`K` refuses to cross a list boundary. Because a loaded album can hold
+  unsaved edits, `platform_id_referenced_elsewhere` and `import_target_for` consult
+  `self.albums` in memory and skip those paths on disk — re-reading the file would
+  miss the removal that just happened.
 
 ### Local media
 
@@ -454,6 +503,9 @@ Constraint::Length(1)   footer hint line
 - Active border colour: `ACCENT` when focused, `BORDER_IDLE` otherwise
 - `▼/▶ ≡ Playlists` — collapsible section; `Enter` toggles; shows up to 5 playlists,
   overflow shown as `▼ N more…`
+- Only top-level playlists are listed. An album lives in its parent's track list
+  instead (ADR-019); an *orphaned* album — one whose parent is gone — is listed here
+  at the top level, with the album glyph, because nothing else can reach it
 - Active playlist marked with `◄` suffix in `ACCENT` colour
 - `♪ Music` / `▶ Video` — shown in `TEXT_DIM`, not selectable (reserved for future)
 - `↓ Plunder` — opens URL input prompt (same as `a` in track list)
@@ -478,7 +530,36 @@ Row highlight rules (highest precedence first):
 4. Normal → default
 
 `Scrollbar` on right edge: `▲ █ ┃ ▼` symbols. Title shows
-`[ first–last / total ]`.
+`[ first–last / total ]`, where `total` counts **rows**, headers included — so with
+albums present it exceeds the track count in the same title. The alternative,
+counting only tracks, would make the counter disagree with the cursor.
+
+**Album rows.** A header row is `GOLD` bold, with the icon and number columns empty
+(a group has no cache status and no place in a running order), the disclosure glyph
+and the album's name in the title column, its track count where the artist goes,
+and its total duration where the duration goes — blank rather than `0m` when nothing
+in it knows its length. Its tracks are indented in the title column and numbered
+from 1: the number says where a track sits in the list that plays it.
+
+```
+╭─ aBooks · 23 tracks · 32h 41m  [ 1–6 / 14 ] ───────────────────────╮
+│ ▶ ◈  1  Ночной дозор                        Лукьяненко   8:12:03   │
+│   ◈  2  Дневной дозор                       Лукьяненко   9:04:55   │
+│     ▸ Кино - Группа крови - 1988-2019       10 tracks        46m    │
+│     ▾ Суржиков Роман – Полари 06            20 tracks     16h 15m   │
+│       ◈  1  Стрела                          Роман Сур…     48:20    │
+│       ◈  2  Искра                           Роман Сур…     51:07    │
+╰────────────────────────────────────────────────────────────────────╯
+```
+
+The glyphs are `▸`/`▾`, deliberately not the sidebar's `▶`/`▼`: `▶` is the playing
+marker and a folded album must not read as a playing one.
+
+**Under a search filter:** a track row survives if the track matches; an album whose
+*name* matches shows its header and all of its tracks; an album with matching tracks
+shows its header and only those; an album with neither is hidden, header included.
+A matching album is shown open whatever its `collapsed` says — a search that hid its
+own hits inside a folded album would be a bug.
 
 ### Now Playing block
 
@@ -546,22 +627,42 @@ route flushes state and kills mpv.
 | `G`              | Jump to last track                              |
 | `Ctrl+D`         | Half-page down                                  |
 | `Ctrl+U`         | Half-page up                                    |
-| `Enter`          | Play selected track (resume from last_position) |
+| `Enter`          | Play selected track (resume from last_position) — on an album header, open/close it instead; a header is not playable |
 | `Space`          | Play / Pause                                    |
 | `←` / `→`        | Seek −10s / +10s                               |
 | `Shift+←/→`      | Seek −60s / +60s                               |
 | `[` / `]`        | Speed −0.1 / +0.1 (saved to the track's document immediately) |
 | `v` / `V`        | Volume +5 / −5                                  |
 | `l`              | Cycle loop mode: none → track → playlist → none |
-| `r`              | Toggle shuffle                                  |
-| `n`              | Next track in the *displayed* playlist (resume from last_position; independent of whatever is actually playing if you're browsing elsewhere) |
-| `b`              | Previous track in the *displayed* playlist (resume from last_position; independent of whatever is actually playing if you're browsing elsewhere) |
+| `r`              | Toggle shuffle — on an album header, rename that album |
+| `n`              | Next track in the list the cursor's row belongs to (resume from last_position; independent of whatever is actually playing if you're browsing elsewhere). Never crosses a list boundary: from an album's last track it wraps to that album's first |
+| `b`              | Previous track in the same list, same rules      |
 | `a`              | Add track: open URL input prompt                |
 | `/`              | Search/filter tracks (live, case-insensitive)   |
-| `d`              | Delete selected track (confirm prompt) — removes the row, and the document plus cached audio only when no other playlist lists it |
+| `d`              | Delete selected track (confirm prompt) — removes the row from the list it belongs to, and the document plus cached audio only when no other playlist lists it. On an album header, forget that album instead |
 | `c`              | Recache: force a fresh download of the selected track, regardless of its current cache status (overwrites an existing file; no-op if a download for it is already running) |
 | `N`              | Create new playlist (name prompt)               |
-| `J` / `K`        | Move the selected row down / up within the playlist (saved immediately; refused while a search filter is active, since the cursor counts visible rows there) |
+| `J` / `K`        | Move the selected row down / up within the list it belongs to (saved immediately; refused while a search filter is active, since the cursor counts visible rows there, and on an album header, since albums are sorted by name) |
+
+### On an album header
+
+The header row is how an album is reached now that it has left the sidebar, so the
+sidebar's `r` and `d` live here too.
+
+| Key       | Action                                                        |
+|-----------|---------------------------------------------------------------|
+| `Enter`   | Open / close the album. A header is not playable — one key must not mean both "look inside" and "start 200 files" |
+| `r`       | Rename the album (`InputMode::AlbumRename`); refused on a taken or unusable name, and the prompt stays open holding what was typed |
+| `d`       | Forget the album (`InputMode::AlbumDelete`) — deletes its playlist file, never the folder or the files in it (ADR-018) |
+| `R`       | Rescan this album's folder; says `Not linked to a folder` when it has none |
+| `J` / `K` | Nothing, with the status `Albums are sorted by name`          |
+| `m`       | Nothing, with the status `Move tracks, not albums`            |
+| `n` / `b` | Nothing: a header belongs to no running order                 |
+
+On an album's *track* row every key means what it means for an own track, applied to
+the album's file: `Enter`/`Space` play it (as part of the album), `d` drops the row,
+`J`/`K` reorder within the album, `m` moves it out, `c` reports that a local file has
+nothing to download.
 
 ### Sidebar focus
 
@@ -580,8 +681,8 @@ route flushes state and kills mpv.
 |-----|------------------------------------------------------|
 | `m` | Move selected track: open context menu with playlist targets |
 | `N` | Create new playlist (name input prompt)              |
-| `F` | Import a local folder as an album under the displayed playlist (path prompt; see "What counts as a path" below) |
-| `R` | Rescan the folder this album mirrors — new files are appended, vanished ones go `Missing`, nothing is deleted or reordered |
+| `F` | Import a local folder as an album under the displayed playlist (path prompt; see "What counts as a path" below). Works on a header row too — nesting stays two deep, so the new album joins the displayed playlist |
+| `R` | Rescan the folder the displayed playlist mirrors — or, on an album header, that album's. New files are appended, vanished ones go `Missing`, nothing is deleted or reordered |
 
 In URL input mode (`a` key):
 
@@ -600,6 +701,8 @@ In URL input mode (`a` key):
 | Track context menu| `↑`/`↓` navigate · `Enter` confirm · `Esc` cancel |
 | Playlist rename   | type new name · `Enter` confirm · `Esc` cancel |
 | Playlist delete   | `y`/`Enter` confirm · `n`/`Esc` cancel |
+| Album rename      | type new name · `Enter` confirm · `Esc` cancel — the album under the cursor, not the sidebar's row |
+| Album delete      | `y`/`Enter` confirm · `n`/`Esc` cancel — its files stay |
 | Folder input      | type or paste a path · `Enter` import · `Esc` cancel |
 
 ---
@@ -812,17 +915,30 @@ pub enum InputMode {
     TrackContextMenu,   // move-track popup: pick destination playlist
     PlaylistRename,     // sidebar: rename selected playlist
     PlaylistDelete,     // sidebar: confirm delete selected playlist
+    AlbumRename,        // track list: rename the album under the cursor
+    AlbumDelete,        // track list: forget it — its files stay
+    FolderInput,        // path of a folder to import as an album
+    Help,
 }
 pub enum SidebarItem {
     PlaylistsHeader,
-    Playlist { name, path },
-    PlaylistsOverflow { count },
+    Playlist { name, path, is_album },  // is_album: an *orphaned* album, the only
+                                        // kind the sidebar lists any more
     Separator,
     Music,    // future, not selectable
     Video,    // future, not selectable
     Plunder,
+    ImportFolder,   // the discoverable half of `F`
     Settings,
 }
+
+/// Which list a visible row's track comes out of.
+pub enum RowSource { Own, Album(usize) }   // index into App::albums
+pub enum VisibleRow {
+    Track { source: RowSource, index: usize },   // index into that list's tracks
+    AlbumHeader { album: usize },
+}
+pub struct LoadedAlbum { pub name: String, pub path: PathBuf, pub playlist: Playlist }
 
 pub struct PlayingSession {
     pub path: PathBuf,       // playlist file the playing track belongs to
@@ -835,8 +951,11 @@ pub struct PlayingSession {
 **App struct** holds: `playlist` (the **displayed** playlist, what the track list
 shows/edits — independent from what's playing) + config + optional player, watch
 channels, `focus`, `input_mode`, `input_buf`, `selected` (track cursor), `track_offset`
-(scroll), `track_list_height` (set each frame), `filtered_indices` (search),
-`sidebar_selected`, `playlists_expanded`, `available_playlists`,
+(scroll), `track_list_height` (set each frame), `search_query` (the live filter,
+held apart from `input_buf`, which is cleared when the prompt closes while the filter
+stays on), `albums: Vec<LoadedAlbum>` (the displayed playlist's albums) and
+`rows: Vec<VisibleRow>` (what is on screen, rebuilt by `rebuild_rows` and never
+edited in place), `sidebar_selected`, `playlists_expanded`, `available_playlists`,
 `position`, `download_progress: HashMap<String, f32>` (caching progress by library
 id), `downloading: HashSet<String>` (library ids with a download in flight),
 `is_paused`,
@@ -850,7 +969,7 @@ to unrelated playlists. `App::playing_track()`/`playing_track_mut()` are one lib
 lookup — a track has a single home, so an edit made through the track list is
 visible there immediately with nothing to reconcile. Switching playlists, adding
 tracks, or editing a different playlist never touches `playing` — only
-`request_playback` (user-initiated play) and the delete/move guards (when the
+`play_from_list` (user-initiated play) and the delete/move guards (when the
 removed/moved track is the one actually playing) do. `Playlist.current_track` (on
 the displayed playlist) means only "last track selected/played in *this* playlist
 file, used to restore cursor on load" — it is not read as "what's currently
@@ -869,14 +988,17 @@ loop:
 ```
 
 **Core functions (playback/playlist decoupling):**
-- `request_playback(idx, start_pos)` — starts playback of the track at Vec
-  index `idx` in the *displayed* playlist. Before spawning the new player,
-  saves the leaving track's live position to its document, then replaces
-  `self.playing` with a fresh `PlayingSession`. `start_pos` resumes mid-track
-  (stream→file hot-switch); `None` means a fresh start (resets `self.position`).
-  A row whose document has gone missing sets a status message and plays nothing.
-- `track_at(idx)` — the displayed playlist's row `idx`, resolved through the
-  library.
+- `play_from_list(source, idx, start_pos)` — the single door into playback. Starts
+  index `idx` of whichever list `source` names, so an album plays as its own list
+  (ADR-019). Before spawning the new player, saves the leaving track's live position
+  to its document, then replaces `self.playing` with a fresh `PlayingSession`
+  carrying that list's path and order. `start_pos` resumes mid-track (stream→file
+  hot-switch); `None` means a fresh start (resets `self.position`). A row whose
+  document has gone missing sets a status message and plays nothing.
+- `play_row(cursor)` — the one door `Enter`, `Space` and `n`/`b` go through, so all
+  three agree about what a row means: resolves the row to its list and index, works
+  out the resume position, hands off to `play_from_list`, and returns `false` on a
+  header, which names a group rather than a track.
 - `playing_track()` / `playing_track_mut()` — the track driving playback:
   `library.get(&session.track_id)`. Mutating does not persist — call
   `save_playing_track()`.
@@ -987,9 +1109,9 @@ When building multi-section rows in the now-playing area:
   `..`, and duplicates already in `existing`. When `current_name` is `Some(n)`, `n`
   is excluded from the duplicate check (rename-in-place is allowed).
 - `resume_start_pos(track) -> Option<f64>` — pure helper: `Some(last_position)`
-  when nonzero, else `None`. Wired into every user-initiated `request_playback`
-  call site (`Enter`, `Space` fallback, `n`, `b`) so pressing play always
-  resumes near where a track was left off.
+  when nonzero, else `None`. Applied by `play_row`, which is what every
+  user-initiated play goes through (`Enter`, `Space` fallback, `n`, `b`), so
+  pressing play always resumes near where a track was left off.
 - `adjust_playing_track_speed(app, delta)` — `[`/`]` handler; mutates the
   *playing* track's speed via `playing_track_mut()` (not the displayed
   playlist's cursor track — they may differ), sends the new speed to mpv if a
@@ -1044,10 +1166,10 @@ On a real end of track, `handle_track_ended()`:
      advancing.
    - `track` — repeat the same track, from the beginning.
    - `playlist` — advance, wrapping from the end back to the start.
-3. Starts it via `play_session_track()`, which routes through `request_playback`
-   when the playing session is the displayed playlist (so the cursor and
-   `current_track` stay in step) and drives the session's own playlist copy
-   otherwise.
+3. Starts it via `play_session_track()`, which routes through `play_from_list`
+   when the playing session is a list on screen — the displayed playlist or one of
+   its albums, found by `source_of_path` — so that copy, its `current_track` and the
+   cursor all stay in step, and drives the session's own playlist copy otherwise.
 
 Shuffle (`r`, per-playlist, persisted as `shuffle` in the TOML) is a stored
 permutation of the playlist's indices (`App::shuffle_order`, built by
@@ -1095,7 +1217,9 @@ one document.
   only — a *local folder* is a different thing and is supported, see `F`/`R`)
 - Mouse support in TUI
 - Video playback (architecture supports it via mpv, but UI is audio-only for now)
-- Nesting deeper than playlist → album; sorting an album by path after a rescan
+- Nesting deeper than playlist → album; sorting an album by path after a rescan;
+  reordering albums by hand (they are alphabetical); moving an album to another
+  parent; a search that matches an album's folder path
 - Export/share bundles. A track document is a single self-contained file, which
   is what makes sharing possible, but a playlist alone is useless without the
   documents it references — bundling both wants a `trovers export` command that

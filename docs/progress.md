@@ -145,9 +145,28 @@ user's file).
 | `src/library_scan.rs` — walk, probe, filename parse | ✅ | stack-based `read_dir`, depth-capped at 16, does not follow directory symlinks; ffprobe optional, warned about once |
 | Albums as child playlists (`kind`/`parent`/`source_folder`) | ✅ | `Playlist::list_entries()`, sidebar indent, orphans fall back to top level, rename rewrites children |
 | `src/library_import.rs` + `F` import / `R` rescan | ✅ | rescan appends and marks, never deletes or reorders; counts reported in the status line |
-| Never-delete-user-files guard | ✅ | three sites: `handle_confirm_delete`, `recache_track`, `request_playback` |
+| Never-delete-user-files guard | ✅ | three sites: `handle_confirm_delete`, `recache_track`, the playback path |
 | Panel title totals + `J`/`K` reorder | ✅ | `Live Sets · 42 tracks · 6h 12m  [ 12–20 / 42 ]`; reorder refuses under a search filter |
 | Manual check at a real terminal | ⬜ | import a mixed folder, resume across a relaunch, rename-and-rescan → `⊘`, `d` on a local row leaves the file, an import with ffprobe off PATH |
+
+---
+
+## Albums in the track list (2026-08-22)
+
+Albums shipped as indented sidebar rows, and the sidebar has 22 columns — real names
+arrived as `Кино - Гр…`, indistinguishable from each other. So they moved into the
+panel that has room for a name and holds the tracks they belong with. See ADR-019,
+which amends the sidebar half of ADR-016; storage is unchanged.
+
+| Piece | Status | Notes |
+|-------|--------|-------|
+| `Playlist.collapsed` + albums leave the sidebar | ✅ | defaults to folded, so a two-hundred-file import arrives as one row; `playlist::sidebar_entries` keeps orphans, which is the only way left to reach one |
+| The row model — `RowSource` / `VisibleRow` / `LoadedAlbum` | ✅ | `rebuild_rows` is the only writer of `App::rows`; `track_index_at` and `filtered_indices` are gone, the search filter is an input rather than a parallel answer |
+| Headers, indented album tracks, panel title | ✅ | `▸`/`▾` glyphs, deliberately not the playing marker's `▶`; count and duration in the artist and duration columns; the scroll counter counts rows |
+| An album plays as its own list | ✅ | `play_from_list(source, idx, start_pos)` is the single door; `n`/`b`, loop, shuffle and auto-advance stay inside the album, each with its own shuffled order |
+| Header keys and owner-aware edits | ✅ | `Enter` folds (a header is not playable), `r`/`d`/`R` reach that album, `J`/`K` refuse; `d`, `m` and `J`/`K` on a track row edit and save the list the row came out of |
+| Imports, rescans and switches keep the rows in step | ✅ | an import lands as an open album under the cursor; a rename repoints the loaded copies; deleting from the sidebar takes the row with it |
+| Manual check at a real terminal | ⬜ | fold two albums and confirm the state survives a restart; play through the end of an album and confirm auto-advance stays inside it; rename and forget an album from its header and confirm the folder is untouched |
 
 Phase 3 (video playback in a real window) is not started.
 

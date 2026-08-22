@@ -417,6 +417,13 @@ proportional writes, a whole class of ownership bookkeeping gone — is worth it
 
 ## ADR-016: An album is an ordinary playlist file naming its parent
 
+> **Amended by ADR-019.** The storage decision stands whole: an album is still a
+> playlist file with `kind` and `parent`, still flat on disk, still two levels
+> deep. What changed is *where an album is drawn* — not the sidebar, but the
+> parent's own track list, as a collapsible group. Where the reasoning below
+> talks about the sidebar rendering an album, read it as history: the sidebar
+> now lists only top-level playlists and orphaned albums.
+
 **Decision:** An album is a `playlists/<name>.toml` like any other, with two extra
 fields: `kind = "album"` and `parent = "<parent's file stem>"`. There is no album
 type, no nested structure inside a playlist document, and no third directory.
@@ -506,3 +513,73 @@ instead of spawning mpv.
 **Consequence for rescan:** a rescan appends and marks, never deletes or reorders.
 The same instinct — the user's folder is the source of truth about files, and
 trovers' list is the source of truth about their order.
+
+---
+
+## ADR-019: An album is drawn inside its parent's track list, not in the sidebar
+
+**Amends ADR-016**, which is unchanged about storage.
+
+**Decision:** The track list is a two-level tree rather than a flat window over
+`playlist.tracks`: the displayed playlist's own tracks first, then each of its
+albums as a collapsible group — a header row, and its tracks when open. The
+sidebar lists only playlists that are not albums with a live parent. `App` holds
+`albums: Vec<LoadedAlbum>` and a computed `rows: Vec<VisibleRow>`; every cursor
+position resolves through a row, which names both the list its track comes from
+and the index within it. An album plays as its own list. A new
+`collapsed: bool` on `Playlist` remembers the fold, defaulting to folded.
+
+**Reasoning:**
+- **The sidebar has 22 columns and a nested album row had 14 of them.** Real
+  names arrived as `Кино - Гр…` and `Суржиков …` — indistinguishable from each
+  other and from anything else imported from the same series. The panel with room
+  for a name is the track table, and it is also where an album's contents belong:
+  an album is part of the playlist you are looking at, not a sibling of it.
+- **A row that names its owner beats a flattened list with a side table.** The
+  alternative was one display vector of ids plus a map from row to owning file.
+  Smaller diff, but ownership becomes implicit and every mutation — `d`, `J`/`K`,
+  a rescan — has to re-derive it. That is the bookkeeping ADR-015 deleted; adding
+  it back to save a struct would be a bad trade.
+- **`rows` is rebuilt, never edited.** `rebuild_rows` is its only writer and runs
+  after anything that changes the screen: a switch, a search keystroke, a fold, an
+  import, a rescan, a rename, a delete, a reorder. One derivation cannot disagree
+  with itself, and the old `filtered_indices` — a parallel copy of the answer —
+  goes away.
+- **An album playing as its own list is nearly free.** `PlayingSession` has
+  carried its own `path` and `playlist` since ADR-011, so `n`/`b`, `loop_mode`,
+  `shuffle` and auto-advance stay inside the album with no new machinery, each
+  album keeping its own shuffled order in its own file. It is also the honest
+  reading of what the user asked for: an album is a thing you play.
+- **A header is not playable.** `Enter` on one opens or closes it. Making a header
+  play its first track would put "start something" and "look inside" on the same
+  key, and the wrong one on a 200-file folder is loud.
+- **Folded by default, and the fold is the album's own business.** A file written
+  before this field existed loads folded, which is what a two-hundred-file import
+  should arrive as. Storing it in the album rather than in a global UI-state file
+  means it travels with the thing it describes and needs no second writer. A
+  freshly imported album is stored open, so the import is visibly there.
+
+**Where the keys went.** `r` and `d` used to reach an album through the sidebar. On
+the header row they mean rename and forget-this-album — `InputMode::AlbumRename`
+and `AlbumDelete`, separate modes from the sidebar's because they address the album
+under the cursor rather than the sidebar's selected row. `R` on a header rescans
+that album's folder. `J`/`K` refuse on a header: albums are sorted by name.
+Deleting an album still never touches the folder (ADR-018).
+
+**Consequence for ownership.** Anything that edits or deletes a row now edits the
+row's *owning* list and saves that file — `handle_confirm_delete`,
+`move_track_to_playlist`, the `J`/`K` swap, which also refuses to cross a list
+boundary. And because the displayed playlist's albums are held in memory with
+edits not yet on disk, the two functions that read other playlist files —
+`platform_id_referenced_elsewhere` and `import_target_for` — answer from
+`self.albums` first and skip those paths on disk. Reading the file instead would
+miss the removal that just happened and leak the document, or write a stale copy
+back over it.
+
+**Trade-off accepted:** the scroll counter in the panel title counts rows, so with
+albums present its denominator exceeds the track count by the number of headers.
+The alternative — counting only tracks — would make the counter disagree with the
+cursor. With no albums the two are equal and the title is what it always was.
+
+**Out of scope:** reordering albums by hand, moving an album to another parent,
+nesting deeper than two levels, and a search that matches an album's folder path.
