@@ -9,7 +9,7 @@ use crate::config::{AudioQuality, Config};
 use crate::library::{self, Library};
 use crate::library::{CacheStatus, MediaKind, Track, TrackOrigin};
 use crate::player::{self, Player};
-use crate::playlist::{self, LoopMode, Playlist};
+use crate::playlist::{self, LoopMode, Playlist, PlaylistEntry, PlaylistKind};
 use crate::ytdlp::{self, TrackMeta};
 use anyhow::Result;
 use chrono::Utc;
@@ -52,7 +52,16 @@ pub enum InputMode {
 #[derive(Debug, Clone)]
 pub enum SidebarItem {
     PlaylistsHeader,
-    Playlist { name: String, path: PathBuf },
+    Playlist {
+        name: String,
+        path: PathBuf,
+        /// Indent level: 0 for a top-level playlist, 1 for an album under one.
+        depth: usize,
+        /// Whether to mark the row as an album. Not the same question as `depth`:
+        /// an album whose parent is gone renders at the top level and is still an
+        /// album.
+        is_album: bool,
+    },
     Separator,
     Music,
     Video,
@@ -220,7 +229,9 @@ pub struct App {
     // Sidebar
     pub sidebar_selected: usize,
     pub playlists_expanded: bool,
-    pub available_playlists: Vec<(String, PathBuf)>,
+    /// Every playlist file on disk, sorted by name — the sidebar's source of
+    /// truth for what exists and what hangs under what.
+    pub available_playlists: Vec<PlaylistEntry>,
 
     // Settings panel
     pub settings_selected: usize,
@@ -265,7 +276,7 @@ impl App {
     pub fn new(
         playlist: Playlist,
         config: Config,
-        available_playlists: Vec<(String, PathBuf)>,
+        available_playlists: Vec<PlaylistEntry>,
         playlist_path: PathBuf,
         library: Library,
     ) -> Self {
@@ -486,11 +497,11 @@ impl App {
         }
         self.available_playlists
             .iter()
-            .filter(|(_, path)| path != &self.playlist_path)
-            .any(|(_, path)| match Playlist::load(path) {
+            .filter(|entry| entry.path != self.playlist_path)
+            .any(|entry| match Playlist::load(&entry.path) {
                 Ok(pl) => lists(&pl.tracks),
                 Err(e) => {
-                    warn!(err = %e, path = %path.display(), "could not check playlist for shared cache file; keeping it");
+                    warn!(err = %e, path = %entry.path.display(), "could not check playlist for shared cache file; keeping it");
                     true
                 }
             })
@@ -904,10 +915,12 @@ impl App {
         let mut items = Vec::new();
         items.push(SidebarItem::PlaylistsHeader);
         if self.playlists_expanded {
-            for (name, path) in &self.available_playlists {
+            for (entry, depth) in playlist::nested_order(&self.available_playlists) {
                 items.push(SidebarItem::Playlist {
-                    name: name.clone(),
-                    path: path.clone(),
+                    name: entry.name.clone(),
+                    path: entry.path.clone(),
+                    depth,
+                    is_album: entry.kind == PlaylistKind::Album,
                 });
             }
         }
@@ -1275,7 +1288,7 @@ impl App {
         let all: Vec<String> = self
             .available_playlists
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|entry| entry.name.clone())
             .collect();
 
         if all.is_empty() {
@@ -1420,8 +1433,8 @@ impl App {
     pub fn available_playlist_names(&self) -> Vec<String> {
         self.available_playlists
             .iter()
-            .filter(|(name, _)| name != &self.playlist.name)
-            .map(|(name, _)| name.clone())
+            .filter(|entry| entry.name != self.playlist.name)
+            .map(|entry| entry.name.clone())
             .collect()
     }
 
@@ -1446,8 +1459,8 @@ impl App {
         let target_path = self
             .available_playlists
             .iter()
-            .find(|(n, _)| n == target_name)
-            .map(|(_, p)| p.clone())
+            .find(|entry| entry.name == target_name)
+            .map(|entry| entry.path.clone())
             .with_context(|| {
                 format!("target playlist '{target_name}' not found in available_playlists")
             })?;

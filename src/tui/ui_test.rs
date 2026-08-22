@@ -18,6 +18,9 @@ mod tests {
             default_speed: None,
             tracks: Vec::new(),
             current_track: None,
+            kind: crate::playlist::PlaylistKind::Normal,
+            parent: None,
+            source_folder: None,
         }
     }
 
@@ -104,9 +107,14 @@ mod tests {
         use std::path::PathBuf;
         let playlist = make_playlist(active);
         let config = crate::config::Config::default();
-        let available: Vec<(String, PathBuf)> = playlists
+        let available: Vec<crate::playlist::PlaylistEntry> = playlists
             .iter()
-            .map(|n| (n.to_string(), PathBuf::from(format!("/fake/{}.toml", n))))
+            .map(|n| {
+                crate::playlist::PlaylistEntry::normal(
+                    n.to_string(),
+                    PathBuf::from(format!("/fake/{}.toml", n)),
+                )
+            })
             .collect();
         crate::tui::App::new(
             playlist,
@@ -115,6 +123,17 @@ mod tests {
             PathBuf::from("/fake/active.toml"),
             test_library(),
         )
+    }
+
+    /// Top-level playlist entries from `(name, path)` pairs. Most tests care only
+    /// about which playlists exist, not about albums.
+    fn entries<S: Into<String>>(
+        pairs: Vec<(S, std::path::PathBuf)>,
+    ) -> Vec<crate::playlist::PlaylistEntry> {
+        pairs
+            .into_iter()
+            .map(|(name, path)| crate::playlist::PlaylistEntry::normal(name.into(), path))
+            .collect()
     }
 
     // ── format_duration tests ─────────────────────────────────────────────
@@ -2336,12 +2355,15 @@ mod tests {
             add_track(&mut playlist, make_track(id, title));
         }
         let config = crate::config::Config::default();
-        let mut available: Vec<(String, PathBuf)> = vec![(
+        let mut available = entries(vec![(
             active.to_string(),
             PathBuf::from(format!("/fake/{active}.toml")),
-        )];
+        )]);
         for t in targets {
-            available.push((t.to_string(), PathBuf::from(format!("/fake/{t}.toml"))));
+            available.push(crate::playlist::PlaylistEntry::normal(
+                t.to_string(),
+                PathBuf::from(format!("/fake/{t}.toml")),
+            ));
         }
         crate::tui::App::new(
             playlist,
@@ -2395,10 +2417,10 @@ mod tests {
         rock_pl.save(&rock_path).expect("save rock");
 
         let config = crate::config::Config::default();
-        let available = vec![
+        let available = entries(vec![
             ("Source".to_string(), source_path.clone()),
             ("Rock".to_string(), rock_path.clone()),
-        ];
+        ]);
         let mut app = crate::tui::App::new(
             source_pl,
             config,
@@ -2872,7 +2894,7 @@ mod tests {
     #[test]
     fn validate_playlist_name_accepts_valid_name() {
         use crate::tui::input::validate_playlist_name;
-        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let existing: Vec<crate::playlist::PlaylistEntry> = vec![];
         let result = validate_playlist_name("My Playlist", &existing, None);
         assert!(result.is_ok(), "valid name should be accepted: {result:?}");
     }
@@ -2880,7 +2902,7 @@ mod tests {
     #[test]
     fn validate_playlist_name_rejects_empty() {
         use crate::tui::input::validate_playlist_name;
-        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let existing: Vec<crate::playlist::PlaylistEntry> = vec![];
         let result = validate_playlist_name("", &existing, None);
         assert!(result.is_err(), "empty name should be rejected");
     }
@@ -2888,7 +2910,7 @@ mod tests {
     #[test]
     fn validate_playlist_name_rejects_slash() {
         use crate::tui::input::validate_playlist_name;
-        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let existing: Vec<crate::playlist::PlaylistEntry> = vec![];
         let result = validate_playlist_name("bad/name", &existing, None);
         assert!(result.is_err(), "name with slash should be rejected");
     }
@@ -2896,7 +2918,7 @@ mod tests {
     #[test]
     fn validate_playlist_name_rejects_backslash() {
         use crate::tui::input::validate_playlist_name;
-        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let existing: Vec<crate::playlist::PlaylistEntry> = vec![];
         let result = validate_playlist_name("bad\\name", &existing, None);
         assert!(result.is_err(), "name with backslash should be rejected");
     }
@@ -2904,7 +2926,7 @@ mod tests {
     #[test]
     fn validate_playlist_name_rejects_colon() {
         use crate::tui::input::validate_playlist_name;
-        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let existing: Vec<crate::playlist::PlaylistEntry> = vec![];
         let result = validate_playlist_name("bad:name", &existing, None);
         assert!(result.is_err(), "name with colon should be rejected");
     }
@@ -2912,7 +2934,7 @@ mod tests {
     #[test]
     fn validate_playlist_name_rejects_whitespace_only() {
         use crate::tui::input::validate_playlist_name;
-        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let existing: Vec<crate::playlist::PlaylistEntry> = vec![];
         let result = validate_playlist_name("   ", &existing, None);
         assert!(result.is_err(), "whitespace-only name should be rejected");
     }
@@ -2920,7 +2942,7 @@ mod tests {
     #[test]
     fn validate_playlist_name_rejects_dot() {
         use crate::tui::input::validate_playlist_name;
-        let existing: Vec<(String, std::path::PathBuf)> = vec![];
+        let existing: Vec<crate::playlist::PlaylistEntry> = vec![];
         assert!(
             validate_playlist_name(".", &existing, None).is_err(),
             ". is invalid"
@@ -2934,10 +2956,10 @@ mod tests {
     #[test]
     fn validate_playlist_name_rejects_duplicate() {
         use crate::tui::input::validate_playlist_name;
-        let existing = vec![(
+        let existing = entries(vec![(
             "Rock".to_string(),
             std::path::PathBuf::from("/fake/Rock.toml"),
-        )];
+        )]);
         let result = validate_playlist_name("Rock", &existing, None);
         assert!(
             result.is_err(),
@@ -2949,10 +2971,10 @@ mod tests {
     fn validate_playlist_name_allows_current_name_during_rename() {
         use crate::tui::input::validate_playlist_name;
         // During rename, the current name is excluded from duplicate check
-        let existing = vec![(
+        let existing = entries(vec![(
             "Rock".to_string(),
             std::path::PathBuf::from("/fake/Rock.toml"),
-        )];
+        )]);
         let result = validate_playlist_name("Rock", &existing, Some("Rock"));
         assert!(
             result.is_ok(),
@@ -2963,7 +2985,7 @@ mod tests {
     #[test]
     fn validate_playlist_name_rejects_other_duplicate_during_rename() {
         use crate::tui::input::validate_playlist_name;
-        let existing = vec![
+        let existing = entries(vec![
             (
                 "Rock".to_string(),
                 std::path::PathBuf::from("/fake/Rock.toml"),
@@ -2972,7 +2994,7 @@ mod tests {
                 "Jazz".to_string(),
                 std::path::PathBuf::from("/fake/Jazz.toml"),
             ),
-        ];
+        ]);
         // Renaming "Rock" to "Jazz" (which already exists) should be rejected
         let result = validate_playlist_name("Jazz", &existing, Some("Rock"));
         assert!(
@@ -3089,6 +3111,180 @@ mod tests {
         app.sidebar_selected = 0; // PlaylistsHeader
         let target = playlist_delete_target(&app);
         assert!(target.is_none(), "should return None for non-playlist item");
+    }
+
+    // ── Albums in the sidebar ─────────────────────────────────────────────
+
+    /// Name, indent and album-ness of every playlist row in the sidebar.
+    fn sidebar_playlist_rows(app: &crate::tui::App) -> Vec<(String, usize, bool)> {
+        app.sidebar_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                crate::tui::SidebarItem::Playlist {
+                    name,
+                    depth,
+                    is_album,
+                    ..
+                } => Some((name, depth, is_album)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn album_entry(
+        name: &str,
+        parent: &str,
+        path: std::path::PathBuf,
+    ) -> crate::playlist::PlaylistEntry {
+        crate::playlist::PlaylistEntry {
+            name: name.to_string(),
+            path,
+            kind: crate::playlist::PlaylistKind::Album,
+            parent: Some(parent.to_string()),
+        }
+    }
+
+    #[test]
+    fn sidebar_indents_an_album_under_its_parent() {
+        let mut app = make_app_with_playlists("Live Sets", &["Ambient", "Live Sets"]);
+        app.available_playlists.push(album_entry(
+            "Ultra 2026",
+            "Live Sets",
+            std::path::PathBuf::from("/fake/Ultra 2026.toml"),
+        ));
+
+        assert_eq!(
+            sidebar_playlist_rows(&app),
+            vec![
+                ("Ambient".to_string(), 0, false),
+                ("Live Sets".to_string(), 0, false),
+                ("Ultra 2026".to_string(), 1, true),
+            ]
+        );
+    }
+
+    /// An album whose parent has been deleted is still an album, but it has
+    /// nothing left to sit under — so it becomes a top-level row rather than
+    /// disappearing from the sidebar.
+    #[test]
+    fn sidebar_shows_an_orphaned_album_at_the_top_level() {
+        let mut app = make_app_with_playlists("Ambient", &["Ambient"]);
+        app.available_playlists.push(album_entry(
+            "Ultra 2026",
+            "Gone",
+            std::path::PathBuf::from("/fake/Ultra 2026.toml"),
+        ));
+
+        assert_eq!(
+            sidebar_playlist_rows(&app),
+            vec![
+                ("Ambient".to_string(), 0, false),
+                ("Ultra 2026".to_string(), 0, true),
+            ]
+        );
+    }
+
+    /// A parent's albums point at it by name, so renaming it has to rewrite
+    /// them — otherwise every album under it orphans on the next launch.
+    #[tokio::test]
+    async fn renaming_a_playlist_repoints_the_albums_under_it() {
+        use crate::tui::input::handle_playlist_rename;
+        use crate::tui::InputMode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent_path = dir.path().join("Live Sets.toml");
+        make_playlist("Live Sets").save(&parent_path).expect("save");
+
+        let album_path = dir.path().join("Ultra 2026.toml");
+        let mut album = make_playlist("Ultra 2026");
+        album.kind = crate::playlist::PlaylistKind::Album;
+        album.parent = Some("Live Sets".to_string());
+        album.save(&album_path).expect("save album");
+
+        let mut app = crate::tui::App::new(
+            crate::playlist::Playlist::load(&parent_path).expect("load"),
+            crate::config::Config::default(),
+            crate::playlist::Playlist::list_entries(dir.path()).expect("list"),
+            parent_path.clone(),
+            test_library(),
+        );
+
+        // [PlaylistsHeader, Live Sets, Ultra 2026, ...]
+        app.sidebar_selected = 1;
+        app.input_mode = InputMode::PlaylistRename;
+        app.input_buf = "Warehouse".to_string();
+        handle_playlist_rename(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("rename");
+
+        let album = crate::playlist::Playlist::load(&album_path).expect("load album");
+        assert_eq!(
+            album.parent.as_deref(),
+            Some("Warehouse"),
+            "the album's document must follow its parent's new name"
+        );
+        assert_eq!(
+            sidebar_playlist_rows(&app),
+            vec![
+                ("Warehouse".to_string(), 0, false),
+                ("Ultra 2026".to_string(), 1, true),
+            ],
+            "and it must still render underneath it, without a relaunch"
+        );
+    }
+
+    /// Deleting a playlist deletes one file. Its albums are playlists in their
+    /// own right and stay exactly where they are — orphaned, not lost.
+    #[tokio::test]
+    async fn deleting_a_playlist_leaves_the_albums_under_it_alone() {
+        use crate::tui::input::handle_playlist_delete;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let active_path = dir.path().join("Ambient.toml");
+        make_playlist("Ambient").save(&active_path).expect("save");
+
+        let parent_path = dir.path().join("Live Sets.toml");
+        make_playlist("Live Sets").save(&parent_path).expect("save");
+
+        let album_path = dir.path().join("Ultra 2026.toml");
+        let mut album = make_playlist("Ultra 2026");
+        album.kind = crate::playlist::PlaylistKind::Album;
+        album.parent = Some("Live Sets".to_string());
+        add_track(&mut album, make_track("A", "Track A"));
+        album.save(&album_path).expect("save album");
+
+        let mut app = crate::tui::App::new(
+            crate::playlist::Playlist::load(&active_path).expect("load"),
+            crate::config::Config::default(),
+            crate::playlist::Playlist::list_entries(dir.path()).expect("list"),
+            active_path.clone(),
+            test_library(),
+        );
+
+        // [PlaylistsHeader, Ambient, Live Sets, Ultra 2026, ...] — delete the parent.
+        app.sidebar_selected = 2;
+        handle_playlist_delete(&mut app, key(crossterm::event::KeyCode::Char('y')))
+            .await
+            .expect("delete");
+
+        assert!(!parent_path.exists(), "the parent's file is gone");
+        assert!(album_path.exists(), "the album's file must survive");
+        assert_eq!(
+            crate::playlist::Playlist::load(&album_path)
+                .expect("load album")
+                .tracks
+                .len(),
+            1,
+            "with its rows intact"
+        );
+        assert_eq!(
+            sidebar_playlist_rows(&app),
+            vec![
+                ("Ambient".to_string(), 0, false),
+                ("Ultra 2026".to_string(), 0, true),
+            ],
+            "and it must still be reachable, now at the top level"
+        );
     }
 
     // ── Task 5: playlist selection during URL input ───────────────────────────
@@ -3535,10 +3731,10 @@ tracks = []
         rock_pl.save(&rock_path).expect("save rock");
 
         let config = crate::config::Config::default();
-        let available = vec![
+        let available = entries(vec![
             ("Source".to_string(), source_path.clone()),
             ("Rock".to_string(), rock_path.clone()),
-        ];
+        ]);
         let mut app = App::new(
             source_pl,
             config,
@@ -3599,7 +3795,7 @@ tracks = []
         source_pl.save(&source_path).expect("save source");
 
         let config = crate::config::Config::default();
-        let available = vec![("Source".to_string(), source_path.clone())];
+        let available = entries(vec![("Source".to_string(), source_path.clone())]);
         let mut app = App::new(
             source_pl,
             config,
@@ -3646,7 +3842,7 @@ tracks = []
         pl.save(&path).expect("save");
 
         let config = crate::config::Config::default();
-        let available = vec![("Active".to_string(), path.clone())];
+        let available = entries(vec![("Active".to_string(), path.clone())]);
         let mut app = App::new(pl, config, available, path.clone(), test_library());
 
         // Simulate track A currently playing at a non-zero position.
@@ -3700,7 +3896,7 @@ tracks = []
         pl.save(&path).expect("save");
 
         let config = crate::config::Config::default();
-        let available = vec![("Active".to_string(), path.clone())];
+        let available = entries(vec![("Active".to_string(), path.clone())]);
         let mut app = App::new(pl, config, available, path.clone(), test_library());
 
         // Track A is "playing" at a non-zero position (mirrors the user report:
@@ -3769,10 +3965,10 @@ tracks = []
         rock_pl.save(&rock_path).expect("save rock");
 
         let config = crate::config::Config::default();
-        let available = vec![
+        let available = entries(vec![
             ("Active".to_string(), active_path.clone()),
             ("Rock".to_string(), rock_path.clone()),
-        ];
+        ]);
         let mut app = App::new(
             active_pl,
             config,
@@ -3830,7 +4026,7 @@ tracks = []
         pl.save(&path).expect("save");
 
         let config = crate::config::Config::default();
-        let available = vec![("Active".to_string(), path.clone())];
+        let available = entries(vec![("Active".to_string(), path.clone())]);
         let mut app = App::new(pl, config, available, path.clone(), test_library());
 
         // `cache_status` must be paired with an existing `file` — otherwise
@@ -3875,7 +4071,7 @@ tracks = []
         pl.save(&path).expect("save");
 
         let config = crate::config::Config::default();
-        let available = vec![("Active".to_string(), path.clone())];
+        let available = entries(vec![("Active".to_string(), path.clone())]);
         let mut app = App::new(pl, config, available, path.clone(), test_library());
 
         app.patch_track("does-not-exist", |t| {
@@ -3913,10 +4109,10 @@ tracks = []
         browsing_pl.save(&browsing_path).expect("save browsing");
 
         let config = crate::config::Config::default();
-        let available = vec![
+        let available = entries(vec![
             ("Playing".to_string(), playing_path.clone()),
             ("Browsing".to_string(), browsing_path.clone()),
-        ];
+        ]);
         let mut app = App::new(
             browsing_pl,
             config,
@@ -3985,10 +4181,10 @@ tracks = []
         browsing_pl.save(&browsing_path).expect("save browsing");
 
         let config = crate::config::Config::default();
-        let available = vec![
+        let available = entries(vec![
             ("Playing".to_string(), playing_path.clone()),
             ("Browsing".to_string(), browsing_path.clone()),
-        ];
+        ]);
         let mut app = App::new(
             browsing_pl,
             config,
@@ -4036,10 +4232,10 @@ tracks = []
         let mut pl = make_playlist("Active");
         add_track(&mut pl, make_track("vid1", "Track One"));
         let config = crate::config::Config::default();
-        let available = vec![(
+        let available = entries(vec![(
             "Active".to_string(),
             std::path::PathBuf::from("/fake/Active.toml"),
-        )];
+        )]);
         let mut app = App::new(
             pl,
             config,
@@ -4069,7 +4265,7 @@ tracks = []
         pl.save(&path).expect("save");
 
         let config = crate::config::Config::default();
-        let available = vec![("Active".to_string(), path.clone())];
+        let available = entries(vec![("Active".to_string(), path.clone())]);
         let mut app = App::new(pl, config, available, path.clone(), test_library());
 
         app.playing = Some(session_at(
@@ -4421,10 +4617,10 @@ tracks = []
         rock_pl.save(&rock_path).expect("save rock");
 
         let config = crate::config::Config::default();
-        let available = vec![
+        let available = entries(vec![
             ("Browsing".to_string(), browsing_path.clone()),
             ("Rock".to_string(), rock_path.clone()),
-        ];
+        ]);
         let mut app = crate::tui::App::new(
             browsing_pl,
             config,
@@ -4625,7 +4821,7 @@ tracks = []
         source_pl.save(&source_path).expect("save source");
 
         let config = crate::config::Config::default();
-        let available = vec![("Source".to_string(), source_path.clone())];
+        let available = entries(vec![("Source".to_string(), source_path.clone())]);
         let mut app = App::new(
             source_pl,
             config,
@@ -4696,7 +4892,7 @@ tracks = []
         let (_dir, path) = write_temp_playlist(&pl);
 
         let config = crate::config::Config::default();
-        let available = vec![("Active".to_string(), path.clone())];
+        let available = entries(vec![("Active".to_string(), path.clone())]);
         let mut app =
             crate::tui::App::new(pl.clone(), config, available, path.clone(), test_library());
 
@@ -4757,7 +4953,10 @@ tracks = []
 
         let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
         app.available_playlists
-            .push(("Elsewhere".to_string(), old_path.clone()));
+            .push(crate::playlist::PlaylistEntry::normal(
+                "Elsewhere".to_string(),
+                old_path.clone(),
+            ));
 
         app.playing = Some(session_at(old_path.clone(), elsewhere, 0));
 
@@ -4800,7 +4999,10 @@ tracks = []
 
         let mut app = make_app_with_playlists("Browsing", &["Browsing"]);
         app.available_playlists
-            .push(("Elsewhere".to_string(), elsewhere_path.clone()));
+            .push(crate::playlist::PlaylistEntry::normal(
+                "Elsewhere".to_string(),
+                elsewhere_path.clone(),
+            ));
 
         app.playing = Some(session_at(elsewhere_path.clone(), elsewhere, 0));
         app.is_paused = true;
@@ -4852,7 +5054,7 @@ tracks = []
         let (_dir, path) = write_temp_playlist(&pl);
 
         let config = crate::config::Config::default();
-        let available = vec![("Active".to_string(), path.clone())];
+        let available = entries(vec![("Active".to_string(), path.clone())]);
         let mut app =
             crate::tui::App::new(pl.clone(), config, available, path.clone(), test_library());
 
@@ -4988,7 +5190,7 @@ tracks = []
         let mut app = App::new(
             pl,
             crate::config::Config::default(),
-            vec![("Active".to_string(), path.clone())],
+            entries(vec![("Active".to_string(), path.clone())]),
             path.clone(),
             test_library(),
         );
@@ -5098,7 +5300,7 @@ tracks = []
         let mut app = crate::tui::App::new(
             pl,
             crate::config::Config::default(),
-            vec![("Active".to_string(), path.clone())],
+            entries(vec![("Active".to_string(), path.clone())]),
             path.clone(),
             test_library(),
         );
@@ -5141,7 +5343,7 @@ tracks = []
         let mut app = crate::tui::App::new(
             pl,
             crate::config::Config::default(),
-            vec![("Active".to_string(), path.clone())],
+            entries(vec![("Active".to_string(), path.clone())]),
             path.clone(),
             test_library(),
         );
@@ -5177,7 +5379,7 @@ tracks = []
         let mut app = crate::tui::App::new(
             make_playlist("Active"),
             crate::config::Config::default(),
-            vec![("Active".to_string(), active_path.clone())],
+            entries(vec![("Active".to_string(), active_path.clone())]),
             active_path,
             test_library(),
         );
@@ -5452,7 +5654,7 @@ tracks = []
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(format!("{}.toml", pl.name));
         pl.save(&path).expect("save");
-        let available = vec![(pl.name.clone(), path.clone())];
+        let available = entries(vec![(pl.name.clone(), path.clone())]);
         let app = crate::tui::App::new(
             pl,
             crate::config::Config::default(),
@@ -5574,10 +5776,10 @@ tracks = []
         add_track(&mut rock, make_track("youtube:A", "Track A"));
         rock.save(&rock_path).expect("save rock");
 
-        let available = vec![
+        let available = entries(vec![
             ("Active".to_string(), active_path.clone()),
             ("Rock".to_string(), rock_path.clone()),
-        ];
+        ]);
         let mut app = App::new(
             make_playlist("Active"),
             crate::config::Config::default(),
@@ -5873,10 +6075,10 @@ tracks = []
             .save(&target_path)
             .expect("save target");
 
-        let available = vec![
+        let available = entries(vec![
             ("Source".to_string(), source_path.clone()),
             ("Target".to_string(), target_path.clone()),
-        ];
+        ]);
         let mut app = App::new(
             source,
             crate::config::Config::default(),
@@ -5924,10 +6126,10 @@ tracks = []
         doomed.save(&doomed_path).expect("save doomed");
 
         // Sorted so that sidebar index 1 is "Active" and 2 is "Doomed".
-        let available = vec![
+        let available = entries(vec![
             ("Active".to_string(), active_path.clone()),
             ("Doomed".to_string(), doomed_path.clone()),
-        ];
+        ]);
         let mut app = App::new(
             make_playlist("Active"),
             crate::config::Config::default(),
@@ -5998,10 +6200,10 @@ tracks = []
         }
         other.save(&other_path).expect("save other");
 
-        let available = vec![
+        let available = entries(vec![
             ("Displayed".to_string(), displayed_path.clone()),
             ("Other".to_string(), other_path.clone()),
-        ];
+        ]);
         let app = App::new(
             displayed,
             crate::config::Config::default(),
@@ -6087,10 +6289,10 @@ tracks = []
 
         // Listed but absent from disk: we cannot prove the file is unreferenced.
         let missing_path = dir.path().join("Missing.toml");
-        let available = vec![
+        let available = entries(vec![
             ("Displayed".to_string(), displayed_path.clone()),
             ("Missing".to_string(), missing_path),
-        ];
+        ]);
         let app = App::new(
             make_playlist("Displayed"),
             crate::config::Config::default(),
@@ -6338,10 +6540,10 @@ tracks = []
         let mut app = crate::tui::App::new(
             active,
             crate::config::Config::default(),
-            vec![
+            entries(vec![
                 ("Active".to_string(), active_path.clone()),
                 ("Other".to_string(), other_path.clone()),
-            ],
+            ]),
             active_path.clone(),
             test_library(),
         );
@@ -6391,10 +6593,10 @@ tracks = []
         let mut app = crate::tui::App::new(
             active.clone(),
             crate::config::Config::default(),
-            vec![
+            entries(vec![
                 ("Active".to_string(), active_path.clone()),
                 ("Other".to_string(), other_path.clone()),
-            ],
+            ]),
             active_path.clone(),
             test_library(),
         );
@@ -6580,7 +6782,10 @@ tracks = []
         // The playlist on screen, with loop off — it must have no say here.
         let (_d, active_path, mut app) = app_with_tracks(3);
         app.available_playlists
-            .push(("Other".to_string(), other_path.clone()));
+            .push(crate::playlist::PlaylistEntry::normal(
+                "Other".to_string(),
+                other_path.clone(),
+            ));
 
         app.playing = Some(session_at(
             other_path.clone(),
@@ -7166,9 +7371,12 @@ tracks = []
         let path = dir.path().join(format!("{}.toml", pl.name));
         pl.save(&path).expect("save playlist");
 
-        let mut available = vec![(pl.name.clone(), path.clone())];
+        let mut available = entries(vec![(pl.name.clone(), path.clone())]);
         for (name, other) in others {
-            available.push((name.to_string(), other.to_path_buf()));
+            available.push(crate::playlist::PlaylistEntry::normal(
+                name.to_string(),
+                other.to_path_buf(),
+            ));
         }
         let library = crate::library::Library::load(&tracks).expect("load library");
         let app = crate::tui::App::new(
@@ -7231,10 +7439,10 @@ tracks = []
         beta.tracks.push("youtube:shared".to_string());
         beta.save(&beta_path).expect("save beta");
 
-        let available = vec![
+        let available = entries(vec![
             ("Alpha".to_string(), alpha_path.clone()),
             ("Beta".to_string(), beta_path.clone()),
-        ];
+        ]);
 
         // Listen to 90 seconds of it out of Alpha and leave.
         let mut app = App::new(

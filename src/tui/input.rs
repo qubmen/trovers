@@ -1,7 +1,7 @@
 use super::{App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
 use crate::library;
 use crate::library::Track;
-use crate::playlist::{LoopMode, Playlist};
+use crate::playlist::{LoopMode, Playlist, PlaylistEntry, PlaylistKind};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tracing::{error, info, warn};
@@ -109,7 +109,7 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                             app.sidebar_selected = 0;
                         }
                     }
-                    SidebarItem::Playlist { name, path } => {
+                    SidebarItem::Playlist { name, path, .. } => {
                         let name = name.clone();
                         let path = path.clone();
                         if let Err(e) = app.switch_to_playlist(&name, &path) {
@@ -551,8 +551,8 @@ async fn handle_url_input(app: &mut App, key: KeyEvent) -> Result<Action> {
                     } else {
                         app.available_playlists
                             .iter()
-                            .find(|(n, _)| n == name)
-                            .map(|(_, p)| p.clone())
+                            .find(|entry| entry.name == *name)
+                            .map(|entry| entry.path.clone())
                     }
                 });
                 app.fetch_url_to(url, target_path);
@@ -584,8 +584,9 @@ async fn handle_new_playlist(app: &mut App, key: KeyEvent) -> Result<Action> {
                 }
                 match Playlist::create(&name) {
                     Ok((_, path)) => {
-                        app.available_playlists.push((name, path));
-                        app.available_playlists.sort_by(|a, b| a.0.cmp(&b.0));
+                        app.available_playlists
+                            .push(PlaylistEntry::normal(name, path));
+                        app.available_playlists.sort_by(|a, b| a.name.cmp(&b.name));
                     }
                     Err(e) => {
                         error!(err = %e, "failed to create playlist");
@@ -734,6 +735,7 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
             if let Some(SidebarItem::Playlist {
                 name: old_name,
                 path: old_path,
+                ..
             }) = selected_item
             {
                 // Validate: no duplicate name
@@ -756,23 +758,26 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
                     Ok(new_path) => {
                         // Update available_playlists entry
                         for entry in &mut app.available_playlists {
-                            if entry.0 == old_name {
-                                entry.0 = new_name.clone();
-                                entry.1 = new_path.clone();
+                            if entry.name == old_name {
+                                entry.name = new_name.clone();
+                                entry.path = new_path.clone();
                                 break;
                             }
                         }
-                        app.available_playlists.sort_by(|a, b| a.0.cmp(&b.0));
+                        // Albums point at their parent by name, so a rename has to
+                        // follow them or every album under it orphans.
+                        repoint_albums(app, &old_name, &new_name);
+                        app.available_playlists.sort_by(|a, b| a.name.cmp(&b.name));
 
-                        // Re-anchor sidebar_selected to the renamed playlist's new position.
-                        // sidebar_items() starts with PlaylistsHeader at index 0, so playlist
-                        // entries begin at index 1 when expanded.
-                        if let Some(new_pos) = app
-                            .available_playlists
-                            .iter()
-                            .position(|(n, _)| n == &new_name)
-                        {
-                            app.sidebar_selected = 1 + new_pos; // +1 for PlaylistsHeader
+                        // Re-anchor sidebar_selected to the renamed playlist's new
+                        // position. Found by looking, not by arithmetic on the
+                        // listing's index: albums nest, so a playlist's row number
+                        // is no longer its position in `available_playlists`.
+                        let items = app.sidebar_items();
+                        if let Some(new_pos) = items.iter().position(
+                            |i| matches!(i, SidebarItem::Playlist { name, .. } if name == &new_name),
+                        ) {
+                            app.sidebar_selected = new_pos;
                         }
 
                         // If the playing session belongs to the renamed playlist file,
@@ -809,6 +814,32 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
     Ok(Action::Continue)
 }
 
+/// Point every album that named `old_name` as its parent at `new_name`, in the
+/// listing and in each album's own file.
+///
+/// A failed write is logged rather than fatal: the album is still there and still
+/// listed, it has merely orphaned to the top level, which the user can fix by
+/// hand. Losing the rename over it would be worse.
+fn repoint_albums(app: &mut App, old_name: &str, new_name: &str) {
+    for entry in &mut app.available_playlists {
+        if entry.kind != PlaylistKind::Album || entry.parent.as_deref() != Some(old_name) {
+            continue;
+        }
+        entry.parent = Some(new_name.to_string());
+        match Playlist::load(&entry.path) {
+            Ok(mut album) => {
+                album.parent = Some(new_name.to_string());
+                if let Err(e) = album.save(&entry.path) {
+                    error!(err = %e, album = %entry.name, "failed to save album's new parent");
+                }
+            }
+            Err(e) => {
+                error!(err = %e, album = %entry.name, "failed to load album to repoint its parent");
+            }
+        }
+    }
+}
+
 // ── Playlist delete ───────────────────────────────────────────────────────
 
 pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
@@ -818,7 +849,7 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
 
             let items = app.sidebar_items();
             let selected_item = items.get(app.sidebar_selected).cloned();
-            if let Some(SidebarItem::Playlist { name, path }) = selected_item {
+            if let Some(SidebarItem::Playlist { name, path, .. }) = selected_item {
                 // Don't allow deleting the active playlist
                 if app.playlist.name == name {
                     warn!("cannot delete the currently active playlist");
@@ -843,7 +874,10 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
                         // The tracks it listed are untouched: they live in the
                         // library, and any in-flight download still lands in the
                         // document it was started for.
-                        app.available_playlists.retain(|(n, _)| n != &name);
+                        // Its albums are playlists in their own right: their files
+                        // stay put and they orphan to the top level, which is what
+                        // `nested_order` does with a parent that is not there.
+                        app.available_playlists.retain(|entry| entry.name != name);
                         // Move sidebar selection up if needed
                         let new_items = app.sidebar_items();
                         if app.sidebar_selected >= new_items.len() {
@@ -888,7 +922,7 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
 /// `exclude` is an optional name to skip during duplicate check (used for rename).
 pub(crate) fn validate_playlist_name(
     name: &str,
-    existing: &[(String, std::path::PathBuf)],
+    existing: &[PlaylistEntry],
     exclude: Option<&str>,
 ) -> std::result::Result<(), String> {
     if name.is_empty() {
@@ -906,7 +940,7 @@ pub(crate) fn validate_playlist_name(
     // Check for duplicate
     let is_duplicate = existing
         .iter()
-        .any(|(n, _)| n == name && exclude.map_or(true, |ex| n != ex));
+        .any(|entry| entry.name == name && exclude.map_or(true, |ex| entry.name != ex));
     if is_duplicate {
         return Err(format!("a playlist named '{name}' already exists"));
     }

@@ -531,6 +531,10 @@ pub fn migrate(playlists_dir: &Path, tracks_dir: &Path) -> Result<Option<Migrati
             default_speed: pl.default_speed,
             tracks: ids,
             current_track,
+            // Nothing predating the library was ever an album.
+            kind: crate::playlist::PlaylistKind::Normal,
+            parent: None,
+            source_folder: None,
         };
         migrated.save(&pl.path)?;
     }

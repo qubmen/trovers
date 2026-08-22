@@ -141,7 +141,12 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     };
                     Line::styled(format!(" {arrow} ≡ Playlists"), style)
                 }
-                SidebarItem::Playlist { name, .. } => {
+                SidebarItem::Playlist {
+                    name,
+                    depth,
+                    is_album,
+                    ..
+                } => {
                     let marker = if name == active_name { " ◄" } else { "" };
                     let (fg, bg) = if is_selected {
                         (Color::White, ACCENT_DIM)
@@ -150,8 +155,16 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     } else {
                         (Color::White, Color::Reset)
                     };
+                    // An album says so with a glyph rather than by indent alone,
+                    // because an orphaned one sits at the top level and is still
+                    // an album. Whatever the prefix costs comes off the name, so
+                    // every row ends up the same width.
+                    let indent = if *depth > 0 { "     " } else { "   " };
+                    let glyph = if *is_album { "⊞ " } else { "" };
+                    let prefix = indent.chars().count() + glyph.chars().count();
+                    let room = (3 + 14usize).saturating_sub(prefix);
                     Line::styled(
-                        format!("   {}{}", truncate(name, 14), marker),
+                        format!("{indent}{glyph}{}{marker}", truncate(name, room)),
                         Style::new().fg(fg).bg(bg),
                     )
                 }
@@ -1173,8 +1186,8 @@ pub(crate) fn playlist_delete_target<'a>(app: &'a App) -> Option<&'a str> {
             // Return ref to the name stored in available_playlists for lifetime safety
             app.available_playlists
                 .iter()
-                .find(|(n, _)| n == name)
-                .map(|(n, _)| n.as_str())
+                .find(|entry| &entry.name == name)
+                .map(|entry| entry.name.as_str())
         }
         _ => None,
     }

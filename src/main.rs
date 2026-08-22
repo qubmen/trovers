@@ -9,6 +9,8 @@ mod library_scan_test;
 mod library_test;
 mod player;
 mod playlist;
+#[cfg(test)]
+mod playlist_test;
 mod tui;
 mod ytdlp;
 
@@ -118,15 +120,8 @@ async fn main() -> Result<()> {
         let _ = config.save();
     }
 
-    let available_playlists = playlist::Playlist::list_all()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|p| {
-            p.file_stem()
-                .and_then(|s| s.to_str())
-                .map(|name| (name.to_string(), p.clone()))
-        })
-        .collect();
+    let available_playlists =
+        playlist::Playlist::list_entries(&cache::playlists_dir()).unwrap_or_default();
 
     // The one place the library's location is decided; `Library` itself only ever
     // works against the root it is handed, which is what makes it testable.

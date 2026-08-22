@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -10,6 +11,18 @@ pub enum LoopMode {
     None,
     Track,
     Playlist,
+}
+
+/// Whether a playlist stands on its own or hangs under another one.
+///
+/// Two levels, deliberately: a playlist and the albums inside it. Deeper nesting
+/// buys a tree widget and a lot of cursor arithmetic for very little.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaylistKind {
+    #[default]
+    Normal,
+    Album,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +40,42 @@ pub struct Playlist {
     /// same track can sit in several playlists with one position between them.
     pub tracks: Vec<String>,
     pub current_track: Option<String>,
+    /// The three below are `default`ed so every playlist written before albums
+    /// existed loads as what it is: a top-level list belonging to nobody.
+    #[serde(default)]
+    pub kind: PlaylistKind,
+    /// The playlist this album sits under, by name. A name rather than a path
+    /// because that is what the sidebar and the rename path both address a
+    /// playlist by; a dangling name simply orphans the album to the top level.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// The folder this album mirrors, when it was imported from one. Its presence
+    /// is what makes an album rescannable.
+    #[serde(default)]
+    pub source_folder: Option<PathBuf>,
+}
+
+/// A playlist as the sidebar needs it: enough to draw and address it, without
+/// loading every track list on every frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaylistEntry {
+    /// The file's stem, which is the name everything else addresses it by.
+    pub name: String,
+    pub path: PathBuf,
+    pub kind: PlaylistKind,
+    pub parent: Option<String>,
+}
+
+impl PlaylistEntry {
+    /// A top-level playlist belonging to nobody — what creating one gives you.
+    pub fn normal(name: String, path: PathBuf) -> Self {
+        PlaylistEntry {
+            name,
+            path,
+            kind: PlaylistKind::Normal,
+            parent: None,
+        }
+    }
 }
 
 impl Playlist {
@@ -68,6 +117,42 @@ impl Playlist {
         Ok(paths)
     }
 
+    /// Every playlist file in `dir`, sorted by name.
+    ///
+    /// Each file is parsed for its `kind` and `parent` — the sidebar has to know
+    /// what hangs under what before it can draw a single row. One that will not
+    /// parse is still listed, as a normal playlist: a broken file the user can see
+    /// and delete beats a row that silently vanished.
+    pub fn list_entries(dir: &Path) -> Result<Vec<PlaylistEntry>> {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(dir)
+            .with_context(|| format!("failed to read playlists dir at {}", dir.display()))?
+        {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let (kind, parent) = match Playlist::load(&path) {
+                Ok(pl) => (pl.kind, pl.parent),
+                Err(e) => {
+                    warn!(err = %e, path = %path.display(), "unreadable playlist, listing it as a plain one");
+                    (PlaylistKind::Normal, None)
+                }
+            };
+            entries.push(PlaylistEntry {
+                name: name.to_string(),
+                path,
+                kind,
+                parent,
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
+    }
+
     /// Create a new empty playlist and save it to disk.
     pub fn create(name: &str) -> Result<(Self, PathBuf)> {
         let playlist = Playlist {
@@ -78,6 +163,9 @@ impl Playlist {
             default_speed: None,
             tracks: Vec::new(),
             current_track: None,
+            kind: PlaylistKind::Normal,
+            parent: None,
+            source_folder: None,
         };
         let path = cache::playlists_dir().join(format!("{name}.toml"));
         playlist.save(&path)?;
@@ -137,6 +225,47 @@ impl Playlist {
         }
         true
     }
+}
+
+/// Playlist entries in display order, each paired with its indent level.
+///
+/// Top-level playlists come alphabetically, each immediately followed by its own
+/// albums, also alphabetically. Only an album nests, and only under a *normal*
+/// playlist that is actually present — which keeps the tree two deep and gives
+/// every broken link the same harmless answer: an album whose parent was deleted,
+/// or which names another album (or itself), comes back as a top-level row.
+///
+/// Reorders rows; never adds or drops one.
+pub fn nested_order(entries: &[PlaylistEntry]) -> Vec<(&PlaylistEntry, usize)> {
+    let can_parent = |name: &str| {
+        entries
+            .iter()
+            .any(|e| e.name == name && e.kind == PlaylistKind::Normal)
+    };
+    let parent_of = |entry: &PlaylistEntry| -> Option<String> {
+        if entry.kind != PlaylistKind::Album {
+            return None;
+        }
+        entry.parent.clone().filter(|p| can_parent(p))
+    };
+
+    let mut sorted: Vec<&PlaylistEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut rows = Vec::with_capacity(sorted.len());
+    for entry in &sorted {
+        // Anything with a real parent is emitted below that parent instead.
+        if parent_of(entry).is_some() {
+            continue;
+        }
+        rows.push((*entry, 0));
+        for child in &sorted {
+            if parent_of(child).as_deref() == Some(entry.name.as_str()) {
+                rows.push((*child, 1));
+            }
+        }
+    }
+    rows
 }
 
 /// A shuffled traversal order over `0..len`.
