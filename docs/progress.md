@@ -21,9 +21,13 @@ Legend: ✅ done · 🚧 stub/partial · ⬜ not started
 
 | Task | Status | Notes |
 |------|--------|-------|
-| `Playlist` + `Track` structs with serde | ✅ | full TOML round-trip |
-| `CacheStatus` / `LoopMode` enums | ✅ | serde rename_all = "lowercase" |
-| `Playlist::load()` | ✅ | crash recovery: downloading → streaming |
+| `Track` + `CacheStatus` in `library.rs` | ✅ | one document per track; full TOML round-trip |
+| `Playlist` holds `tracks: Vec<String>` | ✅ | ordered library ids and nothing else (ADR-015) |
+| `LoopMode` enum | ✅ | serde rename_all = "lowercase" |
+| `Library::load()` | ✅ | indexes by the document's inner `id`; crash recovery: downloading → streaming, cached-but-file-gone → streaming; warn-and-skip an unreadable document |
+| `Library::get/get_mut/save/upsert/remove` | ✅ | atomic write per document; `-2` suffix on filename collision |
+| `library::migrate()` | ✅ | rewrites playlists that still embed their tracks; shape-detected, so it is a no-op on every later launch; backs `playlists/` up first |
+| `Playlist::load()` | ✅ | nothing to repair — that is `Library::load`'s job |
 | `Playlist::save()` | ✅ | atomic write via tmp + rename |
 | `Playlist::list_all()` | ✅ | returns sorted Vec<PathBuf> |
 | `Playlist::create()` | ✅ | creates new empty playlist on disk |
@@ -84,11 +88,11 @@ Legend: ✅ done · 🚧 stub/partial · ⬜ not started
 |------|--------|-------|
 | Play track on Enter (spawn player) | ✅ | resumes from `last_position` via `resume_start_pos` |
 | Add URL: fetch meta → add to playlist | ✅ | adds + backgrounds download only; never auto-plays or touches `current_track` (fixed add-track playback-hijack bug) |
-| Start download after play begins | ✅ | per-`video_id` progress via `HashMap<String, f32>` (no cross-track clobbering) |
+| Start download after play begins | ✅ | per-track progress via `HashMap<String, f32>` keyed by library id (no cross-track clobbering) |
 | Switch player when track changes (n/b) | ✅ | `n`/`b` always step the **displayed** playlist (`app.playlist`), independent of what's actually playing; follow the shuffled order when shuffle is on and no search filter is active |
 | Auto-advance at end of track | ✅ | mpv's own exit is the EOF signal (`PlayerGone` + `reached_end_of_track`); honours `loop_mode` and shuffle, and follows the **playing** playlist |
-| Position polling → TOML on quit | ✅ | `App::flush_playing_position()` writes `last_position` for the `PlayingSession`'s track to disk in `run()`'s single quit path, before `ratatui::restore()` |
-| cache_status: streaming→downloading→cached | ✅ | transitions routed through `patch_and_save_playlist` path-aware helper |
+| Position polling → TOML on quit | ✅ | `App::flush_playing_position()` writes `last_position` into the playing track's own document in `run()`'s single quit path, before `ratatui::restore()`; also on a 15s throttle |
+| cache_status: streaming→downloading→cached | ✅ | transitions written to the track's document via `patch_track(id, f)` — no playlist involved |
 | Reload available_playlists on create | ✅ | |
 | Switch playlist from sidebar Enter | ✅ | `switch_to_playlist()` no longer stops playback — player/position/pause state are untouched by playlist switches; also persists `config.active_playlist` |
 | Save playlist + config on q | ✅ | quit path flushes playing-track position before saving, closing the previous "player flush missing" gap |
@@ -110,6 +114,86 @@ ADR-012/ADR-013 in `docs/decisions.md` for the designs.
 
 ---
 
+## Track library (2026-08-22)
+
+Phase 1 of `Track library, albums, local folders, video` — a behaviour-preserving
+refactor. Everything that worked before works identically after, with one
+deliberate change: the same track in two playlists now shares one position and
+one speed instead of keeping two divergent copies. See ADR-015.
+
+| Piece | Status | Notes |
+|-------|--------|-------|
+| `src/library.rs` — documents, ids, `Library` | ✅ | `root` injected, so the whole thing tests against a tempdir |
+| `Playlist.tracks: Vec<Track>` → `Vec<String>` | ✅ | `current_track` holds an id |
+| Startup migration + backup | ✅ | verified on a copy of a real library: 3 playlists → 19 documents, order/`current_track`/`last_position`/`speed`/`cache_status` all preserved |
+| `App` rewired onto the library | ✅ | `patch_track(id, f)`; a row whose document is missing renders dimmed rather than vanishing |
+| Ownership bookkeeping deleted | ✅ | `download_targets`, `remap_download_targets`, `retarget_download`, `clear_download_state_for_playlist`, `patch_and_save_playlist`, `save_playing_session_playlist` |
+| Manual check at a real terminal | ⬜ | resume-on-`Enter`, `◈` rows playing from disk, position surviving quit → relaunch |
+
+---
+
+## Albums and local folders (2026-08-22)
+
+Phase 2 of the same plan. New user-facing behaviour: point trovers at a folder
+and it becomes an album under the current playlist. See ADR-016 (album as a child
+playlist), ADR-017 (ffprobe as a soft dependency) and ADR-018 (never delete a
+user's file).
+
+| Piece | Status | Notes |
+|-------|--------|-------|
+| `Track.origin` / `media` / `resume`, `CacheStatus::Missing` | ✅ | all `serde(default)`ed, so every Phase 1 document loads as what it is; `Missing` heals back to `Cached` when the file reappears |
+| `src/library_scan.rs` — walk, probe, filename parse | ✅ | stack-based `read_dir`, depth-capped at 16, does not follow directory symlinks; ffprobe optional, warned about once |
+| Albums as child playlists (`kind`/`parent`/`source_folder`) | ✅ | `Playlist::list_entries()`, sidebar indent, orphans fall back to top level, rename rewrites children |
+| `src/library_import.rs` + `F` import / `R` rescan | ✅ | rescan appends and marks, never deletes or reorders; counts reported in the status line |
+| Never-delete-user-files guard | ✅ | three sites: `handle_confirm_delete`, `recache_track`, the playback path |
+| Panel title totals + `J`/`K` reorder | ✅ | `Live Sets · 42 tracks · 6h 12m  [ 12–20 / 42 ]`; reorder refuses under a search filter |
+| Manual check at a real terminal | ⬜ | import a mixed folder, resume across a relaunch, rename-and-rescan → `⊘`, `d` on a local row leaves the file, an import with ffprobe off PATH |
+
+---
+
+## Albums in the track list (2026-08-22)
+
+Albums shipped as indented sidebar rows, and the sidebar has 22 columns — real names
+arrived as `Кино - Гр…`, indistinguishable from each other. So they moved into the
+panel that has room for a name and holds the tracks they belong with. See ADR-019,
+which amends the sidebar half of ADR-016; storage is unchanged.
+
+| Piece | Status | Notes |
+|-------|--------|-------|
+| `Playlist.collapsed` + albums leave the sidebar | ✅ | defaults to folded, so a two-hundred-file import arrives as one row; `playlist::sidebar_entries` keeps orphans, which is the only way left to reach one |
+| The row model — `RowSource` / `VisibleRow` / `LoadedAlbum` | ✅ | `rebuild_rows` is the only writer of `App::rows`; `track_index_at` and `filtered_indices` are gone, the search filter is an input rather than a parallel answer |
+| Headers, indented album tracks, panel title | ✅ | `▸`/`▾` glyphs, deliberately not the playing marker's `▶`; count and duration in the artist and duration columns; the scroll counter counts rows |
+| An album plays as its own list | ✅ | `play_from_list(source, idx, start_pos)` is the single door; `n`/`b`, loop, shuffle and auto-advance stay inside the album, each with its own shuffled order |
+| Header keys and owner-aware edits | ✅ | `Enter` folds (a header is not playable), `r`/`d`/`R` reach that album, `J`/`K` refuse; `d`, `m` and `J`/`K` on a track row edit and save the list the row came out of |
+| Imports, rescans and switches keep the rows in step | ✅ | an import lands as an open album under the cursor; a rename repoints the loaded copies; deleting from the sidebar takes the row with it |
+| Manual check at a real terminal | ⬜ | fold two albums and confirm the state survives a restart; play through the end of an album and confirm auto-advance stays inside it; rename and forget an album from its header and confirm the folder is untouched |
+
+---
+
+## Video playback (2026-08-22)
+
+Phase 3 of the same plan. A track whose `media` is `Video` — which in practice means
+a local file, since remote tracks are downloaded as audio — now plays in an mpv
+window instead of being reduced to its soundtrack. See ADR-020.
+
+| Piece | Status | Notes |
+|-------|--------|-------|
+| `player::mpv_args` — the command line as a pure function | ✅ | video drops `--no-video` and adds `--force-window=yes`; `--no-terminal`/`--really-quiet` unconditional, because the tty stays the TUI's whatever is playing |
+| `MediaKind` threaded to the spawn | ✅ | `spawn_player_for` takes it; all three callers already held the track |
+| `config.video_mpv_args` | ✅ | `serde(default)`, so an older config loads with none; appended last so a user's conflicting flag wins, and video-only so a typo can never stop music |
+| `▣` on video rows | ✅ | in the title column after an album's indent — playing one opens a window over the terminal, worth a glyph's warning before the keypress |
+| Manual check at a real terminal | ⬜ | play a video row: a window opens, the TUI keeps rendering, `Space`/seek/speed still drive it over IPC, `q` closes both; play an audio row straight after and confirm no window; set `video_mpv_args = ["--focus-on=never"]` and confirm it takes effect; set a bogus flag and confirm it surfaces as a `PlayerError` rather than a hang |
+
+**A known gap in the automated coverage, not an oversight.** `mpv_args` is tested
+exhaustively, but the one line that decides *which* `video` a given row gets
+(`spawn_player_for`) is unobservable without a real mpv — mutating it to a constant
+`false` leaves the whole suite green. Recording spawn arguments in production state
+purely so a test could read them back would be worse than the gap, so that line is
+covered by the manual check above. The plan's Phase 3 verification is deliberately
+manual for the same reason.
+
+---
+
 ## Next Steps
 
 All originally-listed Integration wiring steps are now complete. The
@@ -119,6 +203,6 @@ remaining gaps: `switch_to_playlist` no longer stops playback, the playing
 track is tracked independently via `PlayingSession` (see ADR-011 in
 `docs/decisions.md`), resume-from-`last_position` works, position is flushed
 to TOML on quit, `active_playlist` persists across restarts, and download
-progress is tracked per `video_id`. No further Integration TODOs are
+progress is tracked per track. No further Integration TODOs are
 outstanding; future work should be tracked as new plans rather than appended
 here.

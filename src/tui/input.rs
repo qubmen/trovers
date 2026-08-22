@@ -1,5 +1,8 @@
 use super::{App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
-use crate::playlist::{LoopMode, Playlist, Track};
+use crate::library;
+use crate::library::Track;
+use crate::library_import;
+use crate::playlist::{LoopMode, Playlist, PlaylistEntry, PlaylistKind};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tracing::{error, info, warn};
@@ -49,6 +52,9 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
                 | InputMode::TrackContextMenu
                 | InputMode::PlaylistRename
                 | InputMode::PlaylistDelete
+                | InputMode::AlbumRename
+                | InputMode::AlbumDelete
+                | InputMode::FolderInput
         )
     {
         app.focus = match app.focus {
@@ -71,6 +77,9 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
         InputMode::TrackContextMenu => handle_track_context_menu(app, key),
         InputMode::PlaylistRename => handle_playlist_rename(app, key).await,
         InputMode::PlaylistDelete => handle_playlist_delete(app, key).await,
+        InputMode::AlbumRename => handle_album_rename(app, key),
+        InputMode::AlbumDelete => handle_album_delete(app, key),
+        InputMode::FolderInput => handle_folder_input(app, key),
         InputMode::Help => Ok(Action::Continue),
     }
 }
@@ -107,7 +116,7 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                             app.sidebar_selected = 0;
                         }
                     }
-                    SidebarItem::Playlist { name, path } => {
+                    SidebarItem::Playlist { name, path, .. } => {
                         let name = name.clone();
                         let path = path.clone();
                         if let Err(e) = app.switch_to_playlist(&name, &path) {
@@ -121,6 +130,11 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                         app.input_mode = InputMode::UrlInput;
                         app.input_buf.clear();
                         app.target_playlist_for_url = Some(app.playlist.name.clone());
+                        app.focus = Focus::TrackList;
+                    }
+                    SidebarItem::ImportFolder => {
+                        app.input_mode = InputMode::FolderInput;
+                        app.input_buf.clear();
                         app.focus = Focus::TrackList;
                     }
                     SidebarItem::Settings => {
@@ -210,9 +224,12 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         // Enter: select track and start playback (resuming from
         // `last_position` if the track has one).
         KeyCode::Enter => {
-            if let Some(idx) = app.track_index_at(app.selected) {
-                let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
-                app.request_playback(idx, start_pos);
+            // On an album header this folds or unfolds the group instead: a header
+            // names a list, and there is nothing to play about a list.
+            if let Some(album) = app.album_of(app.selected) {
+                app.toggle_album(album);
+            } else {
+                app.play_row(app.selected);
             }
         }
 
@@ -231,9 +248,8 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                     None => None,
                 };
                 note_ipc_result(app, "pause", res);
-            } else if let Some(idx) = app.track_index_at(app.selected) {
-                let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
-                app.request_playback(idx, start_pos);
+            } else {
+                app.play_row(app.selected);
             }
         }
 
@@ -294,16 +310,22 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             app.save_playlist();
         }
 
-        // Toggle shuffle for the displayed playlist.
+        // On an album header, rename that album. Anywhere else, toggle shuffle for
+        // the displayed playlist.
         KeyCode::Char('r') => {
-            app.playlist.shuffle = !app.playlist.shuffle;
-            app.rebuild_shuffle_order();
-            app.save_playlist();
-            app.set_status(if app.playlist.shuffle {
-                "Shuffle on"
+            if let Some(album) = app.album_of(app.selected) {
+                app.input_buf = app.albums[album].name.clone();
+                app.input_mode = InputMode::AlbumRename;
             } else {
-                "Shuffle off"
-            });
+                app.playlist.shuffle = !app.playlist.shuffle;
+                app.rebuild_shuffle_order();
+                app.save_playlist();
+                app.set_status(if app.playlist.shuffle {
+                    "Shuffle on"
+                } else {
+                    "Shuffle off"
+                });
+            }
         }
 
         KeyCode::Char('n') => step_track(app, true),
@@ -317,9 +339,11 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             app.target_playlist_for_url = Some(app.playlist.name.clone());
         }
 
-        // Delete track
+        // Delete: the album on a header, otherwise the track under the cursor.
         KeyCode::Char('d') => {
-            if !app.playlist.tracks.is_empty() {
+            if app.album_of(app.selected).is_some() {
+                app.input_mode = InputMode::AlbumDelete;
+            } else if app.row_track_id(app.selected).is_some() {
                 app.input_mode = InputMode::ConfirmDelete;
             }
         }
@@ -327,8 +351,10 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         // Recache: force a fresh download of the selected track, whatever its
         // current cache status.
         KeyCode::Char('c') => {
-            if let Some(idx) = app.track_index_at(app.selected) {
-                app.recache_track(idx);
+            if app.album_of(app.selected).is_some() {
+                app.set_status("Nothing to recache for an album");
+            } else if let Some(id) = app.row_track_id(app.selected) {
+                app.recache_track(&id);
             }
         }
 
@@ -336,7 +362,7 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         KeyCode::Char('/') => {
             app.input_mode = InputMode::SearchInput;
             app.input_buf.clear();
-            app.filtered_indices.clear();
+            app.clear_search();
         }
 
         // New playlist
@@ -345,9 +371,35 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             app.input_buf.clear();
         }
 
+        // Import a local folder as an album
+        KeyCode::Char('F') => {
+            app.input_mode = InputMode::FolderInput;
+            app.input_buf.clear();
+        }
+
+        // Rescan a folder: the one the album under the cursor mirrors when the
+        // cursor is on a header, otherwise the displayed playlist's own.
+        KeyCode::Char('R') => match app.album_of(app.selected) {
+            Some(album) => app.rescan_album(album),
+            None => match app.playlist.source_folder.clone() {
+                Some(root) => app.import_folder(root),
+                None => app.set_status("Not linked to a folder"),
+            },
+        },
+
+        // Reorder the selected row within this playlist
+        KeyCode::Char('J') => app.move_selected_row(true),
+        KeyCode::Char('K') => app.move_selected_row(false),
+
         // Move track to another playlist
         KeyCode::Char('m') => {
-            if !app.playlist.tracks.is_empty() && !app.available_playlist_names().is_empty() {
+            if app.album_of(app.selected).is_some() {
+                // A header *is* a list. Opening the menu here would move whichever
+                // row happened to sit under it, which is not what was asked.
+                app.set_status("Move tracks, not albums");
+            } else if app.row_track_id(app.selected).is_some()
+                && !app.available_playlist_names().is_empty()
+            {
                 app.context_menu_selected = 0;
                 app.input_mode = InputMode::TrackContextMenu;
             }
@@ -370,34 +422,48 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
 /// around inside it at random reads as a bug rather than a feature — so a filter
 /// steps sequentially through what it shows, and shuffle resumes once cleared.
 fn step_track(app: &mut App, forward: bool) {
-    let count = app.visible_track_count();
-    if count == 0 {
+    // The rows of the list the cursor's row belongs to — the parent's own tracks,
+    // or one album's. Stepping never crosses that boundary: from an album's last
+    // track `n` wraps to its first (ADR-019). A header belongs to no list, so
+    // there is nothing to step.
+    let Some((source, group)) = app.row_group(app.selected) else {
         return;
-    }
+    };
+    let Some(pos) = group.iter().position(|&cursor| cursor == app.selected) else {
+        return;
+    };
+    let count = group.len();
 
-    let filtered = !app.filtered_indices.is_empty();
-    let next_cursor = if filtered || !app.playlist.shuffle {
-        if forward {
-            (app.selected + 1) % count
+    let shuffle = app
+        .source_playlist(source)
+        .is_some_and(|(playlist, _)| playlist.shuffle);
+    let next_cursor = if app.has_filter() || !shuffle {
+        let next = if forward {
+            (pos + 1) % count
         } else {
-            app.selected.checked_sub(1).unwrap_or(count - 1)
-        }
+            pos.checked_sub(1).unwrap_or(count - 1)
+        };
+        group[next]
     } else {
-        // Unfiltered, so cursor position and track index are the same thing and
-        // the shuffled step is directly usable as a cursor position.
-        let path = app.playlist_path.clone();
-        match app.step_index(&path, count, true, app.selected, forward) {
-            Some(idx) => idx,
+        // Unfiltered, a list's rows are its tracks in order, so its own index and
+        // its position within the group are the same number — and the shuffled
+        // step is directly usable as one.
+        let Some((_, path)) = app.source_playlist(source) else {
+            return;
+        };
+        let path = path.to_path_buf();
+        match app.step_index(&path, count, true, pos, forward) {
+            Some(idx) => match group.get(idx) {
+                Some(&cursor) => cursor,
+                None => return,
+            },
             None => return,
         }
     };
 
     app.selected = next_cursor;
     app.clamp_scroll();
-    if let Some(idx) = app.track_index_at(next_cursor) {
-        let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
-        app.request_playback(idx, start_pos);
-    }
+    app.play_row(next_cursor);
 }
 
 /// Adjust the speed of the track actually driving playback right now (per
@@ -434,11 +500,8 @@ pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) {
     };
     note_ipc_result(app, "speed", res);
 
-    // Persist through whichever copy is the source of truth for the playing
-    // track's identity: the displayed playlist (already the case when paths
-    // match, since `playing_track_mut` mutated it directly) or the playing
-    // session's own playlist file.
-    app.save_playing_session_playlist();
+    // Persist the new speed into the track's own document.
+    app.save_playing_track();
 }
 
 /// Change the volume by `delta` and push it to mpv. The config value is updated
@@ -552,8 +615,8 @@ async fn handle_url_input(app: &mut App, key: KeyEvent) -> Result<Action> {
                     } else {
                         app.available_playlists
                             .iter()
-                            .find(|(n, _)| n == name)
-                            .map(|(_, p)| p.clone())
+                            .find(|entry| entry.name == *name)
+                            .map(|entry| entry.path.clone())
                     }
                 });
                 app.fetch_url_to(url, target_path);
@@ -585,8 +648,9 @@ async fn handle_new_playlist(app: &mut App, key: KeyEvent) -> Result<Action> {
                 }
                 match Playlist::create(&name) {
                     Ok((_, path)) => {
-                        app.available_playlists.push((name, path));
-                        app.available_playlists.sort_by(|a, b| a.0.cmp(&b.0));
+                        app.available_playlists
+                            .push(PlaylistEntry::normal(name, path));
+                        app.available_playlists.sort_by(|a, b| a.name.cmp(&b.name));
                     }
                     Err(e) => {
                         error!(err = %e, "failed to create playlist");
@@ -603,14 +667,38 @@ async fn handle_new_playlist(app: &mut App, key: KeyEvent) -> Result<Action> {
     Ok(Action::Continue)
 }
 
+/// The folder path prompt. Deliberately thin: everything the path means is
+/// `App::import_folder`'s business, so `F` and the sidebar item and a rescan all
+/// go through one place.
+fn handle_folder_input(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let typed = app.input_buf.trim().to_string();
+            app.input_buf.clear();
+            app.input_mode = InputMode::Normal;
+            if !typed.is_empty() {
+                // A pasted path arrives in whichever spelling the clipboard had
+                // — a `file://` URL, escaped spaces, quotes — and none of them is
+                // a path until `path_from_input` says so.
+                let root = library_import::path_from_input(&typed, dirs::home_dir().as_deref());
+                app.import_folder(root);
+            }
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.input_buf.clear();
+        }
+        _ => type_char(app, key),
+    }
+    Ok(Action::Continue)
+}
+
 fn handle_search(app: &mut App, key: KeyEvent) -> Result<Action> {
     match key.code {
         KeyCode::Enter | KeyCode::Esc => {
             if key.code == KeyCode::Esc {
                 app.input_buf.clear();
-                app.filtered_indices.clear();
-                app.selected = 0;
-                app.track_offset = 0;
+                app.clear_search();
             }
             app.input_mode = InputMode::Normal;
         }
@@ -624,19 +712,32 @@ fn handle_search(app: &mut App, key: KeyEvent) -> Result<Action> {
 
 pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
     if key.code == KeyCode::Char('y') {
-        if let Some(idx) = app.track_index_at(app.selected) {
-            let video_id = app.playlist.tracks[idx].video_id.clone();
+        // The row's own list: an album's row leaves the album's file, not the
+        // playlist showing it.
+        let row = app.row_at(app.selected).copied();
+        if let Some(crate::tui::VisibleRow::Track { source, index: idx }) = row {
+            let Some(id) = app
+                .source_playlist(source)
+                .and_then(|(playlist, _)| playlist.tracks.get(idx))
+                .cloned()
+            else {
+                app.input_mode = InputMode::Normal;
+                return Ok(Action::Continue);
+            };
+            let owner_path = app
+                .source_playlist(source)
+                .map(|(_, path)| path.to_path_buf())
+                .unwrap_or_default();
             // Only stop playback if the track being deleted is literally the
             // one actually driving playback right now (identity is `(path,
-            // video_id)`) — not just any track with a matching video_id that
+            // id)`) — not just any track with a matching id that
             // happens to exist in a differently-playing session elsewhere.
-            let is_current = app.is_playing_track(&app.playlist_path, &video_id);
+            let is_current = app.is_playing_track(&owner_path, &id);
 
             if is_current {
                 // Stop playback immediately when deleting current track
                 app.stop_player(); // kills mpv and retires its position poller
                 app.playing = None;
-                app.playlist.current_track = None;
                 app.is_paused = false;
                 // Nothing is playing any more, so the elapsed time belongs to
                 // no track. Left as it was, it kept counting against whatever
@@ -646,24 +747,41 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
                 let _ = app.pos_tx.send(0.0);
             }
 
-            let file_to_delete = app.playlist.tracks[idx].file.clone();
-            app.playlist.tracks.remove(idx);
+            // The cached file is trovers' own copy of a remote track and goes with
+            // the last row referencing it. A local file is the user's music,
+            // which trovers only ever reads: deleting the row means forgetting
+            // it, never touching what is on disk.
+            let file_to_delete = app
+                .library
+                .get(&id)
+                .filter(|t| t.origin != crate::library::TrackOrigin::Local)
+                .and_then(|t| t.file.clone());
+            app.remove_row(source, idx);
             // A download still running for this row has nowhere to land now.
-            app.clear_download_state(&video_id);
-            // Clear any active search filter; stale indices would point to wrong tracks
-            app.filtered_indices.clear();
+            app.clear_download_state(&id);
+            // Clear any active search filter; it was built over rows that no
+            // longer describe the list.
+            app.drop_filter();
             if app.selected >= app.visible_track_count() && app.selected > 0 {
                 app.selected -= 1;
             }
             app.clamp_scroll();
-            app.save_playlist();
-            if let Some(path) = file_to_delete {
-                // The audio cache is keyed by `video_id`, so this file may well
-                // be the one backing the same track in another playlist.
-                if app.video_id_referenced_elsewhere(&video_id) {
-                    info!(video_id = %video_id, path = %path.display(), "kept cached file, another playlist still references it");
-                } else if let Err(e) = std::fs::remove_file(&path) {
-                    warn!(path = %path.display(), err = %e, "failed to delete cached file");
+
+            // Only the row is definitely gone. The track's document and its
+            // cached audio are shared by every playlist listing it, so they go
+            // only once nothing does — scoped to the *platform* id, which is
+            // what the audio cache is keyed by.
+            let platform_id = library::platform_id_of(&id).to_string();
+            if app.platform_id_referenced_elsewhere(&platform_id) {
+                info!(id = %id, "kept the track document, another playlist still references it");
+            } else {
+                if let Err(e) = app.library.remove(&id) {
+                    warn!(id = %id, err = %e, "failed to delete the track document");
+                }
+                if let Some(path) = file_to_delete {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        warn!(path = %path.display(), err = %e, "failed to delete cached file");
+                    }
                 }
             }
         }
@@ -726,6 +844,7 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
             if let Some(SidebarItem::Playlist {
                 name: old_name,
                 path: old_path,
+                ..
             }) = selected_item
             {
                 // Validate: no duplicate name
@@ -748,29 +867,27 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
                     Ok(new_path) => {
                         // Update available_playlists entry
                         for entry in &mut app.available_playlists {
-                            if entry.0 == old_name {
-                                entry.0 = new_name.clone();
-                                entry.1 = new_path.clone();
+                            if entry.name == old_name {
+                                entry.name = new_name.clone();
+                                entry.path = new_path.clone();
                                 break;
                             }
                         }
-                        app.available_playlists.sort_by(|a, b| a.0.cmp(&b.0));
+                        // Albums point at their parent by name, so a rename has to
+                        // follow them or every album under it orphans.
+                        repoint_albums(app, &old_name, &new_name);
+                        app.available_playlists.sort_by(|a, b| a.name.cmp(&b.name));
 
-                        // Re-anchor sidebar_selected to the renamed playlist's new position.
-                        // sidebar_items() starts with PlaylistsHeader at index 0, so playlist
-                        // entries begin at index 1 when expanded.
-                        if let Some(new_pos) = app
-                            .available_playlists
-                            .iter()
-                            .position(|(n, _)| n == &new_name)
-                        {
-                            app.sidebar_selected = 1 + new_pos; // +1 for PlaylistsHeader
+                        // Re-anchor sidebar_selected to the renamed playlist's new
+                        // position. Found by looking, not by arithmetic on the
+                        // listing's index: albums nest, so a playlist's row number
+                        // is no longer its position in `available_playlists`.
+                        let items = app.sidebar_items();
+                        if let Some(new_pos) = items.iter().position(
+                            |i| matches!(i, SidebarItem::Playlist { name, .. } if name == &new_name),
+                        ) {
+                            app.sidebar_selected = new_pos;
                         }
-
-                        // In-flight downloads recorded the old path at add-time;
-                        // it no longer exists, so their completion would patch
-                        // nothing and leave the tracks stuck at `downloading`.
-                        app.remap_download_targets(&old_path, &new_path);
 
                         // If the playing session belongs to the renamed playlist file,
                         // re-point it at the new path so future saves (flush_playing_position,
@@ -806,6 +923,51 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
     Ok(Action::Continue)
 }
 
+/// Point every album that named `old_name` as its parent at `new_name`, in the
+/// listing and in each album's own file.
+///
+/// A failed write is logged rather than fatal: the album is still there and still
+/// listed, it has merely orphaned to the top level, which the user can fix by
+/// hand. Losing the rename over it would be worse.
+fn repoint_albums(app: &mut App, old_name: &str, new_name: &str) {
+    // The displayed playlist's own albums are held in memory, and that copy is the
+    // authority on its contents — a fold, a reorder, a play may not be on disk
+    // yet. Repoint it and save it from there; re-reading the file would both miss
+    // the rename in memory and risk writing a stale copy back over those edits.
+    let mut in_memory = Vec::new();
+    for loaded in &mut app.albums {
+        in_memory.push(loaded.path.clone());
+        if loaded.playlist.parent.as_deref() != Some(old_name) {
+            continue;
+        }
+        loaded.playlist.parent = Some(new_name.to_string());
+        if let Err(e) = loaded.playlist.save(&loaded.path) {
+            error!(err = %e, album = %loaded.name, "failed to save album's new parent");
+        }
+    }
+
+    for entry in &mut app.available_playlists {
+        if entry.kind != PlaylistKind::Album || entry.parent.as_deref() != Some(old_name) {
+            continue;
+        }
+        entry.parent = Some(new_name.to_string());
+        if in_memory.contains(&entry.path) {
+            continue;
+        }
+        match Playlist::load(&entry.path) {
+            Ok(mut album) => {
+                album.parent = Some(new_name.to_string());
+                if let Err(e) = album.save(&entry.path) {
+                    error!(err = %e, album = %entry.name, "failed to save album's new parent");
+                }
+            }
+            Err(e) => {
+                error!(err = %e, album = %entry.name, "failed to load album to repoint its parent");
+            }
+        }
+    }
+}
+
 // ── Playlist delete ───────────────────────────────────────────────────────
 
 pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
@@ -815,7 +977,7 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
 
             let items = app.sidebar_items();
             let selected_item = items.get(app.sidebar_selected).cloned();
-            if let Some(SidebarItem::Playlist { name, path }) = selected_item {
+            if let Some(SidebarItem::Playlist { name, path, .. }) = selected_item {
                 // Don't allow deleting the active playlist
                 if app.playlist.name == name {
                     warn!("cannot delete the currently active playlist");
@@ -837,10 +999,22 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
 
                 match Playlist::delete(&path) {
                     Ok(()) => {
-                        // Every row an in-flight download was going to fill has
-                        // just gone with the file.
-                        app.clear_download_state_for_playlist(&path);
-                        app.available_playlists.retain(|(n, _)| n != &name);
+                        // The tracks it listed are untouched: they live in the
+                        // library, and any in-flight download still lands in the
+                        // document it was started for.
+                        // Its albums are playlists in their own right: their files
+                        // stay put and they orphan to the top level, which is what
+                        // `sidebar_entries` does with a parent that is not there.
+                        app.available_playlists.retain(|entry| entry.name != name);
+                        // The sidebar can reach an album that is also drawn as a row
+                        // here — one whose parent is itself an album, which trovers
+                        // does not write but a hand-edited file can say. Drop the
+                        // loaded copy so the header does not outlive its file.
+                        if app.albums.iter().any(|loaded| loaded.path == path) {
+                            app.albums.retain(|loaded| loaded.path != path);
+                            app.rebuild_rows();
+                            app.clamp_scroll();
+                        }
                         // Move sidebar selection up if needed
                         let new_items = app.sidebar_items();
                         if app.sidebar_selected >= new_items.len() {
@@ -877,6 +1051,64 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
     Ok(Action::Continue)
 }
 
+// ── Album rename and delete, from the header row ──────────────────────────
+
+/// The album whose header the cursor is on, if it still is on one.
+///
+/// Every album edit re-reads this rather than remembering an index across the
+/// prompt: the rows can be rebuilt while it is open, and an index into `albums`
+/// that was right when `r` was pressed is not a promise.
+fn selected_album(app: &App) -> Option<usize> {
+    app.album_of(app.selected)
+}
+
+pub(crate) fn handle_album_rename(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let new_name = app.input_buf.trim().to_string();
+            let Some(album) = selected_album(app) else {
+                app.input_mode = InputMode::Normal;
+                app.input_buf.clear();
+                return Ok(Action::Continue);
+            };
+            match app.rename_album(album, &new_name) {
+                Ok(()) => {
+                    app.input_mode = InputMode::Normal;
+                    app.input_buf.clear();
+                }
+                // The prompt stays open on a rejected name, holding what was
+                // typed: the fix is almost always one keystroke away.
+                Err(msg) => {
+                    warn!(msg = %msg, "invalid album name");
+                    app.set_status(msg);
+                }
+            }
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.input_buf.clear();
+        }
+        _ => type_char(app, key),
+    }
+    Ok(Action::Continue)
+}
+
+pub(crate) fn handle_album_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            app.input_mode = InputMode::Normal;
+            if let Some(album) = selected_album(app) {
+                app.delete_album(album);
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(Action::Continue)
+}
+
 // ── Playlist name validation ──────────────────────────────────────────────
 
 /// Validate a playlist name.
@@ -885,7 +1117,7 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
 /// `exclude` is an optional name to skip during duplicate check (used for rename).
 pub(crate) fn validate_playlist_name(
     name: &str,
-    existing: &[(String, std::path::PathBuf)],
+    existing: &[PlaylistEntry],
     exclude: Option<&str>,
 ) -> std::result::Result<(), String> {
     if name.is_empty() {
@@ -903,7 +1135,7 @@ pub(crate) fn validate_playlist_name(
     // Check for duplicate
     let is_duplicate = existing
         .iter()
-        .any(|(n, _)| n == name && exclude.map_or(true, |ex| n != ex));
+        .any(|entry| entry.name == name && exclude.map_or(true, |ex| entry.name != ex));
     if is_duplicate {
         return Err(format!("a playlist named '{name}' already exists"));
     }

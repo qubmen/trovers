@@ -42,7 +42,7 @@ brew install qubmen/trovers/trovers
 
 Or grab a prebuilt binary directly from the [Releases page](https://github.com/qubmen/trovers/releases).
 
-**Required Cannons:** ffmpeg, mpv, and [yt-dlp](https://github.com/yt-dlp/yt-dlp) (for the heavy lifting) — trovers shells out to these rather than bundling them, so install them separately:
+**Required Cannons:** mpv and [yt-dlp](https://github.com/yt-dlp/yt-dlp) (for the heavy lifting) — trovers shells out to these rather than bundling them, so install them separately. ffmpeg is optional but recommended: its `ffprobe` is what reads real titles and durations out of your own files when you import a folder. Without it an import still works — names come from filenames and durations show `--:--`.
 
 ```sh
 brew install ffmpeg mpv yt-dlp   # macOS / Linux (via Homebrew)
@@ -57,6 +57,10 @@ j/k	Sail up/down through your booty
 a	Plunder a new link (Add URL)
 Enter	Fire! (Play media)
 m	Move track to another playlist
+F	Press your own folder into service (import as an album)
+R	Rescan that folder for new arrivals
+Enter	On an album header: open or close it
+J/K	Haul the selected track down/up the running order
 q	Abandon ship
 
 ## 🗂️ Playlist Management
@@ -69,6 +73,59 @@ Manage multiple playlists without leaving the keyboard:
 - **Delete playlist**: Tab to sidebar → highlight playlist → `d` → confirm with `y`
 - **Move track**: highlight track → `m` → pick destination playlist from context menu
 - **Add to specific playlist**: `a` → type URL → Tab to cycle target playlist → Enter
+- **Reorder tracks**: highlight track → `J`/`K` (clear the search filter first)
+
+## 📁 Your Own Folders (Albums)
+
+Point trovers at a folder and it becomes an **album** — a sub-list nested under
+the playlist you're looking at, holding everything in there that mpv can play.
+
+- **Import**: `F` in the track list (or sidebar → `+ Folder`) → type or paste a
+  path → Enter. Subfolders are included; the album is named after the folder.
+  Paste whatever your Mac gives you — a `file://` URL full of `%D0%9A` escapes, a
+  dragged path with `\ ` in it, quotes around the lot, or a plain `~/Music/…`.
+- **It lives in the track list, not the sidebar**, as a folding group right below
+  the playlist's own tracks — that is where there is room for a name like
+  `Кино - Группа крови - 1988-2019`. The header shows how many tracks it holds and
+  how long they run.
+- **Open and close it** with `Enter` on its header (`▸` closed, `▾` open). An album
+  arrives folded, so a two-hundred-file folder is one row until you ask for more,
+  and the state is remembered between runs.
+- **An album plays as its own list.** Start a track inside it and `n`/`b`, loop,
+  shuffle and auto-advance all stay inside the album — they never wander out into
+  the parent playlist.
+- **Rename or forget it** with `r` and `d` on its header. `R` there rescans that
+  album's folder.
+- **Rescan**: `R` on a linked album picks up files added since. New files land at
+  the end, files that have vanished go dim (`⊘`) instead of disappearing, and
+  **nothing is ever deleted or reshuffled**.
+- **Your files stay yours**: trovers only ever *reads* them. Deleting a row — or
+  the whole album — forgets the track and never touches the file on disk. That is
+  the one rule with no exceptions.
+- Positions are remembered per file, so a three-hour set picks up where you left
+  it even after a rename-and-rescan.
+
+## 🎬 Video, in a Real Window
+
+A video file in an imported folder plays as video. Rows that will open a window are
+marked `▣` before the title, so you know before you press Enter.
+
+- The window is mpv's; the terminal stays yours. `Space`, seek, speed and volume keep
+  working from the TUI while it plays, and `q` closes both.
+- Audio rows never open a window — not even the one right after a video.
+- **Recommended, if your mpv is 0.38 or newer:** stop the new window stealing your
+  keyboard, in `~/.config/trovers/config.toml`:
+
+  ```toml
+  video_mpv_args = ["--focus-on=never"]
+  ```
+
+  These options go to mpv as-is, for video playback only, and they are applied last —
+  so if you'd rather have no window at all, `["--force-window=no"]` wins over ours.
+  Nothing is set by default on purpose: mpv *quits* on an option it doesn't recognise,
+  and `--focus-on` doesn't exist before 0.38. Check `mpv --version` before adding it —
+  a flag your mpv rejects means playback fails to start (you'll get a `PlayerError` in
+  the footer rather than a hang).
 
 ## ⏱️ Playback That Survives the Storm
 
@@ -78,6 +135,9 @@ Manage multiple playlists without leaving the keyboard:
   its last known position instead of always starting at 0:00.
 - **Your last playlist is remembered**: `trovers` reopens whichever playlist
   was active when you last quit.
+- **One track, one memory**: each track is stored as its own small file, so the
+  same set listed in two playlists shares one position and one speed instead of
+  drifting apart. Playlists are just ordered lists pointing at them.
 
 ## 🖥️ Now Playing
 

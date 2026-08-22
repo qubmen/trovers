@@ -159,11 +159,19 @@ pub async fn download_with_retries(
     url: &str,
     audio_dir: &Path,
     video_id: &str,
+    progress_key: &str,
     quality: &AudioQuality,
     progress_tx: watch::Sender<(String, f32)>,
 ) -> Result<PathBuf> {
     retry_with_backoff(&RETRY_DELAYS, || {
-        spawn_download(url, audio_dir, video_id, quality, progress_tx.clone())
+        spawn_download(
+            url,
+            audio_dir,
+            video_id,
+            progress_key,
+            quality,
+            progress_tx.clone(),
+        )
     })
     .await
 }
@@ -171,6 +179,10 @@ pub async fn download_with_retries(
 /// Spawn a yt-dlp download, reporting progress via watch channel.
 /// Uses `video_id.%(ext)s` as the output template so yt-dlp picks the extension.
 /// Returns the actual downloaded file path when complete.
+///
+/// `progress_key` is echoed back on `progress_tx` untouched — it is whatever the
+/// caller keys its progress bars by (the library id), which is deliberately not
+/// the same thing as `video_id`, the platform's own id that names the file.
 ///
 /// A failed download leaves nothing behind: yt-dlp keeps its half-written data in
 /// `<video_id>.<ext>.part` and its resume state in `.ytdl` companions, and those
@@ -180,10 +192,11 @@ pub async fn spawn_download(
     url: &str,
     audio_dir: &Path,
     video_id: &str,
+    progress_key: &str,
     quality: &AudioQuality,
     progress_tx: watch::Sender<(String, f32)>,
 ) -> Result<PathBuf> {
-    let result = run_download(url, audio_dir, video_id, quality, progress_tx).await;
+    let result = run_download(url, audio_dir, video_id, progress_key, quality, progress_tx).await;
     if result.is_err() {
         clean_partial_downloads(audio_dir, video_id);
     }
@@ -194,6 +207,7 @@ async fn run_download(
     url: &str,
     audio_dir: &Path,
     video_id: &str,
+    progress_key: &str,
     quality: &AudioQuality,
     progress_tx: watch::Sender<(String, f32)>,
 ) -> Result<PathBuf> {
@@ -255,7 +269,7 @@ async fn run_download(
             dest = Some(path);
         }
         if let Some(pct) = parse_progress_line(&line) {
-            let _ = progress_tx.send((video_id.to_string(), pct));
+            let _ = progress_tx.send((progress_key.to_string(), pct));
         }
     }
 
@@ -268,7 +282,7 @@ async fn run_download(
         bail!("yt-dlp download exited with status {status}: {reason}");
     }
 
-    let _ = progress_tx.send((video_id.to_string(), 100.0));
+    let _ = progress_tx.send((progress_key.to_string(), 100.0));
 
     // Use the destination logged by yt-dlp, or scan the directory as fallback
     let file = dest

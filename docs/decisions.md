@@ -16,7 +16,8 @@ and `config.toml`. The original spec used YAML.
 - YAML has well-known parsing ambiguities (implicit typing, the "Norway problem",
   indentation sensitivity) that can cause silent data corruption.
 - The `toml` crate is well-maintained and has no surprising behaviour.
-- TOML array-of-tables syntax (`[[tracks]]`) maps cleanly to `Vec<Track>`.
+- TOML maps cleanly to the small flat structs used here — a track document is a
+  single table, a playlist a table with one array of strings.
 
 **Trade-off:** TOML does not support inline comments mid-value and is slightly more
 verbose for nested structures — not a concern here.
@@ -59,8 +60,11 @@ path. `<seq>` is a per-process counter bumped on every `Player::spawn`.
 
 ## ADR-004: Crash recovery for `downloading` status
 
-**Decision:** `Playlist::load()` resets any track with
-`cache_status = "downloading"` to `"streaming"` before returning.
+**Decision:** `Library::load()` resets any track with
+`cache_status = "downloading"` to `"streaming"` before returning. (Originally
+`Playlist::load()`; it moved with ADR-015, which also gave it the
+`cached`-but-`file`-gone case — one place, once per launch, instead of once per
+playlist file.)
 
 **Reasoning:**
 - `downloading` is a transient state set at the start of a yt-dlp job.
@@ -160,6 +164,14 @@ cosmetic — heights are pseudo-random, not derived from actual audio spectrum d
 
 ## ADR-011: `PlayingSession` — playback identity decoupled from the displayed playlist
 
+> **Amended by ADR-015.** The decoupling stands, and so does everything below
+> about *why* playback identity cannot live on the displayed playlist. What went
+> away is the dual-resolution machinery: `PlayingSession` now holds a
+> `track_id: String` and the accessors are a single library lookup, because a
+> track's state has exactly one home on disk. Read the paragraphs about
+> "borrow-when-paths-match" as history — they describe the problem ADR-015
+> deleted rather than solved.
+
 **Decision:** The currently-playing track is tracked via
 `App.playing: Option<PlayingSession>`, where `PlayingSession` holds a full
 second `Playlist` (not a lightweight metadata snapshot), its file path, and
@@ -224,8 +236,7 @@ its background download finished, `TaskMsg::DownloadDone`'s
 new track and triggered a stream→local-file hot-switch — restarting mpv on
 the unrelated new track, seeked to whatever position the *actually* playing
 track was at. The fix (Task 1) removed that assignment entirely: adding a
-track only pushes it into `tracks` and populates `download_targets`/
-`downloading`; it must never write to any "what's playing" field. Task 3
+track only pushes its id into `tracks` and marks it `downloading`; it must never write to any "what's playing" field. Task 3
 finished closing this off by rebasing the hot-switch identity check on
 `self.playing.as_ref().map(|p| &p.track().video_id) == Some(&video_id)` —
 `PlayingSession`, not any field on the displayed `Playlist`, is now the only
@@ -335,3 +346,293 @@ auto-advance walk that order. Shuffle is ignored while a search filter is active
   `n`/`b` step are positions in that subset, not in the playlist. Shuffling them
   would make the cursor jump around inside a list the user is reading. Clearing
   the search restores the shuffled walk.
+
+---
+
+## ADR-015: Each track is its own document; playlists are ordered id lists
+
+**Decision:** A track lives in one file — `tracks/<slug>-<platform-id>[-N].toml`
+— indexed by the `id` recorded *inside* it. A playlist is that playlist's own
+settings plus `tracks: Vec<String>`, an ordered list of those ids. `Library`
+owns the documents; `Playlist` owns nothing but running order. Migration from
+the embedded format runs at startup, detects the old shape with an untagged
+serde enum, and backs `playlists/` up before it writes anything.
+
+**Reasoning:**
+- **It deleted more code than it added.** Three separate mechanisms existed only
+  because one track's state could sit in several playlist files at once:
+  `download_targets` + `remap_download_targets` + `retarget_download` +
+  `clear_download_state_for_playlist` (all answering "which playlist file owns
+  this download's row"), `PlayingSession`'s dual resolution plus
+  `save_playing_session_playlist` and `patch_and_save_playlist`, and
+  `video_id_referenced_elsewhere` loading and parsing every playlist in full.
+  With one home per track, a download patches a document by id and renaming,
+  moving or deleting a playlist has nothing to repoint.
+- **It fixed a real quirk rather than merely tidying.** The same video in two
+  playlists used to carry two independent positions and speeds, and whichever
+  copy was written last won. One document means one position.
+- **Writes got proportional.** The 15-second position flush rewrote the entire
+  playlist TOML — every track's metadata — to record one integer. It now writes
+  one small file.
+- **A track becomes movable and shareable.** Moving between playlists is an
+  id-list edit, and a single file describes a track completely, which is what
+  makes both albums (ADR-016) and eventual export possible.
+
+**`id` is authoritative; the filename is only a hint.** macOS filesystems are
+case-insensitive and YouTube ids are not, so `aB` and `Ab` can collide as
+filenames while being different tracks. The colliding document gets a `-2`
+suffix and its `id` stays exact. Nothing reads the filename to identify a track,
+so a user is free to rename a document.
+
+**Why the id is `<slug>:<platform-id>` and not the URL.** `youtube.com/watch?v=X`
+and `music.youtube.com/watch?v=X` are the same track; so are URLs differing only
+in tracking parameters. The slug is the registrable (second-to-last) dot label
+of `source`, lowercased, so both map to `youtube` and one video is one document.
+
+**Why the audio cache still uses platform-id filenames.** Cached audio stays at
+`audio/<platform-id>.opus`, and `ytdlp.rs` keeps calling its parameter
+`video_id` — there it genuinely is a platform video id, handed to yt-dlp. Two
+reasons: every file users have already downloaded stays valid, and the id
+scheme is a trovers concept that has no business leaking into the code that
+talks to yt-dlp. The consequence to keep straight is that `Track::platform_id()`
+(derived, everything after the first `:`) is what the cache and the player take,
+while progress reporting is keyed by the *library* id — which is why
+`ytdlp::download` takes a `progress_key` parameter separate from `video_id`.
+
+**Migration, and why it is safe to run on every launch.** Detection is by shape,
+not by a version field: `tracks` parses as `Vec<String>` (already migrated, left
+untouched) or `Vec<LegacyTrack>` (rewrite). The backup directory
+`playlists.backup-<utc>/` is written before the first mutation, so a failure
+halfway leaves the originals recoverable. Two playlists sharing a video produce
+one document — first writer wins, and the skipped duplicates are logged.
+An unparseable playlist is logged and skipped rather than aborting the whole
+migration: one bad file must not hold the other playlists hostage.
+
+**Trade-off accepted:** a playlist file is no longer self-contained, so copying
+one out of `playlists/` gives a list of ids and nothing else. Sharing wants a
+bundle command; see "Deferred" in the plan. The upside — one position per track,
+proportional writes, a whole class of ownership bookkeeping gone — is worth it.
+
+---
+
+## ADR-016: An album is an ordinary playlist file naming its parent
+
+> **Amended by ADR-019.** The storage decision stands whole: an album is still a
+> playlist file with `kind` and `parent`, still flat on disk, still two levels
+> deep. What changed is *where an album is drawn* — not the sidebar, but the
+> parent's own track list, as a collapsible group. Where the reasoning below
+> talks about the sidebar rendering an album, read it as history: the sidebar
+> now lists only top-level playlists and orphaned albums.
+
+**Decision:** An album is a `playlists/<name>.toml` like any other, with two extra
+fields: `kind = "album"` and `parent = "<parent's file stem>"`. There is no album
+type, no nested structure inside a playlist document, and no third directory.
+Nesting stops at two levels: playlist → album.
+
+**Reasoning:**
+- **Every playlist operation works on an album for nothing.** Rename, delete,
+  shuffle, loop mode, move-a-track-here, cursor restore, the `current_track`
+  field — all of it already operates on a playlist file, so an album inherits the
+  lot. A nested `Vec<Album>` inside a playlist document would have meant a second
+  implementation of each.
+- **A flat directory keeps the failure modes flat.** With `parent` a plain string
+  the worst case is a dangling reference, and the answer to it is obvious: an
+  album whose parent is gone renders at the top level. A tree in a single file
+  would make one unparseable document lose a whole branch.
+- **Two levels is a product decision, not a limitation of the model.** Arbitrary
+  depth costs a recursive sidebar, a recursive delete/rename, and cycle
+  detection, to serve a case nobody asked for. Importing a folder while an album
+  is displayed attaches the new album to that album's *parent*.
+
+**Why `parent` holds a file stem rather than `Playlist.name`.** The stem is what
+`Playlist::list_entries` and the sidebar have in hand without opening every file,
+and it is the thing the filesystem already keeps unique. Renaming a parent
+rewrites its children's `parent`.
+
+**Trade-off accepted:** deleting a parent orphans its albums to the top level
+instead of deleting them. Surprising for a moment, but the alternative is a
+single confirmation prompt destroying playlists the user never named — and
+trovers' rule is that deleting one thing deletes one thing.
+
+---
+
+## ADR-017: ffprobe is a soft dependency; yt-dlp and mpv stay hard
+
+**Decision:** `deps.rs` fails startup only on a missing yt-dlp or mpv. ffprobe is
+used when it happens to be on PATH and quietly not when it isn't: `MediaKind`
+falls back to the file extension, title and artist to the filename, and
+`duration` to `0`. The first spawn failure is logged once — an `AtomicBool`, not a
+warning per file, because an import is hundreds of them.
+
+**Reasoning:**
+- **yt-dlp and mpv are the program; ffprobe is a nicety.** Without either of the
+  first two trovers cannot fetch or play anything, so failing loudly at startup
+  is the honest response. Without ffprobe an import still produces playable rows
+  with readable names — refusing to run would trade a full feature for a better
+  one.
+- **The fallbacks were already there.** `duration == 0` is what a streaming
+  track's row shows before metadata arrives, `reached_end_of_track` already
+  tolerates it (mpv's own exit is the end-of-track signal, ADR-013), and the row
+  renders `--:--`. Filename parsing is ~20 lines and `Artist - Title` is a
+  convention worth honouring.
+- **ffprobe ships with ffmpeg, which many machines have and no machine promises.**
+  Making it hard would turn "import my music folder" into "install ffmpeg first"
+  for a duration column.
+
+**Where it does overrule the guess:** an `.mkv` carrying only audio needs no video
+window, and an `.m4a` that turns out to hold video does. Embedded cover art is a
+"video stream" to ffprobe, so `attached_pic` and a still-image codec list are both
+checked — otherwise every tagged mp3 would open a window.
+
+---
+
+## ADR-018: trovers never deletes a file the user brought
+
+**Decision:** Anything under `origin = "local"` is read-only to trovers. Deleting
+a row removes the row and, when nothing else references it, the *document* — never
+the media file. Deleting an entire album leaves the folder untouched. Recaching a
+local track is a no-op with a status message. A `Missing` row refuses to play
+instead of spawning mpv.
+
+**Reasoning:**
+- **The two origins mean opposite things by ownership.** A cached file under
+  `audio/` is trovers' own copy of something re-downloadable, so removing the last
+  row that references it is housekeeping. A file in the user's Music folder is the
+  only copy in the world, and trovers is a player pointed at it. One `remove_file`
+  call on the wrong branch is unrecoverable data loss, which puts it in a
+  different class from every other bug in this codebase.
+- **The guard belongs at the deletion sites, not in the confirmation text.** Three
+  places touch it — `handle_confirm_delete`, `recache_track`, `request_playback` —
+  and each checks `origin` itself rather than trusting a caller to have asked.
+- **`Missing` exists so a gone file is a visible row, not a silent one.** A local
+  track whose path is empty keeps its row and its recorded path, renders a dim
+  `⊘`, and heals back to `Cached` on the next load once the drive is plugged back
+  in. Dropping the row would lose the position and the id the moment a drive was
+  unmounted.
+
+**Consequence for rescan:** a rescan appends and marks, never deletes or reorders.
+The same instinct — the user's folder is the source of truth about files, and
+trovers' list is the source of truth about their order.
+
+---
+
+## ADR-019: An album is drawn inside its parent's track list, not in the sidebar
+
+**Amends ADR-016**, which is unchanged about storage.
+
+**Decision:** The track list is a two-level tree rather than a flat window over
+`playlist.tracks`: the displayed playlist's own tracks first, then each of its
+albums as a collapsible group — a header row, and its tracks when open. The
+sidebar lists only playlists that are not albums with a live parent. `App` holds
+`albums: Vec<LoadedAlbum>` and a computed `rows: Vec<VisibleRow>`; every cursor
+position resolves through a row, which names both the list its track comes from
+and the index within it. An album plays as its own list. A new
+`collapsed: bool` on `Playlist` remembers the fold, defaulting to folded.
+
+**Reasoning:**
+- **The sidebar has 22 columns and a nested album row had 14 of them.** Real
+  names arrived as `Кино - Гр…` and `Суржиков …` — indistinguishable from each
+  other and from anything else imported from the same series. The panel with room
+  for a name is the track table, and it is also where an album's contents belong:
+  an album is part of the playlist you are looking at, not a sibling of it.
+- **A row that names its owner beats a flattened list with a side table.** The
+  alternative was one display vector of ids plus a map from row to owning file.
+  Smaller diff, but ownership becomes implicit and every mutation — `d`, `J`/`K`,
+  a rescan — has to re-derive it. That is the bookkeeping ADR-015 deleted; adding
+  it back to save a struct would be a bad trade.
+- **`rows` is rebuilt, never edited.** `rebuild_rows` is its only writer and runs
+  after anything that changes the screen: a switch, a search keystroke, a fold, an
+  import, a rescan, a rename, a delete, a reorder. One derivation cannot disagree
+  with itself, and the old `filtered_indices` — a parallel copy of the answer —
+  goes away.
+- **An album playing as its own list is nearly free.** `PlayingSession` has
+  carried its own `path` and `playlist` since ADR-011, so `n`/`b`, `loop_mode`,
+  `shuffle` and auto-advance stay inside the album with no new machinery, each
+  album keeping its own shuffled order in its own file. It is also the honest
+  reading of what the user asked for: an album is a thing you play.
+- **A header is not playable.** `Enter` on one opens or closes it. Making a header
+  play its first track would put "start something" and "look inside" on the same
+  key, and the wrong one on a 200-file folder is loud.
+- **Folded by default, and the fold is the album's own business.** A file written
+  before this field existed loads folded, which is what a two-hundred-file import
+  should arrive as. Storing it in the album rather than in a global UI-state file
+  means it travels with the thing it describes and needs no second writer. A
+  freshly imported album is stored open, so the import is visibly there.
+
+**Where the keys went.** `r` and `d` used to reach an album through the sidebar. On
+the header row they mean rename and forget-this-album — `InputMode::AlbumRename`
+and `AlbumDelete`, separate modes from the sidebar's because they address the album
+under the cursor rather than the sidebar's selected row. `R` on a header rescans
+that album's folder. `J`/`K` refuse on a header: albums are sorted by name.
+Deleting an album still never touches the folder (ADR-018).
+
+**Consequence for ownership.** Anything that edits or deletes a row now edits the
+row's *owning* list and saves that file — `handle_confirm_delete`,
+`move_track_to_playlist`, the `J`/`K` swap, which also refuses to cross a list
+boundary. And because the displayed playlist's albums are held in memory with
+edits not yet on disk, the two functions that read other playlist files —
+`platform_id_referenced_elsewhere` and `import_target_for` — answer from
+`self.albums` first and skip those paths on disk. Reading the file instead would
+miss the removal that just happened and leak the document, or write a stale copy
+back over it.
+
+**Trade-off accepted:** the scroll counter in the panel title counts rows, so with
+albums present its denominator exceeds the track count by the number of headers.
+The alternative — counting only tracks — would make the counter disagree with the
+cursor. With no albums the two are equal and the title is what it always was.
+
+**Out of scope:** reordering albums by hand, moving an album to another parent,
+nesting deeper than two levels, and a search that matches an album's folder path.
+
+---
+
+## ADR-020: A video window only for a video track, and no focus policy of our own
+
+**Decision:** `Player::spawn` takes a `video: bool`. When set, `--no-video` is
+dropped and `--force-window=yes` added; otherwise nothing changes. The flag comes
+from the track's own `media`, which is `Video` only for a local file. mpv's whole
+command line is built by a pure `player::mpv_args(socket, start_pos, video, extra)`
+so it can be tested without mpv. `--no-terminal` and `--really-quiet` stay
+unconditional. We ship **no** window-management flags; `config.video_mpv_args`
+(default `[]`) is appended last, for video only. A video row is marked `▣` in the
+track list before it is played.
+
+**Reasoning:**
+- **The trigger is the track, not a mode.** A playlist can hold both kinds, and
+  auto-advance can walk from one to the other, so "am I in video mode" has no
+  answer. `media` does, and all three spawn sites already hold the track — the
+  change is one argument threaded through `spawn_player_for`.
+- **`--force-window=yes`, not the absence of `--no-video`.** Dropping `--no-video`
+  is not enough: mpv can decide a file has nothing worth a window and play it with
+  none at all — a video row that plays sound into an empty terminal, which reads
+  exactly like a bug.
+- **The tty stays the TUI's.** `--no-terminal` and `--really-quiet` are not audio
+  concessions to relax now that there is a window: mpv shares a terminal with
+  ratatui, and one line of its output or one stolen keystroke corrupts the display.
+  A window changes where mpv draws video, not who owns the tty.
+- **mpv exits on an option it does not know, so a default flag is a loaded gun.**
+  `--focus-on=never` is the flag we would want — a video window stealing focus
+  pulls the keyboard away from the TUI — and it needs mpv 0.38. Shipping it would
+  turn every older install's playback into an immediate spawn failure. So it is
+  documented in the README and the user opts in.
+- **The user's flags come last, and only for video.** Last because mpv takes the
+  later of two conflicting options, so someone who sets `--force-window=no` gets
+  what they asked for rather than fighting us. Video-only because these are
+  window-management flags: on an audio track they would be at best pointless, and
+  at worst — a typo is fatal to mpv — enough to stop music playing at all. The blast
+  radius of a bad entry is bounded to the files that need a window.
+- **`▣` before the title, not in the status column.** The status column says what
+  the *file* is (cached, missing, downloading); this says what playing the row will
+  *do to your screen*, which is worth knowing before the keypress rather than after
+  a window has covered the terminal. It sits after an album row's indent, because an
+  album's video row is still one of the album's rows.
+
+**Trade-off accepted:** the spawn decision itself has no automated test. `mpv_args`
+is covered exhaustively, but whether `spawn_player_for` passes the right `video` for
+a given row is only observable by watching a real mpv — asserting it would mean
+recording spawn arguments in production state purely for tests. So that one line is
+verified by hand (`docs/progress.md` records it) and kept trivial enough to read.
+
+**Out of scope:** any window behaviour we would have to implement ourselves —
+placement, size, always-on-top, focus policy, a second window for a second track.
+mpv already has options for all of it and `video_mpv_args` is the door.

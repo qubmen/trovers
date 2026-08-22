@@ -30,12 +30,59 @@ pub struct Player {
     pub socket_path: PathBuf,
 }
 
+/// The options mpv is spawned with, built as a list rather than pushed straight
+/// onto a `Command`, so every choice in here can be checked without a real mpv.
+///
+/// `--no-terminal` and `--really-quiet` are unconditional whatever is playing:
+/// mpv shares a tty with the TUI, and must neither write to it nor take a
+/// keystroke from it.
+pub(crate) fn mpv_args(
+    socket_path: &Path,
+    start_pos: Option<f64>,
+    video: bool,
+    extra: &[String],
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if video {
+        // mpv can decide a file has nothing worth a window and play it with none
+        // at all — which for a video row looks exactly like a bug.
+        args.push("--force-window=yes".to_string());
+    } else {
+        args.push("--no-video".to_string());
+    }
+    args.push("--no-terminal".to_string());
+    args.push("--really-quiet".to_string());
+    args.push(format!("--input-ipc-server={}", socket_path.display()));
+    if let Some(pos) = start_pos.filter(|&p| p > 0.1) {
+        args.push(format!("--start={pos:.3}"));
+    }
+    // Last, because mpv takes the later of two conflicting options: a user who
+    // configures `--force-window=no` gets what they asked for. Video only — these
+    // are window-management flags, and an option mpv does not know is fatal to
+    // it, so one of them on an audio track would stop music playing outright.
+    //
+    // Nothing here can be a default for the same reason: `--focus-on=never` wants
+    // mpv 0.38 and would break every older install. The README recommends it; the
+    // user opts in.
+    if video {
+        args.extend(extra.iter().cloned());
+    }
+    args
+}
+
 impl Player {
-    /// Spawn mpv with --no-video and an IPC socket at /tmp/trovers-<pid>-<seq>.sock.
+    /// Spawn mpv against `source` with an IPC socket at
+    /// `/tmp/trovers-<pid>-<seq>.sock`, opening a window when `video` is set.
     /// Pass `start_pos` to resume playback at a specific position (e.g. when
-    /// switching from a stream to the freshly downloaded local file).
+    /// switching from a stream to the freshly downloaded local file), and
+    /// `video_args` for the user's own window-management flags — see `mpv_args`.
     /// Retries connecting to the socket up to 20 times with 50ms delay.
-    pub async fn spawn(source: &str, start_pos: Option<f64>) -> Result<Self> {
+    pub async fn spawn(
+        source: &str,
+        start_pos: Option<f64>,
+        video: bool,
+        video_args: &[String],
+    ) -> Result<Self> {
         let pid = std::process::id();
         let seq = SOCKET_SEQ.fetch_add(1, Ordering::SeqCst);
         let socket_path =
@@ -45,17 +92,7 @@ impl Player {
         let _ = std::fs::remove_file(&socket_path);
 
         let mut cmd = Command::new("mpv");
-        cmd.args([
-            "--no-video",
-            // Without this mpv keeps its own terminal keybindings active on the
-            // tty we share with the TUI and competes with us for keystrokes.
-            "--no-terminal",
-            "--really-quiet",
-            &format!("--input-ipc-server={}", socket_path.display()),
-        ]);
-        if let Some(pos) = start_pos.filter(|&p| p > 0.1) {
-            cmd.arg(format!("--start={pos:.3}"));
-        }
+        cmd.args(mpv_args(&socket_path, start_pos, video, video_args));
         cmd.arg(source);
 
         let process = cmd

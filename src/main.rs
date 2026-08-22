@@ -1,8 +1,23 @@
 mod cache;
 mod config;
+#[cfg(test)]
+mod config_test;
 mod deps;
+mod library;
+mod library_import;
+#[cfg(test)]
+mod library_import_test;
+mod library_scan;
+#[cfg(test)]
+mod library_scan_test;
+#[cfg(test)]
+mod library_test;
 mod player;
+#[cfg(test)]
+mod player_test;
 mod playlist;
+#[cfg(test)]
+mod playlist_test;
 mod tui;
 mod ytdlp;
 
@@ -46,6 +61,12 @@ async fn main() -> Result<()> {
 
     deps::check()?;
     cache::ensure_dirs()?;
+
+    // Before any playlist is read: playlists written by an older trovers embed
+    // their tracks, and everything downstream expects id lists. Detection is by
+    // shape, so this is a no-op on every launch after the first.
+    let migration = library::migrate(&cache::playlists_dir(), &cache::tracks_dir())
+        .context("failed to migrate playlists to the track library")?;
 
     // Clean up after any previous instance that was killed hard enough to skip
     // its own teardown, so a stranded mpv is not still playing over this one.
@@ -106,17 +127,32 @@ async fn main() -> Result<()> {
         let _ = config.save();
     }
 
-    let available_playlists = playlist::Playlist::list_all()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|p| {
-            p.file_stem()
-                .and_then(|s| s.to_str())
-                .map(|name| (name.to_string(), p.clone()))
-        })
-        .collect();
+    let available_playlists =
+        playlist::Playlist::list_entries(&cache::playlists_dir()).unwrap_or_default();
 
-    let mut app = tui::App::new(playlist, config, available_playlists, playlist_path);
+    // The one place the library's location is decided; `Library` itself only ever
+    // works against the root it is handed, which is what makes it testable.
+    let library = library::Library::load(&cache::tracks_dir())?;
+    info!(tracks = library.len(), "loaded track library");
+
+    let mut app = tui::App::new(
+        playlist,
+        config,
+        available_playlists,
+        playlist_path,
+        library,
+    );
+
+    // Tell the user a migration happened, and where the backup went — the only
+    // moment they get to notice before the status line moves on.
+    if let Some(report) = migration {
+        app.set_status(format!(
+            "Migrated {} playlist(s), {} track(s) · backup: {}",
+            report.playlists,
+            report.tracks,
+            report.backup.display()
+        ));
+    }
 
     // If a URL was provided on CLI, queue it for fetch immediately
     if let Some(url) = cli.url {

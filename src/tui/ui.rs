@@ -1,6 +1,10 @@
-use super::{effective_speed, App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
+use super::{
+    effective_speed, App, Focus, InputMode, RowSource, SettingsItem, SidebarItem, VisibleRow,
+    SETTINGS_ITEMS,
+};
 use crate::config::AudioQuality;
-use crate::playlist::{CacheStatus, LoopMode};
+use crate::library::{CacheStatus, MediaKind};
+use crate::playlist::LoopMode;
 use crate::tui::input::validate_playlist_name;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -65,7 +69,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_footer(frame, app, rows[3]);
 
     match app.input_mode {
-        InputMode::UrlInput | InputMode::NewPlaylist | InputMode::SearchInput => {
+        InputMode::UrlInput
+        | InputMode::NewPlaylist
+        | InputMode::SearchInput
+        | InputMode::FolderInput => {
             render_input_overlay(frame, app, area);
         }
         InputMode::TrackContextMenu => {
@@ -76,6 +83,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         InputMode::PlaylistDelete => {
             render_playlist_delete_overlay(frame, app, area);
+        }
+        InputMode::AlbumRename => {
+            render_album_rename_overlay(frame, app, area);
+        }
+        InputMode::AlbumDelete => {
+            render_album_delete_overlay(frame, app, area);
         }
         InputMode::Help => {
             render_help_overlay(frame, app, area);
@@ -140,7 +153,7 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     };
                     Line::styled(format!(" {arrow} ≡ Playlists"), style)
                 }
-                SidebarItem::Playlist { name, .. } => {
+                SidebarItem::Playlist { name, is_album, .. } => {
                     let marker = if name == active_name { " ◄" } else { "" };
                     let (fg, bg) = if is_selected {
                         (Color::White, ACCENT_DIM)
@@ -149,8 +162,16 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     } else {
                         (Color::White, Color::Reset)
                     };
+                    // Every row here is top-level, so the indent is fixed. An
+                    // orphaned album still says it is one, with a glyph; whatever
+                    // the prefix costs comes off the name, so all rows end up the
+                    // same width.
+                    let indent = "   ";
+                    let glyph = if *is_album { "⊞ " } else { "" };
+                    let prefix = indent.chars().count() + glyph.chars().count();
+                    let room = (3 + 14usize).saturating_sub(prefix);
                     Line::styled(
-                        format!("   {}{}", truncate(name, 14), marker),
+                        format!("{indent}{glyph}{}{marker}", truncate(name, room)),
                         Style::new().fg(fg).bg(bg),
                     )
                 }
@@ -164,6 +185,14 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                         Style::new().fg(Color::White)
                     };
                     Line::styled(" ↓ Plunder", style)
+                }
+                SidebarItem::ImportFolder => {
+                    let style = if is_selected {
+                        Style::new().fg(Color::White).bg(ACCENT_DIM)
+                    } else {
+                        Style::new().fg(Color::White)
+                    };
+                    Line::styled(" + Folder", style)
                 }
                 SidebarItem::Settings => {
                     let active = app.focus == Focus::Settings;
@@ -185,29 +214,166 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
 // ── Track table ───────────────────────────────────────────────────────────
 
-/// Whether the track table row for `video_id` should show the `▶`
-/// highlight — true only when the playing session's track actually belongs
-/// to the currently *displayed* playlist file, not just when the id happens
-/// to match (ids can collide across playlist files).
-pub(crate) fn row_is_playing(app: &App, video_id: &str) -> bool {
+/// Whether the track table row for `id` should show the `▶` highlight — true
+/// only when the playing session's track actually belongs to the list this row
+/// came out of, not just when the id happens to match.
+///
+/// `source` is what makes that answerable now that a row can belong to the
+/// displayed playlist or to an album under it: the same id can sit in both, and
+/// only the one playback is running out of gets the marker.
+pub(crate) fn row_is_playing(app: &App, source: RowSource, id: &str) -> bool {
+    let Some((_, path)) = app.source_playlist(source) else {
+        return false;
+    };
     app.playing
         .as_ref()
-        .is_some_and(|p| p.path == app.playlist_path && p.track().video_id == video_id)
+        .is_some_and(|p| p.path == path && p.track_id == id)
+}
+
+/// The row shown for a playlist entry whose track document is gone. It cannot
+/// play, so it shows the id it is looking for — the only thing left to identify
+/// it by — and is dimmed throughout, `✕` included.
+fn missing_document_row<'a>(
+    num_str: &str,
+    id: &str,
+    indent: &str,
+    title_width: usize,
+    is_selected: bool,
+) -> Row<'a> {
+    let row_style = if is_selected {
+        Style::new().fg(TEXT_DIM).bg(ROW_SELECTED_BG)
+    } else {
+        Style::new().fg(TEXT_DIM)
+    };
+    Row::new(vec![
+        Cell::from(Line::from(vec![Span::raw("  "), Span::raw("✕")])),
+        Cell::from(num_str.to_string()),
+        Cell::from(truncate(&format!("{indent}missing: {id}"), title_width)),
+        Cell::from(""),
+        Cell::from("--:--"),
+    ])
+    .style(row_style)
+}
+
+/// The track panel's title: the list's name, what it holds in total, and which
+/// slice of it is on screen.
+///
+/// `total` and `total_secs` describe what the list *holds* — its own tracks plus
+/// every album's, folded or not — because folding is a view. `rows` is what is on
+/// screen, headers included, and is the denominator of the scroll counter: with an
+/// album present the two genuinely differ, and each says what it means.
+///
+/// A `total_secs` of zero means nothing on screen knows its length — an import
+/// without ffprobe — and is left out rather than shown as `0m`, which would read
+/// as a claim instead of an absence.
+pub(crate) fn track_panel_title(
+    name: &str,
+    total: usize,
+    first: usize,
+    last: usize,
+    rows: usize,
+    total_secs: u64,
+) -> String {
+    // Nothing on screen at all: a bare name. An album's header is a row even when
+    // the album is empty, so `rows` is what decides this, not `total`.
+    if rows == 0 {
+        return format!(" {name} ");
+    }
+
+    let tracks = if total == 1 { "track" } else { "tracks" };
+    let mut title = format!(" {name} · {total} {tracks}");
+    if total_secs > 0 {
+        title.push_str(" · ");
+        title.push_str(&coarse_duration(total_secs));
+    }
+    // Two spaces: the counter is a separate reading from the summary, not
+    // another item in its `·` list.
+    format!("{title}  [ {first}–{last} / {rows} ] ")
+}
+
+/// A running time at the resolution a total wants: `6h 12m`, `47m`, `<1m`.
+///
+/// Seconds are noise across a whole playlist, but rounding a real duration down
+/// to `0m` would look like an unknown one, so anything under a minute says so.
+fn coarse_duration(secs: u64) -> String {
+    let minutes = secs / 60;
+    if minutes == 0 {
+        return "<1m".to_string();
+    }
+    let (hours, minutes) = (minutes / 60, minutes % 60);
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+/// The three text cells of an album header: the disclosure glyph with the album's
+/// name, how many tracks it holds, and how long they run.
+///
+/// `▸`/`▾` rather than the sidebar's `▶`/`▼` — `▶` is the playing marker, and a
+/// folded album must not read as a playing one. The name is the whole point of
+/// moving albums here, so it gets the title column, truncated to fit it.
+pub(crate) fn album_header_cells(
+    name: &str,
+    tracks: usize,
+    total_secs: u64,
+    open: bool,
+    title_width: usize,
+) -> (String, String, String) {
+    let glyph = if open { "▾" } else { "▸" };
+    let title = truncate(&format!("{glyph} {name}"), title_width);
+    let count = format!("{tracks} {}", if tracks == 1 { "track" } else { "tracks" });
+    // Nothing here knows its length (an import with no ffprobe). `0m` would claim
+    // the album runs no time at all rather than admit to not knowing.
+    let duration = if total_secs > 0 {
+        coarse_duration(total_secs)
+    } else {
+        String::new()
+    };
+    (title, count, duration)
+}
+
+/// An album's own line in the track table.
+fn album_header_row<'a>(
+    name: &str,
+    tracks: usize,
+    total_secs: u64,
+    open: bool,
+    title_width: usize,
+    is_selected: bool,
+) -> Row<'a> {
+    let (title, count, duration) = album_header_cells(name, tracks, total_secs, open, title_width);
+    let row_style = if is_selected {
+        Style::new().fg(Color::White).bg(ROW_SELECTED_BG).bold()
+    } else {
+        Style::new().fg(GOLD).bold()
+    };
+    Row::new(vec![
+        // The icon and number columns stay empty: a group has no cache status and
+        // no place in a running order.
+        Cell::from("  "),
+        Cell::from(""),
+        Cell::from(title),
+        Cell::from(Span::styled(count, Style::new().fg(TEXT_DIM))),
+        Cell::from(Span::styled(duration, Style::new().fg(TEXT_DIM))),
+    ])
+    .style(row_style)
 }
 
 fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
-    let total = app.visible_track_count();
+    let rows_total = app.visible_track_count();
     let first = app.track_offset + 1;
-    let last = (app.track_offset + app.track_list_height as usize).min(total);
+    let last = (app.track_offset + app.track_list_height as usize).min(rows_total);
 
-    let title = if total == 0 {
-        format!(" {} ", app.playlist.name)
-    } else {
-        format!(
-            " {}  [ {}–{} / {} ] ",
-            app.playlist.name, first, last, total
-        )
-    };
+    let title = track_panel_title(
+        &app.playlist.name,
+        app.total_track_count(),
+        first,
+        last,
+        rows_total,
+        app.total_duration_secs(),
+    );
 
     let block = make_panel_block(&title, app.focus == Focus::TrackList);
 
@@ -229,10 +395,53 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let rows: Vec<Row> = (app.track_offset..app.track_offset + app.track_list_height as usize)
         .filter_map(|cursor| {
-            let track_idx = app.track_index_at(cursor)?;
-            let track = app.playlist.tracks.get(track_idx)?;
-            let is_playing = row_is_playing(app, &track.video_id);
             let is_selected = cursor == app.selected;
+            let (source, index) = match *app.row_at(cursor)? {
+                VisibleRow::AlbumHeader { album } => {
+                    let loaded = app.albums.get(album)?;
+                    let secs = loaded
+                        .playlist
+                        .tracks
+                        .iter()
+                        .filter_map(|id| app.library.get(id))
+                        .map(|track| track.duration)
+                        .sum();
+                    return Some(album_header_row(
+                        &loaded.name,
+                        loaded.playlist.tracks.len(),
+                        secs,
+                        !loaded.playlist.collapsed,
+                        title_width,
+                        is_selected,
+                    ));
+                }
+                VisibleRow::Track { source, index } => (source, index),
+            };
+            // An album's tracks are indented so the group reads as one thing, and
+            // numbered from 1 within it: the number says where the track sits in
+            // the list that plays it.
+            let indent = match source {
+                RowSource::Own => "",
+                RowSource::Album(_) => "    ",
+            };
+            let (playlist, _) = app.source_playlist(source)?;
+            let id = playlist.tracks.get(index)?;
+            let is_playing = row_is_playing(app, source, id);
+            let num_str = format!("{:>3} ", index + 1);
+
+            // A row holds an id, and the document it names can go missing —
+            // deleted by hand, or by another instance. Render it dimmed rather
+            // than hiding it, so the row the user can see is the row they can
+            // delete.
+            let Some(track) = app.library.get(id) else {
+                return Some(missing_document_row(
+                    &num_str,
+                    id,
+                    indent,
+                    title_width,
+                    is_selected,
+                ));
+            };
 
             let play_icon = if is_playing { "▶" } else { " " };
             // `None` means "no distinct color" — the icon just takes whatever
@@ -240,7 +449,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
             // every other cell in the row. `Cached`/`Streaming` stay that way
             // since neither is actionable; `Downloading` and `Failed` get a
             // fixed color so they read as a status regardless of selection.
-            let (status_icon, status_color) = if app.downloading.contains(&track.video_id) {
+            let (status_icon, status_color) = if app.downloading.contains(id) {
                 ("⟳", Some(GOLD))
             } else {
                 match track.cache_status {
@@ -248,6 +457,10 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     CacheStatus::Streaming => ("◌", None),
                     CacheStatus::Downloading => ("⟳", Some(GOLD)),
                     CacheStatus::Failed => ("✕", Some(ERROR_RED)),
+                    // Dim rather than red: the file being on an unplugged drive
+                    // is not an error the user has to act on, and it heals by
+                    // itself on the next launch once the drive is back.
+                    CacheStatus::Missing => ("⊘", Some(TEXT_DIM)),
                 }
             };
             let status_span = match status_color {
@@ -265,9 +478,19 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default()
             };
 
-            let num_str = format!("{:>3} ", track_idx + 1);
+            // Video rows say so before they are played, because playing one opens
+            // a window over the terminal — a surprise worth one glyph's warning.
+            // It goes in the title, after the indent: an album's video row is
+            // still one of the album's rows.
+            let media_glyph = match track.media {
+                MediaKind::Video => "▣ ",
+                MediaKind::Audio => "",
+            };
             let title_str = truncate(
-                track.user_title.as_deref().unwrap_or(&track.title),
+                &format!(
+                    "{indent}{media_glyph}{}",
+                    track.user_title.as_deref().unwrap_or(&track.title)
+                ),
                 title_width,
             );
             let artist_str = truncate(track.user_artist.as_deref().unwrap_or(&track.artist), 15);
@@ -301,8 +524,8 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
     frame.render_stateful_widget(Table::new(rows, widths), table_area, &mut table_state);
 
-    if total > 0 {
-        let mut scrollbar_state = ScrollbarState::new(total).position(app.track_offset);
+    if rows_total > 0 {
+        let mut scrollbar_state = ScrollbarState::new(rows_total).position(app.track_offset);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("▲"))
@@ -532,15 +755,10 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
     let dur_str = format_duration(track.duration);
     let vol_str = format!("♪ {}%", app.config.default_volume);
 
-    let track_progress = || {
-        app.download_progress
-            .get(&track.video_id)
-            .copied()
-            .unwrap_or(0.0) as f64
-            / 100.0
-    };
+    let track_progress =
+        || app.download_progress.get(&track.id).copied().unwrap_or(0.0) as f64 / 100.0;
 
-    let cache_state = if app.downloading.contains(&track.video_id) {
+    let cache_state = if app.downloading.contains(&track.id) {
         CacheState::Downloading(track_progress())
     } else {
         match track.cache_status {
@@ -548,6 +766,7 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
             CacheStatus::Streaming => CacheState::Streaming,
             CacheStatus::Downloading => CacheState::Downloading(track_progress()),
             CacheStatus::Failed => CacheState::Failed,
+            CacheStatus::Missing => CacheState::Missing,
         }
     };
 
@@ -579,6 +798,8 @@ pub(crate) enum CacheState {
     Downloading(f64),
     /// Every retry attempt was exhausted. Recoverable with the recache key.
     Failed,
+    /// A local file that is not where it was recorded.
+    Missing,
 }
 
 /// Build the integrated playback bar line for row 3 of the now-playing area.
@@ -601,6 +822,7 @@ pub(crate) fn build_playback_bar_line<'a>(
         CacheState::Cached => ("◈ Cached", SEA_GREEN),
         CacheState::Streaming => ("◌ Stream", TEXT_DIM),
         CacheState::Failed => ("✕ Failed", ERROR_RED),
+        CacheState::Missing => ("⊘ No file", TEXT_DIM),
         CacheState::Downloading(_) => unreachable!("Downloading handled above"),
     };
 
@@ -770,6 +992,15 @@ fn footer_left_message(app: &App) -> String {
         (InputMode::PlaylistDelete, _) => {
             return "Delete playlist? · [y/enter] confirm · [n/esc] cancel".to_string();
         }
+        (InputMode::AlbumRename, _) => {
+            return "Rename album: Enter name · [enter] confirm · [esc] cancel".to_string();
+        }
+        (InputMode::AlbumDelete, _) => {
+            return "Delete album? Its files stay · [y/enter] confirm · [n/esc] cancel".to_string();
+        }
+        (InputMode::FolderInput, _) => {
+            return "Import folder: Enter path · [enter] confirm · [esc] cancel".to_string();
+        }
         (InputMode::Help, _) => return "Help open · [?]/[esc] close".to_string(),
         _ => {}
     }
@@ -811,6 +1042,9 @@ fn footer_center_context(app: &App) -> String {
         InputMode::TrackContextMenu => "Move track".to_string(),
         InputMode::PlaylistRename => "Rename playlist".to_string(),
         InputMode::PlaylistDelete => "Delete playlist".to_string(),
+        InputMode::AlbumRename => "Rename album".to_string(),
+        InputMode::AlbumDelete => "Delete album".to_string(),
+        InputMode::FolderInput => "Import folder".to_string(),
         InputMode::Help => "Help".to_string(),
     };
 
@@ -849,7 +1083,7 @@ pub(crate) fn footer_right_counters(app: &App) -> String {
         parts.push("⇄ Shuffle".to_string());
     }
 
-    if !app.filtered_indices.is_empty() {
+    if app.has_filter() {
         parts.push("Filter".to_string());
     }
 
@@ -867,6 +1101,7 @@ fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::UrlInput => ("Add Track", "URL: "),
         InputMode::NewPlaylist => ("New Playlist", "Name: "),
         InputMode::SearchInput => ("Search", "/"),
+        InputMode::FolderInput => ("Import Folder", "Path: "),
         _ => return,
     };
 
@@ -1056,6 +1291,16 @@ fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
     lines.push(Line::raw(
         "  [n] next           [b] previous    [N] new playlist",
     ));
+    lines.push(Line::raw("  [F] import folder  [R] rescan folder"));
+    lines.push(Line::raw("  [JK] move row down/up"));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![Span::styled(
+        " On an album header",
+        Style::new().fg(GOLD).bold(),
+    )]));
+    lines.push(Line::raw("  [enter] open/close  [r] rename   [d] forget"));
+    lines.push(Line::raw("  [R] rescan its folder"));
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![Span::styled(
@@ -1137,8 +1382,8 @@ pub(crate) fn playlist_delete_target<'a>(app: &'a App) -> Option<&'a str> {
             // Return ref to the name stored in available_playlists for lifetime safety
             app.available_playlists
                 .iter()
-                .find(|(n, _)| n == name)
-                .map(|(n, _)| n.as_str())
+                .find(|entry| &entry.name == name)
+                .map(|entry| entry.name.as_str())
         }
         _ => None,
     }
@@ -1170,6 +1415,81 @@ fn render_playlist_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
             .block(
                 Block::default()
                     .title(" Delete Playlist ")
+                    .title_style(Style::new().fg(ACCENT).bold())
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(ACCENT)),
+            )
+            .style(Style::new().fg(Color::White)),
+        popup,
+    );
+}
+
+// ── Album rename and delete overlays ──────────────────────────────────────
+
+/// The name of the album the cursor's header row is for, if it is on one.
+pub(crate) fn album_edit_target(app: &App) -> Option<&str> {
+    let album = app.album_of(app.selected)?;
+    app.albums.get(album).map(|loaded| loaded.name.as_str())
+}
+
+/// A centred popup of `height` rows, as both album overlays want one.
+fn centred_popup(area: Rect, min_width: u16, max_width: u16, height: u16) -> Rect {
+    let width = area.width.clamp(min_width, max_width);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn render_album_rename_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(current) = album_edit_target(app) else {
+        return;
+    };
+    let is_valid = validate_playlist_name(
+        app.input_buf.trim(),
+        &app.available_playlists,
+        Some(current),
+    )
+    .is_ok();
+    let popup = centred_popup(area, 30, 52, 3);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(format!("Name: {}_", app.input_buf))
+            .block(
+                Block::default()
+                    .title(" Rename Album ")
+                    .title_style(Style::new().fg(ACCENT).bold())
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(if is_valid { ACCENT } else { GOLD })),
+            )
+            .style(Style::new().fg(Color::White)),
+        popup,
+    );
+}
+
+fn render_album_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(target) = album_edit_target(app) else {
+        return;
+    };
+    // Said here rather than only in the footer, because it is the whole answer to
+    // the question the user is actually asking before pressing `y`.
+    let msg = format!(
+        "Forget '{}'?  Its files stay.  [y] yes  [n] no",
+        truncate(target, 20)
+    );
+    let popup = centred_popup(area, 34, 56, 3);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(format!(" {msg}"))
+            .block(
+                Block::default()
+                    .title(" Delete Album ")
                     .title_style(Style::new().fg(ACCENT).bold())
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)

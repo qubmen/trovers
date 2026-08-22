@@ -17,14 +17,24 @@ pub fn playlists_dir() -> PathBuf {
         .join("playlists")
 }
 
+/// Returns ~/.local/share/trovers/tracks/ — one TOML document per track, which
+/// is what playlists reference by id. See `crate::library`.
+pub fn tracks_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+        .join("trovers")
+        .join("tracks")
+}
+
 /// Returns the full path for a cached audio file: audio_dir/<video_id>.<ext>
 pub fn audio_path(video_id: &str, ext: &str) -> PathBuf {
     audio_dir().join(format!("{video_id}.{ext}"))
 }
 
-/// Creates audio and playlists directories if they do not exist.
+/// Creates the audio, playlists and tracks directories if they do not exist.
 pub fn ensure_dirs() -> Result<()> {
     std::fs::create_dir_all(audio_dir()).context("failed to create audio directory")?;
     std::fs::create_dir_all(playlists_dir()).context("failed to create playlists directory")?;
+    std::fs::create_dir_all(tracks_dir()).context("failed to create tracks directory")?;
     Ok(())
 }

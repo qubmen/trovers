@@ -35,6 +35,14 @@ pub struct Config {
     #[serde(default)]
     pub audio_quality: AudioQuality,
     pub active_playlist: Option<String>,
+    /// Extra mpv options for *video* playback only — window management, mostly.
+    ///
+    /// Empty by default and deliberately so: mpv exits on an option it does not
+    /// recognise, so shipping `--focus-on=never` (mpv 0.38 and up) as a default
+    /// would stop playback dead on every older install. The README recommends it
+    /// and the user opts in. See `player::mpv_args`.
+    #[serde(default)]
+    pub video_mpv_args: Vec<String>,
 }
 
 impl Default for Config {
@@ -44,6 +52,7 @@ impl Default for Config {
             default_volume: 80,
             audio_quality: AudioQuality::Best,
             active_playlist: None,
+            video_mpv_args: Vec::new(),
         }
     }
 }
