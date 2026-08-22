@@ -3880,6 +3880,40 @@ tracks = []
     }
 
     #[tokio::test]
+    async fn a_track_added_by_url_shows_up_as_a_row_immediately() {
+        use crate::tui::{App, TaskMsg};
+        use crate::ytdlp::TrackMeta;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Active.toml");
+
+        let mut pl = make_playlist("Active");
+        add_track(&mut pl, make_track("A", "Track A"));
+        pl.save(&path).expect("save");
+
+        let config = crate::config::Config::default();
+        let available = entries(vec![("Active".to_string(), path.clone())]);
+        let mut app = App::new(pl, config, available, path.clone(), test_library());
+
+        app.handle_task_msg(TaskMsg::MetaReady {
+            url: "https://example.com/B".to_string(),
+            meta: TrackMeta {
+                title: "Track B".to_string(),
+                artist: "Artist B".to_string(),
+                channel: "Channel B".to_string(),
+                duration: 200,
+                video_id: "B".to_string(),
+                source: "youtube.com".to_string(),
+            },
+            target_path: None,
+        });
+
+        // The rows are what the user sees; a track that is in the playlist but
+        // not in `rows` is a track that was added into thin air.
+        assert_eq!(row_shapes(&app), vec!["own:0", "own:1"]);
+    }
+
+    #[tokio::test]
     async fn download_done_for_newly_added_track_does_not_hijack_playback() {
         use crate::tui::{App, TaskMsg};
         use crate::ytdlp::TrackMeta;
