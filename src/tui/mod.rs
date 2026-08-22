@@ -45,6 +45,11 @@ pub enum InputMode {
     TrackContextMenu,
     PlaylistRename,
     PlaylistDelete,
+    /// Renaming or forgetting the album whose header the cursor is on. Separate
+    /// modes from the sidebar's, because they address a different thing: the album
+    /// under the cursor in the track list, not the sidebar's selected row.
+    AlbumRename,
+    AlbumDelete,
     /// Typing the path of a folder to import as an album.
     FolderInput,
     Help,
@@ -1120,10 +1125,21 @@ impl App {
         if linked_to_root(self.playlist.source_folder.as_deref()) {
             return ImportTarget::Existing(self.playlist_path.clone());
         }
+        // The displayed list's own albums are loaded, so they answer from memory
+        // too — and a rescan started from one of their headers is exactly this
+        // case.
+        for loaded in &self.albums {
+            if linked_to_root(loaded.playlist.source_folder.as_deref()) {
+                return ImportTarget::Existing(loaded.path.clone());
+            }
+        }
         for entry in &self.available_playlists {
-            // The displayed list is already answered for, from memory: it may hold
+            // Anything already in memory is answered for above: it may hold
             // unsaved edits, and re-reading it would miss them.
-            if entry.path == self.playlist_path || entry.kind != PlaylistKind::Album {
+            if entry.path == self.playlist_path
+                || entry.kind != PlaylistKind::Album
+                || self.albums.iter().any(|loaded| loaded.path == entry.path)
+            {
                 continue;
             }
             // Only the link is wanted, so a list that will not load is simply not
@@ -1737,6 +1753,107 @@ impl App {
         }
         self.rebuild_rows();
         self.clamp_scroll();
+    }
+
+    /// Rename album `album`, in its own file, in the listing, and in its row.
+    ///
+    /// Refused when the name is already taken or unusable as a filename — an album
+    /// is a playlist file, and two of them under one name would be one file.
+    pub fn rename_album(
+        &mut self,
+        album: usize,
+        new_name: &str,
+    ) -> std::result::Result<(), String> {
+        let Some(loaded) = self.albums.get(album) else {
+            return Err("no such album".to_string());
+        };
+        let (old_name, old_path) = (loaded.name.clone(), loaded.path.clone());
+        crate::tui::input::validate_playlist_name(
+            new_name,
+            &self.available_playlists,
+            Some(&old_name),
+        )?;
+
+        let Some(loaded) = self.albums.get_mut(album) else {
+            return Err("no such album".to_string());
+        };
+        let new_path = loaded
+            .playlist
+            .rename(new_name, &old_path)
+            .map_err(|e| e.to_string())?;
+        loaded.name = new_name.to_string();
+        loaded.path = new_path.clone();
+
+        for entry in &mut self.available_playlists {
+            if entry.name == old_name {
+                entry.name = new_name.to_string();
+                entry.path = new_path.clone();
+            }
+        }
+        self.available_playlists.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // A rename moves the file the session writes into. Left pointing at the
+        // old path, the next position flush would recreate the album under the
+        // name the user just renamed away from.
+        if let Some(session) = self.playing.as_mut() {
+            if session.path == old_path {
+                session.path = new_path.clone();
+            }
+        }
+        // Same for the shuffled order, which is keyed by the list's path.
+        if self.shuffle_order_path.as_deref() == Some(&*old_path) {
+            self.shuffle_order_path = Some(new_path);
+        }
+
+        // Albums are ordered by name, so a rename can move this one.
+        self.albums.sort_by(|a, b| a.name.cmp(&b.name));
+        self.rebuild_rows();
+        self.clamp_scroll();
+        Ok(())
+    }
+
+    /// Forget album `album`: its playlist file goes, and nothing else.
+    ///
+    /// Not the folder it mirrored, not the files in it, not the documents of the
+    /// tracks it listed — those live in the library and may well be listed
+    /// elsewhere. Deleting a container has never meant deleting its contents here
+    /// (ADR-018).
+    pub fn delete_album(&mut self, album: usize) {
+        let Some(loaded) = self.albums.get(album) else {
+            return;
+        };
+        let (name, path) = (loaded.name.clone(), loaded.path.clone());
+
+        // Stop first if this is the list playing: the file is about to go, and a
+        // later flush against it would write the album back from a stale snapshot.
+        if self.playing.as_ref().is_some_and(|p| p.path == path) {
+            self.stop_player();
+            self.playing = None;
+            self.is_paused = false;
+        }
+
+        if let Err(e) = Playlist::delete(&path) {
+            error!(err = %e, path = %path.display(), "failed to delete album");
+            self.set_status(format!("Could not delete {name}"));
+            return;
+        }
+        self.albums.remove(album);
+        self.available_playlists.retain(|entry| entry.path != path);
+        self.rebuild_rows();
+        self.clamp_scroll();
+        info!(album = %name, "deleted album");
+    }
+
+    /// Rescan the folder album `album` mirrors.
+    pub fn rescan_album(&mut self, album: usize) {
+        match self
+            .albums
+            .get(album)
+            .and_then(|loaded| loaded.playlist.source_folder.clone())
+        {
+            Some(root) => self.import_folder(root),
+            None => self.set_status("Not linked to a folder"),
+        }
     }
 
     /// Drop row `index` from the list `source` names and save that file.

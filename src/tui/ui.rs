@@ -84,6 +84,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         InputMode::PlaylistDelete => {
             render_playlist_delete_overlay(frame, app, area);
         }
+        InputMode::AlbumRename => {
+            render_album_rename_overlay(frame, app, area);
+        }
+        InputMode::AlbumDelete => {
+            render_album_delete_overlay(frame, app, area);
+        }
         InputMode::Help => {
             render_help_overlay(frame, app, area);
         }
@@ -978,6 +984,12 @@ fn footer_left_message(app: &App) -> String {
         (InputMode::PlaylistDelete, _) => {
             return "Delete playlist? · [y/enter] confirm · [n/esc] cancel".to_string();
         }
+        (InputMode::AlbumRename, _) => {
+            return "Rename album: Enter name · [enter] confirm · [esc] cancel".to_string();
+        }
+        (InputMode::AlbumDelete, _) => {
+            return "Delete album? Its files stay · [y/enter] confirm · [n/esc] cancel".to_string();
+        }
         (InputMode::FolderInput, _) => {
             return "Import folder: Enter path · [enter] confirm · [esc] cancel".to_string();
         }
@@ -1022,6 +1034,8 @@ fn footer_center_context(app: &App) -> String {
         InputMode::TrackContextMenu => "Move track".to_string(),
         InputMode::PlaylistRename => "Rename playlist".to_string(),
         InputMode::PlaylistDelete => "Delete playlist".to_string(),
+        InputMode::AlbumRename => "Rename album".to_string(),
+        InputMode::AlbumDelete => "Delete album".to_string(),
         InputMode::FolderInput => "Import folder".to_string(),
         InputMode::Help => "Help".to_string(),
     };
@@ -1274,6 +1288,14 @@ fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![Span::styled(
+        " On an album header",
+        Style::new().fg(GOLD).bold(),
+    )]));
+    lines.push(Line::raw("  [enter] open/close  [r] rename   [d] forget"));
+    lines.push(Line::raw("  [R] rescan its folder"));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![Span::styled(
         " Sidebar",
         Style::new().fg(GOLD).bold(),
     )]));
@@ -1385,6 +1407,81 @@ fn render_playlist_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
             .block(
                 Block::default()
                     .title(" Delete Playlist ")
+                    .title_style(Style::new().fg(ACCENT).bold())
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(ACCENT)),
+            )
+            .style(Style::new().fg(Color::White)),
+        popup,
+    );
+}
+
+// ── Album rename and delete overlays ──────────────────────────────────────
+
+/// The name of the album the cursor's header row is for, if it is on one.
+pub(crate) fn album_edit_target(app: &App) -> Option<&str> {
+    let album = app.album_of(app.selected)?;
+    app.albums.get(album).map(|loaded| loaded.name.as_str())
+}
+
+/// A centred popup of `height` rows, as both album overlays want one.
+fn centred_popup(area: Rect, min_width: u16, max_width: u16, height: u16) -> Rect {
+    let width = area.width.clamp(min_width, max_width);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn render_album_rename_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(current) = album_edit_target(app) else {
+        return;
+    };
+    let is_valid = validate_playlist_name(
+        app.input_buf.trim(),
+        &app.available_playlists,
+        Some(current),
+    )
+    .is_ok();
+    let popup = centred_popup(area, 30, 52, 3);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(format!("Name: {}_", app.input_buf))
+            .block(
+                Block::default()
+                    .title(" Rename Album ")
+                    .title_style(Style::new().fg(ACCENT).bold())
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(if is_valid { ACCENT } else { GOLD })),
+            )
+            .style(Style::new().fg(Color::White)),
+        popup,
+    );
+}
+
+fn render_album_delete_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(target) = album_edit_target(app) else {
+        return;
+    };
+    // Said here rather than only in the footer, because it is the whole answer to
+    // the question the user is actually asking before pressing `y`.
+    let msg = format!(
+        "Forget '{}'?  Its files stay.  [y] yes  [n] no",
+        truncate(target, 20)
+    );
+    let popup = centred_popup(area, 34, 56, 3);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(format!(" {msg}"))
+            .block(
+                Block::default()
+                    .title(" Delete Album ")
                     .title_style(Style::new().fg(ACCENT).bold())
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)

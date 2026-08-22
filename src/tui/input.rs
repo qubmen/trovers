@@ -52,6 +52,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
                 | InputMode::TrackContextMenu
                 | InputMode::PlaylistRename
                 | InputMode::PlaylistDelete
+                | InputMode::AlbumRename
+                | InputMode::AlbumDelete
                 | InputMode::FolderInput
         )
     {
@@ -75,6 +77,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
         InputMode::TrackContextMenu => handle_track_context_menu(app, key),
         InputMode::PlaylistRename => handle_playlist_rename(app, key).await,
         InputMode::PlaylistDelete => handle_playlist_delete(app, key).await,
+        InputMode::AlbumRename => handle_album_rename(app, key),
+        InputMode::AlbumDelete => handle_album_delete(app, key),
         InputMode::FolderInput => handle_folder_input(app, key),
         InputMode::Help => Ok(Action::Continue),
     }
@@ -306,16 +310,22 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             app.save_playlist();
         }
 
-        // Toggle shuffle for the displayed playlist.
+        // On an album header, rename that album. Anywhere else, toggle shuffle for
+        // the displayed playlist.
         KeyCode::Char('r') => {
-            app.playlist.shuffle = !app.playlist.shuffle;
-            app.rebuild_shuffle_order();
-            app.save_playlist();
-            app.set_status(if app.playlist.shuffle {
-                "Shuffle on"
+            if let Some(album) = app.album_of(app.selected) {
+                app.input_buf = app.albums[album].name.clone();
+                app.input_mode = InputMode::AlbumRename;
             } else {
-                "Shuffle off"
-            });
+                app.playlist.shuffle = !app.playlist.shuffle;
+                app.rebuild_shuffle_order();
+                app.save_playlist();
+                app.set_status(if app.playlist.shuffle {
+                    "Shuffle on"
+                } else {
+                    "Shuffle off"
+                });
+            }
         }
 
         KeyCode::Char('n') => step_track(app, true),
@@ -329,9 +339,11 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             app.target_playlist_for_url = Some(app.playlist.name.clone());
         }
 
-        // Delete track
+        // Delete: the album on a header, otherwise the track under the cursor.
         KeyCode::Char('d') => {
-            if !app.playlist.tracks.is_empty() {
+            if app.album_of(app.selected).is_some() {
+                app.input_mode = InputMode::AlbumDelete;
+            } else if app.row_track_id(app.selected).is_some() {
                 app.input_mode = InputMode::ConfirmDelete;
             }
         }
@@ -365,10 +377,14 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             app.input_buf.clear();
         }
 
-        // Rescan the folder this album mirrors
-        KeyCode::Char('R') => match app.playlist.source_folder.clone() {
-            Some(root) => app.import_folder(root),
-            None => app.set_status("Not linked to a folder"),
+        // Rescan a folder: the one the album under the cursor mirrors when the
+        // cursor is on a header, otherwise the displayed playlist's own.
+        KeyCode::Char('R') => match app.album_of(app.selected) {
+            Some(album) => app.rescan_album(album),
+            None => match app.playlist.source_folder.clone() {
+                Some(root) => app.import_folder(root),
+                None => app.set_status("Not linked to a folder"),
+            },
         },
 
         // Reorder the selected row within this playlist
@@ -377,7 +393,13 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
 
         // Move track to another playlist
         KeyCode::Char('m') => {
-            if !app.playlist.tracks.is_empty() && !app.available_playlist_names().is_empty() {
+            if app.album_of(app.selected).is_some() {
+                // A header *is* a list. Opening the menu here would move whichever
+                // row happened to sit under it, which is not what was asked.
+                app.set_status("Move tracks, not albums");
+            } else if app.row_track_id(app.selected).is_some()
+                && !app.available_playlist_names().is_empty()
+            {
                 app.context_menu_selected = 0;
                 app.input_mode = InputMode::TrackContextMenu;
             }
@@ -991,6 +1013,64 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
                         error!(err = %e, "failed to delete playlist");
                     }
                 }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(Action::Continue)
+}
+
+// ── Album rename and delete, from the header row ──────────────────────────
+
+/// The album whose header the cursor is on, if it still is on one.
+///
+/// Every album edit re-reads this rather than remembering an index across the
+/// prompt: the rows can be rebuilt while it is open, and an index into `albums`
+/// that was right when `r` was pressed is not a promise.
+fn selected_album(app: &App) -> Option<usize> {
+    app.album_of(app.selected)
+}
+
+pub(crate) fn handle_album_rename(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let new_name = app.input_buf.trim().to_string();
+            let Some(album) = selected_album(app) else {
+                app.input_mode = InputMode::Normal;
+                app.input_buf.clear();
+                return Ok(Action::Continue);
+            };
+            match app.rename_album(album, &new_name) {
+                Ok(()) => {
+                    app.input_mode = InputMode::Normal;
+                    app.input_buf.clear();
+                }
+                // The prompt stays open on a rejected name, holding what was
+                // typed: the fix is almost always one keystroke away.
+                Err(msg) => {
+                    warn!(msg = %msg, "invalid album name");
+                    app.set_status(msg);
+                }
+            }
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.input_buf.clear();
+        }
+        _ => type_char(app, key),
+    }
+    Ok(Action::Continue)
+}
+
+pub(crate) fn handle_album_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            app.input_mode = InputMode::Normal;
+            if let Some(album) = selected_album(app) {
+                app.delete_album(album);
             }
         }
         KeyCode::Char('n') | KeyCode::Esc => {

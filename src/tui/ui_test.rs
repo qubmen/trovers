@@ -8864,4 +8864,335 @@ tracks = []
             "0 is followed by 1 in the pinned order"
         );
     }
+
+    // ── The keys on an album header ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn enter_on_a_header_opens_and_closes_the_album_without_playing() {
+        use crate::tui::input::handle_tracklist;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        app.selected = 1;
+
+        handle_tracklist(&mut app, key(KeyCode::Enter))
+            .await
+            .expect("handled");
+        assert_eq!(row_shapes(&app), vec!["own:0", "header:Kino", "album0:0"]);
+        assert!(app.playing.is_none(), "a header is not playable");
+        assert!(
+            !crate::playlist::Playlist::load(&app.albums[0].path)
+                .expect("load")
+                .collapsed,
+            "and the fold state is remembered on disk"
+        );
+
+        handle_tracklist(&mut app, key(KeyCode::Enter))
+            .await
+            .expect("handled");
+        assert_eq!(row_shapes(&app), vec!["own:0", "header:Kino"]);
+        assert!(
+            crate::playlist::Playlist::load(&app.albums[0].path)
+                .expect("load")
+                .collapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_j_swaps_two_tracks_inside_the_album_they_belong_to() {
+        use crate::tui::input::handle_tracklist;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1", "k2"])]);
+        open_all(&mut app);
+        app.selected = 2; // album0:0
+
+        handle_tracklist(&mut app, key(KeyCode::Char('J')))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.albums[0].playlist.tracks, vec!["k2", "k1"]);
+        assert_eq!(app.playlist.tracks, vec!["a"], "the parent is untouched");
+        assert_eq!(app.selected, 3, "the cursor stays on the row it moved");
+        assert_eq!(
+            crate::playlist::Playlist::load(&app.albums[0].path)
+                .expect("load")
+                .tracks,
+            vec!["k2", "k1"]
+        );
+    }
+
+    /// The boundary between two lists is not a place a swap can happen: moving a
+    /// track out of the album it belongs to is `m`, not `J`.
+    #[tokio::test]
+    async fn shift_j_refuses_to_move_a_track_across_the_boundary() {
+        use crate::tui::input::handle_tracklist;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        open_all(&mut app);
+        app.selected = 0; // the parent's last own track, a header below it
+
+        handle_tracklist(&mut app, key(KeyCode::Char('J')))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.playlist.tracks, vec!["a"]);
+        assert_eq!(app.albums[0].playlist.tracks, vec!["k1"]);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn shift_j_on_a_header_says_albums_are_sorted() {
+        use crate::tui::input::handle_tracklist;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"]), ("Zed", &["z1"])]);
+        app.selected = 1; // header:Kino
+
+        handle_tracklist(&mut app, key(KeyCode::Char('J')))
+            .await
+            .expect("handled");
+
+        assert_eq!(
+            app.albums
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Kino", "Zed"]
+        );
+        assert_eq!(status_of(&app), Some("Albums are sorted by name"));
+    }
+
+    #[tokio::test]
+    async fn deleting_an_album_row_edits_the_album_and_leaves_the_file_alone() {
+        use crate::tui::input::{handle_confirm_delete, handle_tracklist};
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let media = dir.path().join("song.mp3");
+        std::fs::write(&media, b"not really audio").expect("write");
+
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &[])]);
+        let track = local_track(&media);
+        let id = track.id.clone();
+        app.library.upsert(track).expect("write document");
+        app.albums[0].playlist.tracks.push(id.clone());
+        open_all(&mut app);
+        app.selected = 2; // album0:0
+
+        handle_tracklist(&mut app, key(KeyCode::Char('d')))
+            .await
+            .expect("handled");
+        assert_eq!(app.input_mode, crate::tui::InputMode::ConfirmDelete);
+        handle_confirm_delete(&mut app, key(KeyCode::Char('y'))).expect("confirmed");
+
+        assert!(app.albums[0].playlist.tracks.is_empty(), "the row goes");
+        assert!(
+            media.exists(),
+            "the user's file is never trovers' to delete"
+        );
+        assert_eq!(row_shapes(&app), vec!["own:0", "header:Kino"]);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_album_from_its_header_forgets_it_and_keeps_the_folder() {
+        use crate::tui::input::{handle_album_delete, handle_tracklist};
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let folder = dir.path().join("Kino files");
+        std::fs::create_dir(&folder).expect("create folder");
+
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        app.albums[0].playlist.source_folder = Some(folder.clone());
+        let album_path = app.albums[0].path.clone();
+        app.selected = 1; // header:Kino
+
+        handle_tracklist(&mut app, key(KeyCode::Char('d')))
+            .await
+            .expect("handled");
+        assert_eq!(app.input_mode, crate::tui::InputMode::AlbumDelete);
+        handle_album_delete(&mut app, key(KeyCode::Char('y'))).expect("confirmed");
+
+        assert!(app.albums.is_empty(), "the album is gone from the rows");
+        assert!(!album_path.exists(), "its playlist file goes");
+        assert!(folder.exists(), "the folder it mirrored stays");
+        assert!(
+            app.library.get("k1").is_some(),
+            "the track keeps its document"
+        );
+        assert_eq!(row_shapes(&app), vec!["own:0"]);
+        assert!(
+            !app.available_playlists.iter().any(|e| e.name == "Kino"),
+            "and the listing forgets it too"
+        );
+    }
+
+    /// Deleting the album that is playing has to stop it first: the file goes, and
+    /// a later position flush against a dead path would write it back.
+    #[tokio::test]
+    async fn deleting_the_playing_album_stops_playback() {
+        use crate::tui::input::handle_album_delete;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        open_all(&mut app);
+        app.play_row(2);
+        assert!(app.playing.is_some(), "the album is playing");
+
+        app.selected = 1; // header:Kino
+        app.input_mode = crate::tui::InputMode::AlbumDelete;
+        handle_album_delete(&mut app, key(KeyCode::Char('y'))).expect("confirmed");
+
+        assert!(app.playing.is_none(), "nothing is playing any more");
+        assert!(app.albums.is_empty());
+    }
+
+    #[tokio::test]
+    async fn renaming_an_album_from_its_header_renames_its_file() {
+        use crate::tui::input::{handle_album_rename, handle_tracklist};
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        let old = app.albums[0].path.clone();
+        app.selected = 1; // header:Kino
+
+        handle_tracklist(&mut app, key(KeyCode::Char('r')))
+            .await
+            .expect("handled");
+        assert_eq!(app.input_mode, crate::tui::InputMode::AlbumRename);
+        assert_eq!(
+            app.input_buf, "Kino",
+            "the prompt opens on the current name"
+        );
+        assert!(
+            !app.playlist.shuffle,
+            "`r` on a header renames; it must not have toggled shuffle on the way"
+        );
+
+        app.input_buf = "Viktor".to_string();
+        handle_album_rename(&mut app, key(KeyCode::Enter)).expect("renamed");
+
+        assert_eq!(app.albums[0].name, "Viktor");
+        assert_eq!(app.albums[0].playlist.name, "Viktor");
+        assert!(!old.exists(), "the old file goes");
+        assert!(app.albums[0].path.exists());
+        assert_eq!(row_shapes(&app), vec!["own:0", "header:Viktor"]);
+        assert!(
+            app.available_playlists.iter().any(|e| e.name == "Viktor"),
+            "the listing follows the rename"
+        );
+    }
+
+    /// A rename moves the file the session saves into. Left pointing at the old
+    /// path, the next position flush would recreate the album under its old name.
+    #[tokio::test]
+    async fn renaming_the_playing_album_repoints_its_session() {
+        use crate::tui::input::handle_album_rename;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        open_all(&mut app);
+        app.play_row(2);
+
+        app.selected = 1; // header:Kino
+        app.input_mode = crate::tui::InputMode::AlbumRename;
+        app.input_buf = "Viktor".to_string();
+        handle_album_rename(&mut app, key(KeyCode::Enter)).expect("renamed");
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.path.clone()),
+            Some(app.albums[0].path.clone()),
+            "the session follows the file"
+        );
+    }
+
+    /// Two albums under one parent cannot share a name: they would share a file.
+    #[tokio::test]
+    async fn renaming_an_album_onto_a_taken_name_is_refused() {
+        use crate::tui::input::handle_album_rename;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"]), ("Zed", &["z1"])]);
+        app.selected = 1; // header:Kino
+        app.input_mode = crate::tui::InputMode::AlbumRename;
+        app.input_buf = "Zed".to_string();
+
+        handle_album_rename(&mut app, key(KeyCode::Enter)).expect("handled");
+
+        assert_eq!(app.albums[0].name, "Kino", "the rename is refused");
+        assert_eq!(
+            app.input_mode,
+            crate::tui::InputMode::AlbumRename,
+            "and the prompt stays open so the name can be fixed"
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_r_on_a_header_rescans_that_albums_folder() {
+        use crate::tui::input::handle_tracklist;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let folder = dir.path().join("Kino files");
+        std::fs::create_dir(&folder).expect("create folder");
+
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        app.albums[0].playlist.source_folder = Some(folder.clone());
+        app.selected = 1; // header:Kino
+
+        handle_tracklist(&mut app, key(KeyCode::Char('R')))
+            .await
+            .expect("handled");
+
+        assert_eq!(
+            status_of(&app),
+            Some(format!("Scanning {}", folder.display()).as_str()),
+            "the album's folder, not the parent's"
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_r_on_a_header_of_an_unlinked_album_says_so() {
+        use crate::tui::input::handle_tracklist;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        app.selected = 1;
+
+        handle_tracklist(&mut app, key(KeyCode::Char('R')))
+            .await
+            .expect("handled");
+
+        assert_eq!(status_of(&app), Some("Not linked to a folder"));
+    }
+
+    /// `m` moves a row into another list. A header *is* a list; there is nothing
+    /// to move, and silently opening the menu on the row below would be worse.
+    #[tokio::test]
+    async fn m_on_a_header_says_there_is_nothing_to_move() {
+        use crate::tui::input::handle_tracklist;
+        use crossterm::event::KeyCode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        app.selected = 1;
+
+        handle_tracklist(&mut app, key(KeyCode::Char('m')))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.input_mode, crate::tui::InputMode::Normal);
+        assert_eq!(status_of(&app), Some("Move tracks, not albums"));
+    }
 }
