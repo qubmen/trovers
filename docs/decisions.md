@@ -16,7 +16,8 @@ and `config.toml`. The original spec used YAML.
 - YAML has well-known parsing ambiguities (implicit typing, the "Norway problem",
   indentation sensitivity) that can cause silent data corruption.
 - The `toml` crate is well-maintained and has no surprising behaviour.
-- TOML array-of-tables syntax (`[[tracks]]`) maps cleanly to `Vec<Track>`.
+- TOML maps cleanly to the small flat structs used here — a track document is a
+  single table, a playlist a table with one array of strings.
 
 **Trade-off:** TOML does not support inline comments mid-value and is slightly more
 verbose for nested structures — not a concern here.
@@ -59,8 +60,11 @@ path. `<seq>` is a per-process counter bumped on every `Player::spawn`.
 
 ## ADR-004: Crash recovery for `downloading` status
 
-**Decision:** `Playlist::load()` resets any track with
-`cache_status = "downloading"` to `"streaming"` before returning.
+**Decision:** `Library::load()` resets any track with
+`cache_status = "downloading"` to `"streaming"` before returning. (Originally
+`Playlist::load()`; it moved with ADR-015, which also gave it the
+`cached`-but-`file`-gone case — one place, once per launch, instead of once per
+playlist file.)
 
 **Reasoning:**
 - `downloading` is a transient state set at the start of a yt-dlp job.
@@ -160,6 +164,14 @@ cosmetic — heights are pseudo-random, not derived from actual audio spectrum d
 
 ## ADR-011: `PlayingSession` — playback identity decoupled from the displayed playlist
 
+> **Amended by ADR-015.** The decoupling stands, and so does everything below
+> about *why* playback identity cannot live on the displayed playlist. What went
+> away is the dual-resolution machinery: `PlayingSession` now holds a
+> `track_id: String` and the accessors are a single library lookup, because a
+> track's state has exactly one home on disk. Read the paragraphs about
+> "borrow-when-paths-match" as history — they describe the problem ADR-015
+> deleted rather than solved.
+
 **Decision:** The currently-playing track is tracked via
 `App.playing: Option<PlayingSession>`, where `PlayingSession` holds a full
 second `Playlist` (not a lightweight metadata snapshot), its file path, and
@@ -224,8 +236,7 @@ its background download finished, `TaskMsg::DownloadDone`'s
 new track and triggered a stream→local-file hot-switch — restarting mpv on
 the unrelated new track, seeked to whatever position the *actually* playing
 track was at. The fix (Task 1) removed that assignment entirely: adding a
-track only pushes it into `tracks` and populates `download_targets`/
-`downloading`; it must never write to any "what's playing" field. Task 3
+track only pushes its id into `tracks` and marks it `downloading`; it must never write to any "what's playing" field. Task 3
 finished closing this off by rebasing the hot-switch identity check on
 `self.playing.as_ref().map(|p| &p.track().video_id) == Some(&video_id)` —
 `PlayingSession`, not any field on the displayed `Playlist`, is now the only
@@ -335,3 +346,69 @@ auto-advance walk that order. Shuffle is ignored while a search filter is active
   `n`/`b` step are positions in that subset, not in the playlist. Shuffling them
   would make the cursor jump around inside a list the user is reading. Clearing
   the search restores the shuffled walk.
+
+---
+
+## ADR-015: Each track is its own document; playlists are ordered id lists
+
+**Decision:** A track lives in one file — `tracks/<slug>-<platform-id>[-N].toml`
+— indexed by the `id` recorded *inside* it. A playlist is that playlist's own
+settings plus `tracks: Vec<String>`, an ordered list of those ids. `Library`
+owns the documents; `Playlist` owns nothing but running order. Migration from
+the embedded format runs at startup, detects the old shape with an untagged
+serde enum, and backs `playlists/` up before it writes anything.
+
+**Reasoning:**
+- **It deleted more code than it added.** Three separate mechanisms existed only
+  because one track's state could sit in several playlist files at once:
+  `download_targets` + `remap_download_targets` + `retarget_download` +
+  `clear_download_state_for_playlist` (all answering "which playlist file owns
+  this download's row"), `PlayingSession`'s dual resolution plus
+  `save_playing_session_playlist` and `patch_and_save_playlist`, and
+  `video_id_referenced_elsewhere` loading and parsing every playlist in full.
+  With one home per track, a download patches a document by id and renaming,
+  moving or deleting a playlist has nothing to repoint.
+- **It fixed a real quirk rather than merely tidying.** The same video in two
+  playlists used to carry two independent positions and speeds, and whichever
+  copy was written last won. One document means one position.
+- **Writes got proportional.** The 15-second position flush rewrote the entire
+  playlist TOML — every track's metadata — to record one integer. It now writes
+  one small file.
+- **A track becomes movable and shareable.** Moving between playlists is an
+  id-list edit, and a single file describes a track completely, which is what
+  makes both albums (ADR pending) and eventual export possible.
+
+**`id` is authoritative; the filename is only a hint.** macOS filesystems are
+case-insensitive and YouTube ids are not, so `aB` and `Ab` can collide as
+filenames while being different tracks. The colliding document gets a `-2`
+suffix and its `id` stays exact. Nothing reads the filename to identify a track,
+so a user is free to rename a document.
+
+**Why the id is `<slug>:<platform-id>` and not the URL.** `youtube.com/watch?v=X`
+and `music.youtube.com/watch?v=X` are the same track; so are URLs differing only
+in tracking parameters. The slug is the registrable (second-to-last) dot label
+of `source`, lowercased, so both map to `youtube` and one video is one document.
+
+**Why the audio cache still uses platform-id filenames.** Cached audio stays at
+`audio/<platform-id>.opus`, and `ytdlp.rs` keeps calling its parameter
+`video_id` — there it genuinely is a platform video id, handed to yt-dlp. Two
+reasons: every file users have already downloaded stays valid, and the id
+scheme is a trovers concept that has no business leaking into the code that
+talks to yt-dlp. The consequence to keep straight is that `Track::platform_id()`
+(derived, everything after the first `:`) is what the cache and the player take,
+while progress reporting is keyed by the *library* id — which is why
+`ytdlp::download` takes a `progress_key` parameter separate from `video_id`.
+
+**Migration, and why it is safe to run on every launch.** Detection is by shape,
+not by a version field: `tracks` parses as `Vec<String>` (already migrated, left
+untouched) or `Vec<LegacyTrack>` (rewrite). The backup directory
+`playlists.backup-<utc>/` is written before the first mutation, so a failure
+halfway leaves the originals recoverable. Two playlists sharing a video produce
+one document — first writer wins, and the skipped duplicates are logged.
+An unparseable playlist is logged and skipped rather than aborting the whole
+migration: one bad file must not hold the other playlists hostage.
+
+**Trade-off accepted:** a playlist file is no longer self-contained, so copying
+one out of `playlists/` gives a list of ids and nothing else. Sharing wants a
+bundle command; see "Deferred" in the plan. The upside — one position per track,
+proportional writes, a whole class of ownership bookkeeping gone — is worth it.

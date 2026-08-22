@@ -105,7 +105,7 @@ trovers [<URL>]
                ├─ yt-dlp download progress parsed from stdout → caching bar in TUI
                │
                ├─ on download success:
-               │       ├─ set cache_status: cached, file: <path> in playlist TOML
+               │       ├─ set cache_status: cached, file: <path> in the track's document
                │       └─ if this track is the one actually playing: kill the
                │          streaming mpv process and respawn it against the local
                │          file, resuming at the current live position (hot-switch)
@@ -134,7 +134,9 @@ trovers/
 │   ├── deps.rs                      ← verify yt-dlp and mpv in PATH
 │   ├── ytdlp.rs                     ← wrapper: metadata, stream URL, download
 │   ├── player.rs                    ← mpv process + IPC socket communication
-│   ├── playlist.rs                  ← load/save playlist TOML files
+│   ├── playlist.rs                  ← load/save playlist TOML files (ordered id lists)
+│   ├── library.rs                   ← the track library: one TOML document per
+│   │                                   track, plus migration from the old format
 │   ├── cache.rs                     ← file paths, cache directory management
 │   └── tui/
 │       ├── mod.rs                   ← App struct, Focus/InputMode/SidebarItem enums,
@@ -149,11 +151,14 @@ trovers/
 
 ~/.local/share/trovers/
 ├── playlists/
-│   ├── Progressive.toml             ← playlist file (also stores per-track state)
+│   ├── Progressive.toml             ← an ordered list of track ids, nothing more
 │   └── Chill.toml
+├── tracks/
+│   ├── youtube-vK2io4J708A.toml     ← one document per track: all of its state
+│   └── youtube-_iVXs77l7tE.toml
 └── audio/
-    ├── vK2io4J708A.m4a
-    └── -iVXs77l7tE.m4a
+    ├── vK2io4J708A.opus             ← keyed by the *platform* id, not the library id
+    └── -iVXs77l7tE.opus
 ```
 
 ---
@@ -171,48 +176,97 @@ happens inside the TUI. There are no additional subcommands.
 
 ---
 
-## Playlist TOML Schema
+## Track Library and Playlist Schema
 
-Each playlist is a single `.toml` file that stores both the track list and
-per-track playback state. This is the single source of truth — no separate
-database or state files.
+A track and a playlist are two different files. A **track document** holds
+everything about one track; a **playlist** holds an ordered list of the ids of
+the tracks it plays. Between them they are the single source of truth — no
+separate database or state files.
+
+The split is what makes a track's playback position mean something: the same
+video listed by three playlists is one document with one position, not three
+copies drifting apart. It also makes a track a self-contained file that can be
+moved between playlists (an id-list edit) or handed to someone else.
+
+### Track document — `~/.local/share/trovers/tracks/<slug>-<platform-id>[-N].toml`
 
 ```toml
-name = "Progressive"
-created = "2026-04-01T12:06:59.713523Z"
-loop_mode = "none"       # none | track | playlist
-shuffle = false
-current_index = 0
-
-[[tracks]]
-index = 0
+id = "youtube:vK2io4J708A"
 url = "https://www.youtube.com/watch?v=vK2io4J708A"
 source = "youtube.com"
 title = "Miss Monique @ The Dome at UNVRS (Ibiza, Spain)"
 artist = "Miss Monique"
 channel = "Miss Monique"
 duration = 3529
-video_id = "vK2io4J708A"
 cache_status = "cached"
-file = "~/.local/share/trovers/audio/vK2io4J708A.m4a"
+file = "~/.local/share/trovers/audio/vK2io4J708A.opus"
 last_position = 176
 speed = 1.5
 added_at = "2026-04-01T12:06:59Z"
-
-[[tracks]]
-index = 1
-url = "https://soundcloud.com/artbat/live-ultra-2026"
-source = "soundcloud.com"
-title = "ARTBAT - Live at Ultra Music Festival, Miami 2026"
-artist = "ARTBAT"
-channel = "ARTBAT"
-duration = 3595
-video_id = "artbat-live-ultra-2026"
-cache_status = "streaming"
-last_position = 0
-speed = 1.0
-added_at = "2026-04-01T13:00:00Z"
 ```
+
+`file`, `speed`, `user_title` and `user_artist` are absent when unset.
+
+**`id` is authoritative; the filename is only a hint.** `Library::load` indexes
+every document by the `id` written *inside* it, so a document renamed by hand,
+or given a `-2` suffix because two ids wanted the same filename, still resolves.
+Collisions are real rather than theoretical: YouTube ids are case-sensitive and
+macOS filenames are not, so `abc` and `ABC` compete for one name.
+
+### Three kinds of id — keep them straight
+
+| | Example | Where it lives |
+|---|---|---|
+| **library id** (`Track.id`) | `youtube:vK2io4J708A` | playlists, document filenames, `App.downloading`, `download_progress` |
+| **platform id** (`Track::platform_id()`) | `vK2io4J708A` | audio cache filenames, everything handed to yt-dlp |
+| **source slug** (`library::source_slug`) | `youtube` | the first half of a library id |
+
+- `<slug>` is the *registrable* label of `source` — the second-to-last
+  dot-separated label, lowercased. `youtube.com` and `music.youtube.com` both
+  give `youtube`, so one video reached via two host spellings stays one document.
+- `platform_id()` is everything after the **first** colon, derived rather than
+  stored, so there is no second field to fall out of step with `id`. Splitting on
+  the first colon only: platform ids are opaque strings minted by yt-dlp per site
+  and some contain colons of their own.
+- **The audio cache is keyed by the platform id** (`<platform-id>.opus`), which
+  is why `ytdlp.rs` keeps calling its parameter `video_id` — there it genuinely
+  is one. Anything already downloaded stays valid.
+
+### Playlist — `~/.local/share/trovers/playlists/<name>.toml`
+
+```toml
+name = "Progressive"
+created = "2026-04-01T12:06:59.713523Z"
+loop_mode = "none"       # none | track | playlist
+shuffle = false
+tracks = ["youtube:vK2io4J708A", "soundcloud:artbat-live-ultra-2026"]
+current_track = "youtube:vK2io4J708A"
+```
+
+`tracks` is the running order. `current_track` means only "the row the cursor
+was last on in *this* playlist", used to restore the cursor on load — never
+"what is playing now", which is `App.playing`.
+
+A row whose document has gone missing renders dimmed rather than vanishing, so
+the row the user can see is the row they can delete.
+
+### Migration from the old format
+
+Playlists used to embed their tracks as `[[tracks]]` tables, each with its own
+`video_id`. `library::migrate(playlists_dir, tracks_dir)` runs on every launch,
+before any playlist is read, and moves those over.
+
+- **Detection is by shape**, via an untagged serde enum on `tracks`: a list of
+  strings is already migrated, a list of tables is not. Nothing needs versioning,
+  and the second run is a no-op that leaves every file byte-for-byte alone.
+- `playlists/` is copied to `playlists.backup-<utc>/` **before anything is
+  written**, and a failed copy aborts the migration — the backup is the only way
+  back.
+- Where two playlists listed the same video, they had two independent copies of
+  its state and nothing can say which the user meant: **first writer wins**, and
+  the duplicate is logged.
+- An unreadable or unparseable playlist is logged and left exactly as it is.
+- The launch that migrates says so in the status line, backup path included.
 
 ### source field
 `source` stores the bare domain extracted from the track URL (e.g. `youtube.com`,
@@ -231,9 +285,12 @@ domains, just take whatever host the URL contains.
   playback still works fine via streaming. Cleared only by a fresh download,
   automatic (re-adding the same URL) or manual (`c`, recache).
 
-**Startup recovery:** on `Playlist::load()`, any track with `cache_status = "downloading"`
-must be reset to `"streaming"`. This handles the case where the app crashed mid-download.
-`"failed"` is left untouched — see above.
+**Startup recovery:** on `Library::load()`, any document with `cache_status =
+"downloading"` is reset to `"streaming"` — the app crashed mid-download and no
+download survives a restart. A `cached` track whose `file` has gone falls back
+to `streaming` with `file` cleared, so it plays by streaming instead of failing.
+`"failed"` is left untouched — see above. One place, once per launch, rather
+than once per playlist file.
 
 ### Per-track speed
 Speed is stored per-track and persisted between sessions. When a track is played,
@@ -404,7 +461,7 @@ route flushes state and kills mpv.
 | `Space`          | Play / Pause                                    |
 | `←` / `→`        | Seek −10s / +10s                               |
 | `Shift+←/→`      | Seek −60s / +60s                               |
-| `[` / `]`        | Speed −0.1 / +0.1 (saved to TOML immediately)  |
+| `[` / `]`        | Speed −0.1 / +0.1 (saved to the track's document immediately) |
 | `v` / `V`        | Volume +5 / −5                                  |
 | `l`              | Cycle loop mode: none → track → playlist → none |
 | `r`              | Toggle shuffle                                  |
@@ -412,7 +469,7 @@ route flushes state and kills mpv.
 | `b`              | Previous track in the *displayed* playlist (resume from last_position; independent of whatever is actually playing if you're browsing elsewhere) |
 | `a`              | Add track: open URL input prompt                |
 | `/`              | Search/filter tracks (live, case-insensitive)   |
-| `d`              | Delete selected track (confirm prompt)          |
+| `d`              | Delete selected track (confirm prompt) — removes the row, and the document plus cached audio only when no other playlist lists it |
 | `c`              | Recache: force a fresh download of the selected track, regardless of its current cache status (overwrites an existing file; no-op if a download for it is already running) |
 | `N`              | Create new playlist (name prompt)               |
 
@@ -596,18 +653,51 @@ newline in the middle that it cannot open.
   as the answer meant an event arriving in the window between writing a command
   and reading its answer was parsed as that answer.
 
+### library.rs — the track library
+- `Library { root, tracks: HashMap<id, Track>, paths: HashMap<id, PathBuf> }`
+- **`root` is injected, never looked up inside `Library`** — the same reason
+  `Playlist::load`/`save` take a `&Path`: it is what makes the whole thing
+  testable against a `tempfile::tempdir()`. `cache::tracks_dir()` is called only
+  in `main.rs`.
+- `load(root)` — read every `*.toml`, index by each document's inner `id`, repair
+  `cache_status` on the way in. A missing directory is an empty library (first
+  launch); an unreadable or unparseable document is logged and skipped rather
+  than failing the load.
+- `get(id)` / `get_mut(id)` — mutating does **not** persist; call `save(id)`
+- `save(id)` — one small file, atomically: `<name>.toml.tmp` then rename
+- `upsert(track)` — insert or replace and write. An id already in the library
+  keeps the file it was read from; a new one gets a fresh name via
+  `free_document_path` (`-2`, `-3`, ... on collision)
+- `remove(id)` — drop from the library and delete the document; an unknown id is
+  `Ok(None)`, so deleting twice is harmless
+- `migrate(playlists_dir, tracks_dir)` — see "Migration from the old format"
+- free functions: `source_slug(source)`, `make_id(source, platform_id)`,
+  `platform_id_of(id)`
+
+`Track` and `CacheStatus` live here, not in `playlist.rs` — a track is the
+library's unit.
+
 ### playlist.rs — TOML persistence
 - Read playlist on startup with `toml` crate + `serde`
-- Write back to TOML on: speed change, track end, quit, download complete
+- A playlist is an ordered `Vec<String>` of library ids and its own settings
+  (`loop_mode`, `shuffle`, `default_speed`); it holds no track data, so it is
+  written only when the running order or those settings change
 - Writes are atomic: write to `<name>.toml.tmp` then rename
-- `cache_status` transitions: `streaming` → `downloading` (when yt-dlp starts)
-  → `cached` (when yt-dlp finishes, file path written to `file` field)
-- On load: reset any `downloading` → `streaming` (crash recovery)
-- `Playlist::add_track(track)` — append a track and atomically save
-- `Playlist::remove_track_by_video_id(id)` — remove and return track, atomically save
+- `cache_status` transitions live in the track document: `streaming` →
+  `downloading` (when yt-dlp starts) → `cached` (when yt-dlp finishes, file path
+  written to `file`)
+- Nothing to repair on load — reconciling recorded state with what is on disk is
+  `Library::load`'s job
+- `Playlist::add_track(id)` — append an id (does not save; writing the track's
+  own document is `Library::upsert`'s business)
+- `Playlist::remove_track_by_id(id)` — drop the first row referencing `id`,
+  returning whether one was there. The track itself is untouched: it lives in the
+  library and may well be listed elsewhere.
 - `Playlist::rename(new_name, old_path)` — renames TOML file + updates internal name, returns new path
 - `Playlist::delete(path)` — deletes the TOML file from disk
-- `App::move_track_to_playlist(target_name)` — loads target, removes from source, appends to target, saves both
+- `App::move_track_to_playlist(target_name)` — loads target, moves the id from
+  source to target, saves both playlist files. The track's document is not
+  touched, so an in-flight download for it keeps going and lands in the same place
 - `App::switch_to_playlist(name, path)` — loads playlist from path, resets track selection/scroll/search;
   playback is **unaffected** by playlist switches — `app.player`/`app.playing`/`app.position` are left
   untouched, so audio keeps playing (and Now Playing keeps showing it) while the user browses a
@@ -642,8 +732,9 @@ pub enum SidebarItem {
 
 pub struct PlayingSession {
     pub path: PathBuf,       // playlist file the playing track belongs to
-    pub playlist: Playlist,  // full loaded copy of that playlist
-    pub track_idx: usize,    // index of the playing track within `playlist.tracks`
+    pub playlist: Playlist,  // copy of that playlist — kept only for its order,
+                             // loop_mode and shuffle, never for track state
+    pub track_id: String,    // the playing track's library id
 }
 ```
 
@@ -652,28 +743,26 @@ shows/edits — independent from what's playing) + config + optional player, wat
 channels, `focus`, `input_mode`, `input_buf`, `selected` (track cursor), `track_offset`
 (scroll), `track_list_height` (set each frame), `filtered_indices` (search),
 `sidebar_selected`, `playlists_expanded`, `available_playlists`,
-`position`, `download_progress: HashMap<String, f32>` (per-video-id caching progress),
+`position`, `download_progress: HashMap<String, f32>` (caching progress by library
+id), `downloading: HashSet<String>` (library ids with a download in flight),
 `is_paused`,
 `context_menu_selected` (selected index in track move context menu),
 `target_playlist_for_url` (playlist name selected during URL input via Tab),
-`download_targets: HashMap<String, PathBuf>` (maps video_id → target playlist path
-for tracks downloading into a non-active playlist; consulted by `DownloadDone` handler
-to update the correct file on disk),
+`library: Library` (every track document; rows are resolved through it),
 `playing: Option<PlayingSession>` — the single source of truth for what's currently
-playing, decoupled from `playlist`. It holds its own full `Playlist` (path, loaded
-data, and the playing track's index) so playback survives playlist switches and
-edits to unrelated playlists. `App::playing_track()`/`playing_track_mut()` are the
-accessors: when `playing.path == playlist_path` (the user is browsing the same
-playlist that's playing), they resolve the track from the live, possibly-edited
-`app.playlist` instead of the stashed copy, so edits are reflected immediately;
-otherwise they fall back to `playing.playlist`. Switching playlists, adding tracks,
-or editing a different playlist never touches `playing` — only `request_playback`
-(user-initiated play) and the delete/move guards (when the removed/moved track is
-the one actually playing) do. `Playlist.current_track` (on the displayed playlist)
-now means only "last track selected/played in *this* playlist file, used to restore
-cursor on load" — it is no longer read as "what's currently playing" anywhere in the
-UI (see `render_now_playing_header`/`render_track_info_row`/`render_playback_bar`/
-`render_track_table`, which all resolve the playing track via `app.playing` instead).
+playing, decoupled from `playlist`. It records a `track_id` and keeps a copy of the
+playing playlist for its *order*, so playback survives playlist switches and edits
+to unrelated playlists. `App::playing_track()`/`playing_track_mut()` are one library
+lookup — a track has a single home, so an edit made through the track list is
+visible there immediately with nothing to reconcile. Switching playlists, adding
+tracks, or editing a different playlist never touches `playing` — only
+`request_playback` (user-initiated play) and the delete/move guards (when the
+removed/moved track is the one actually playing) do. `Playlist.current_track` (on
+the displayed playlist) means only "last track selected/played in *this* playlist
+file, used to restore cursor on load" — it is not read as "what's currently
+playing" anywhere in the UI (see `render_now_playing_header`/`render_track_info_row`/
+`render_playback_bar`/`render_track_table`, which all resolve the playing track via
+`app.playing` instead).
 
 **Event loop:**
 ```
@@ -688,34 +777,47 @@ loop:
 **Core functions (playback/playlist decoupling):**
 - `request_playback(idx, start_pos)` — starts playback of the track at Vec
   index `idx` in the *displayed* playlist. Before spawning the new player,
-  saves the leaving track's live position through whichever playlist copy is
-  its source of truth (via `save_playing_session_playlist()`), then replaces
+  saves the leaving track's live position to its document, then replaces
   `self.playing` with a fresh `PlayingSession`. `start_pos` resumes mid-track
   (stream→file hot-switch); `None` means a fresh start (resets `self.position`).
-- `playing_track()` / `playing_track_mut()` — resolve the track actually
-  driving playback: from the live `self.playlist` when `playing.path ==
-  playlist_path`, otherwise from the session's own private copy.
-- `playing_playlist()` — same idea for the whole playlist (used by
+  A row whose document has gone missing sets a status message and plays nothing.
+- `track_at(idx)` — the displayed playlist's row `idx`, resolved through the
+  library.
+- `playing_track()` / `playing_track_mut()` — the track driving playback:
+  `library.get(&session.track_id)`. Mutating does not persist — call
+  `save_playing_track()`.
+- `patch_track(id, f)` — mutate one track and persist its document. Used by
+  `DownloadDone`/`DownloadError` and anything else that edits a track it is not
+  currently displaying.
+- `playing_playlist()` — the playing session's playlist copy (used by
   `default_speed` fallback lookups).
-- `is_playing_track(path, video_id)` — identity guard used by delete/move to
-  check `(path, video_id)` together, so a track that merely shares a
-  `video_id` with an unrelated playing session in a different playlist file
-  is never mistaken for the one actually playing.
-- `save_playing_session_playlist()` — the single "resolve by path identity,
-  then persist" implementation shared by `request_playback`'s leaving-track
-  save, `flush_playing_position`, and `adjust_playing_track_speed`.
-- `patch_and_save_playlist(path, video_id, f)` — mutate a single track (found
-  by `video_id`) in the playlist at `path` and persist it, whether or not
-  `path` is the currently displayed playlist. Used by `DownloadDone`.
-- `flush_playing_position()` — called once, right before `ratatui::restore()`
-  on quit, to persist the playing track's live position (see "State save on
-  exit" below).
-- `hot_switch_to_local_file(owning_path, video_id, file)` — stream→local-file
-  switch triggered by `DownloadDone`; identity-checked as `(owning_path,
-  video_id)` via `is_playing_track`, mirroring the delete/move guards.
+- `is_playing_track(path, id)` — identity guard used by delete/move to check
+  `(playlist path, track id)` **together**. Two playlists listing one id is
+  ordinary now rather than hypothetical, so a row that shares an id with an
+  unrelated playing session in a different playlist file must never be mistaken
+  for the one actually playing. Same for the `▶` marker (`row_is_playing`).
+- `platform_id_referenced_elsewhere(platform_id)` — scans other playlists' id
+  lists to decide whether deleting a row may also delete the document and its
+  cached audio.
+- `flush_playing_position()` — persists the playing track's live position (see
+  "State save on exit" below); `maybe_flush_position()` is the throttled form.
+- `hot_switch_to_local_file(owning_path, id, file)` — stream→local-file switch
+  triggered by `DownloadDone`; identity-checked as `(owning_path, id)` via
+  `is_playing_track`, mirroring the delete/move guards.
 - `spawn_player_for(video_id, source, speed, start_pos)` — the pure "start an
   mpv process and wire up position polling" primitive; callers own all
-  `self.playing`/`current_track`/`position` bookkeeping beforehand.
+  `self.playing`/`current_track`/`position` bookkeeping beforehand. Takes the
+  *platform* id, which is what the cache and yt-dlp are keyed by.
+
+**What the library model removed.** `download_targets`,
+`remap_download_targets`, `retarget_download` and
+`clear_download_state_for_playlist` all existed to answer "which playlist file
+owns this download's row" — a download now patches the track document by id, so
+renaming, moving or deleting a playlist has nothing to repoint and does not
+cancel anything. `patch_and_save_playlist` became `patch_track`, and
+`save_playing_session_playlist` is gone along with the stale-snapshot bug it
+caused (switching playlists made the session's copy stale exactly when it became
+the thing that got written).
 
 ### tui/ui.rs — rendering
 
@@ -797,13 +899,14 @@ When building multi-section rows in the now-playing area:
 - `adjust_playing_track_speed(app, delta)` — `[`/`]` handler; mutates the
   *playing* track's speed via `playing_track_mut()` (not the displayed
   playlist's cursor track — they may differ), sends the new speed to mpv if a
-  player is running, then persists via `save_playing_session_playlist()`.
+  player is running, then persists via `save_playing_track()`.
 - `step_track(app, forward)` — the `n`/`b` handler. Steps the cursor within the
   *displayed* playlist and plays what it lands on, wrapping at both bounds,
   following `shuffle_order` when shuffle is on and no filter is active.
 - `handle_confirm_delete` / `move_track_to_playlist` — stop playback only when
   the track being removed/moved is identity-checked as the one actually
-  playing (`is_playing_track(path, video_id)`), not merely a `video_id` match.
+  playing (`is_playing_track(path, id)`), not merely an id match — the same id
+  in two playlists is ordinary rather than hypothetical now.
   Deleting the playing track also resets `App::position` to 0 (and publishes
   that on the position channel): with nothing playing, the elapsed time belongs
   to no track, and left as it was it counted against whatever played next.
@@ -869,23 +972,24 @@ and shuffle show as badges in the footer's right-hand counters — without them,
 ### Concurrency model
 - Main thread: ratatui event loop (non-blocking via `event::poll` with 100ms timeout)
 - tokio task: mpv IPC polling every 1s (sends `time-pos` via `watch::Sender<f64>`)
-- tokio task: yt-dlp download process (sends `(video_id, progress %)` via
-  `watch::Sender<(String, f32)>` — keyed by `video_id` so concurrent downloads
-  into different playlists never cross-contaminate each other's displayed
-  percentage; `App.download_progress: HashMap<String, f32>` holds the per-track
-  values)
+- tokio task: yt-dlp download process (sends `(library id, progress %)` via
+  `watch::Sender<(String, f32)>` — keyed per track so concurrent downloads never
+  cross-contaminate each other's displayed percentage; `App.download_progress:
+  HashMap<String, f32>` holds the per-track values. `ytdlp.rs` takes this as a
+  separate `progress_key` parameter precisely because its `video_id` argument is
+  the *platform* id.)
 - TUI reads both `watch::Receiver`s on each render tick via `has_changed()` +
   `borrow_and_update()`
 
 ### State save on exit
 On `q` key: `App::flush_playing_position()` writes the already-polled
 `time-pos` value (from the position `watch::Receiver`, no synchronous IPC
-round-trip at quit time) into the playing track's `last_position`, routed
-through whichever playlist copy is the source of truth (the displayed
-playlist or the playing session's own private copy — see `PlayingSession`),
-then saves it to TOML before `ratatui::restore()`. This ensures `last_position`
-is always up to date for the next session, even if the playing track belongs
-to a playlist other than the one currently displayed.
+round-trip at quit time) into the playing track's `last_position` and saves that
+one document before `ratatui::restore()`. It is also called on a throttle
+(`maybe_flush_position`, every `POSITION_FLUSH_INTERVAL`) so anything short of a
+clean exit — a `SIGKILL`, a closed lid, a power cut — does not throw away the
+whole session's progress. Which playlist is on screen is irrelevant: a track has
+one document.
 
 ---
 
@@ -896,6 +1000,10 @@ to a playlist other than the one currently displayed.
 - Importing playlists from external services (tracks added manually one by one only)
 - Mouse support in TUI
 - Video playback (architecture supports it via mpv, but UI is audio-only for now)
+- Export/share bundles. A track document is a single self-contained file, which
+  is what makes sharing possible, but a playlist alone is useless without the
+  documents it references — bundling both wants a `trovers export` command that
+  does not exist yet.
 - Settings screen (⚙ Settings sidebar item is reserved but not implemented)
 - **Auto-play on add is intentionally not implemented.** Adding a track (via
   CLI URL argument or the `a`/Plunder flow inside the TUI) only appends it to

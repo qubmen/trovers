@@ -78,6 +78,9 @@ Manage multiple playlists without leaving the keyboard:
   its last known position instead of always starting at 0:00.
 - **Your last playlist is remembered**: `trovers` reopens whichever playlist
   was active when you last quit.
+- **One track, one memory**: each track is stored as its own small file, so the
+  same set listed in two playlists shares one position and one speed instead of
+  drifting apart. Playlists are just ordered lists pointing at them.
 
 ## 🖥️ Now Playing
 
