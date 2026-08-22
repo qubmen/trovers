@@ -9,6 +9,7 @@ use crate::config::{AudioQuality, Config};
 use crate::library::{self, Library};
 use crate::library::{CacheStatus, MediaKind, Track, TrackOrigin};
 use crate::library_import;
+use crate::library_scan;
 use crate::player::{self, Player};
 use crate::playlist::{self, LoopMode, Playlist, PlaylistEntry, PlaylistKind};
 use crate::ytdlp::{self, TrackMeta};
@@ -40,6 +41,9 @@ pub enum InputMode {
     Normal,
     UrlInput,
     NewPlaylist,
+    /// Typing the name of a new, empty album under the displayed playlist —
+    /// the manual counterpart to importing a folder as one.
+    NewAlbum,
     ConfirmDelete,
     SearchInput,
     TrackContextMenu,
@@ -154,6 +158,12 @@ pub enum TaskMsg {
         target: ImportTarget,
         files: Vec<library_import::ImportedFile>,
     },
+    /// A single local file (as opposed to a whole folder) has been probed and
+    /// is ready to fold into `target_path`.
+    FileProbed {
+        file: library_import::ImportedFile,
+        target_path: PathBuf,
+    },
 }
 
 // ── Speed resolution ──────────────────────────────────────────────────────
@@ -258,6 +268,40 @@ pub struct LoadedAlbum {
     pub playlist: Playlist,
 }
 
+/// The album's resume target: the index of its `current_track` within its own
+/// running order, and that track's `last_position` if it has one. `None` only
+/// when the album has no tracks at all — there is nothing to play or mark. A
+/// `current_track` naming a track no longer in the album is treated the same
+/// as having none, and resolves to track 0 from the start.
+///
+/// Shared by the "play this album" trigger and the track table's resume-point
+/// marker, so the two can never name different rows.
+pub(crate) fn album_resume_target(
+    loaded: &LoadedAlbum,
+    library: &Library,
+) -> Option<(usize, Option<f64>)> {
+    if loaded.playlist.tracks.is_empty() {
+        return None;
+    }
+    let resolved = loaded
+        .playlist
+        .current_track
+        .as_deref()
+        .and_then(|id| loaded.playlist.tracks.iter().position(|t| t == id));
+    match resolved {
+        Some(idx) => {
+            let start_pos = loaded
+                .playlist
+                .tracks
+                .get(idx)
+                .and_then(|id| library.get(id))
+                .and_then(input::resume_start_pos);
+            Some((idx, start_pos))
+        }
+        None => Some((0, None)),
+    }
+}
+
 // ── App ───────────────────────────────────────────────────────────────────
 
 pub struct App {
@@ -351,6 +395,12 @@ pub struct App {
 
     // URL input playlist target
     pub target_playlist_for_url: Option<String>,
+    /// The explicit destination for a folder or single-file add, cycled by
+    /// `Tab` in the folder prompt. `None` means "Auto" — a folder keeps
+    /// today's `import_target_for` matching, a file lands in the displayed
+    /// playlist — `Some(name)` bypasses that and merges straight into the
+    /// named list regardless of any folder it already recognizes.
+    pub target_list_for_add: Option<String>,
 }
 
 impl App {
@@ -404,6 +454,7 @@ impl App {
             shuffle_order_path: None,
             context_menu_selected: 0,
             target_playlist_for_url: None,
+            target_list_for_add: None,
         };
         app.load_albums();
         app.rebuild_rows();
@@ -633,14 +684,25 @@ impl App {
     /// toggling off and on again gives a new walk rather than resuming the old
     /// one, which is what "shuffle again" is expected to do.
     pub fn rebuild_shuffle_order(&mut self) {
-        if !self.playlist.shuffle {
+        let path = self.playlist_path.clone();
+        let shuffle = self.playlist.shuffle;
+        let len = self.playlist.tracks.len();
+        self.rebuild_shuffle_order_for(&path, shuffle, len);
+    }
+
+    /// `rebuild_shuffle_order`, generalized to any list rather than always the
+    /// displayed playlist — what lets toggling shuffle on an album's track
+    /// start a fresh walk too, instead of `ensure_shuffle_order`'s lazy check
+    /// (same path, same length) quietly resuming whatever permutation this
+    /// cache already held for it.
+    pub fn rebuild_shuffle_order_for(&mut self, path: &Path, shuffle: bool, len: usize) {
+        if !shuffle {
             self.shuffle_order.clear();
             self.shuffle_order_path = None;
             return;
         }
-        self.shuffle_order =
-            playlist::shuffled_indices(self.playlist.tracks.len(), playlist::shuffle_seed());
-        self.shuffle_order_path = Some(self.playlist_path.clone());
+        self.shuffle_order = playlist::shuffled_indices(len, playlist::shuffle_seed());
+        self.shuffle_order_path = Some(path.to_path_buf());
     }
 
     /// Make sure `shuffle_order` is a usable permutation of `0..len` for the
@@ -1170,27 +1232,85 @@ impl App {
             }
         }
 
-        // Two levels only: importing while an album is displayed makes a sibling
-        // under the same parent, not an album inside an album.
-        let parent = if self.playlist.kind == PlaylistKind::Album {
+        ImportTarget::NewAlbum {
+            parent: self.default_album_parent(),
+        }
+    }
+
+    /// The parent a *new* album gets when nothing else decides it: the
+    /// displayed playlist, or — since nesting stays two levels deep — that
+    /// playlist's own parent when an album is itself displayed, so importing
+    /// or creating one while browsing an album makes a sibling under the same
+    /// parent rather than an album inside an album.
+    fn default_album_parent(&self) -> Option<String> {
+        if self.playlist.kind == PlaylistKind::Album {
             self.playlist.parent.clone()
         } else {
             Some(self.displayed_playlist_name())
-        };
-        ImportTarget::NewAlbum { parent }
+        }
+    }
+
+    /// Create a new, empty album named `name` under `parent`, save it, and —
+    /// when `parent` is the displayed playlist — join it to `self.albums` so
+    /// it appears in the track list immediately rather than only on disk.
+    ///
+    /// `parent` is taken as given rather than recomputed from
+    /// `self.playlist`, because one caller (`apply_import`) must use the
+    /// parent it decided when the scan *started*, not whatever happens to be
+    /// displayed by the time a slow scan finishes; callers with no such gap
+    /// (manual creation) just pass `self.default_album_parent()`.
+    pub fn create_album(&mut self, name: &str, parent: Option<String>) -> Result<PathBuf> {
+        let path = self.playlists_dir().join(format!("{name}.toml"));
+
+        let mut album = Playlist::empty(name);
+        album.kind = PlaylistKind::Album;
+        album.parent = parent.clone();
+        // Stored open: an album the user just asked for should be visibly
+        // there, not folded away behind one row.
+        album.collapsed = false;
+        album.save(&path)?;
+
+        self.available_playlists.push(PlaylistEntry {
+            name: name.to_string(),
+            path: path.clone(),
+            kind: PlaylistKind::Album,
+            parent: parent.clone(),
+        });
+        self.available_playlists.sort_by(|a, b| a.name.cmp(&b.name));
+        // A new album under the playlist on screen is a new group in it, so
+        // it has to join the loaded ones rather than only exist on disk.
+        if parent.as_deref() == Some(&*self.displayed_playlist_name()) {
+            self.albums.push(LoadedAlbum {
+                name: name.to_string(),
+                path: path.clone(),
+                playlist: album,
+            });
+            self.albums.sort_by(|a, b| a.name.cmp(&b.name));
+            self.rebuild_rows();
+        }
+        Ok(path)
     }
 
     /// Scan `root` in the background, ending in a `TaskMsg::ImportScanned`.
     ///
     /// The target is settled here rather than on arrival so the album an import
     /// lands in is the one that was on screen when the user asked for it.
-    pub fn import_folder(&mut self, root: PathBuf) {
+    ///
+    /// `target_override`, when given, bypasses `import_target_for`'s
+    /// folder-identity matching entirely and merges straight into the list at
+    /// that path — what lets the user Tab to an explicit destination in the
+    /// folder prompt instead of only ever landing on whichever list already
+    /// recognizes this folder, or a new sibling album.
+    pub fn import_folder(&mut self, root: PathBuf, target_override: Option<PathBuf>) {
         if !root.is_dir() {
             self.set_status(format!("Not a folder: {}", root.display()));
             return;
         }
 
-        let target = self.import_target_for(&root);
+        let target = match target_override {
+            Some(path) => ImportTarget::Existing(path),
+            None => self.import_target_for(&root),
+        };
         self.set_status(format!("Scanning {}", root.display()));
 
         let task_tx = self.task_tx.clone();
@@ -1204,6 +1324,37 @@ impl App {
                 root,
                 target,
                 files,
+            });
+        });
+    }
+
+    /// Probe a single local file in the background, ending in a
+    /// `TaskMsg::FileProbed` that folds it into the list at `target_path`.
+    ///
+    /// Not a one-file call to `import_folder`: there is no folder to scan, no
+    /// `source_folder` to stamp, and no "files that vanished" bookkeeping to
+    /// do — see `library_import::add_single_file`.
+    pub fn import_file(&mut self, path: PathBuf, target_path: PathBuf) {
+        if !path.is_file() {
+            self.set_status(format!("Not a file: {}", path.display()));
+            return;
+        }
+        let Some(media) = library_scan::media_kind_for_path(&path) else {
+            self.set_status(format!("Not a media file: {}", path.display()));
+            return;
+        };
+        self.set_status(format!("Adding {}", path.display()));
+
+        let task_tx = self.task_tx.clone();
+        tokio::spawn(async move {
+            let scanned = library_scan::ScannedFile {
+                path: path.clone(),
+                media,
+            };
+            let meta = library_scan::probe(&scanned).await;
+            let _ = task_tx.send(TaskMsg::FileProbed {
+                file: library_import::ImportedFile { path, meta },
+                target_path,
             });
         });
     }
@@ -1227,55 +1378,30 @@ impl App {
         }
 
         match target {
-            // The album on screen. Merging into `self.playlist` is what makes the
-            // rows change under the cursor rather than only on disk.
-            ImportTarget::Existing(path) if path == self.playlist_path => {
-                let report =
-                    library_import::merge_scan(&mut self.library, &mut self.playlist, &root, files);
-                self.save_playlist();
-                // New rows mean the shuffled order no longer covers the list.
-                self.rebuild_shuffle_order();
-                self.rebuild_rows();
-                let name = self.displayed_playlist_name();
-                self.report_import(&name, report);
-            }
-            // An album on screen is held in memory, so the merge has to go through
-            // that copy: rewriting the file underneath it would be overwritten by
-            // the next thing that saves the album, and the rows would not move.
-            ImportTarget::Existing(path) if self.source_of_path(&path).is_some() => {
-                let Some(RowSource::Album(album)) = self.source_of_path(&path) else {
-                    return;
-                };
-                let mut loaded = self.albums[album].playlist.clone();
-                let report =
-                    library_import::merge_scan(&mut self.library, &mut loaded, &root, files);
-                if let Err(e) = loaded.save(&path) {
-                    error!(err = %e, path = %path.display(), "failed to save a rescanned album");
-                    self.set_status("Could not save the album");
-                    return;
-                }
-                let name = loaded.name.clone();
-                self.albums[album].playlist = loaded;
-                self.rebuild_rows();
-                self.report_import(&name, report);
-            }
+            // Merging goes through `with_list_at`, whichever of the three
+            // places the target list lives in: the displayed playlist, one of
+            // its loaded albums, or a file nothing currently holds in memory.
             ImportTarget::Existing(path) => {
-                let mut album = match Playlist::load(&path) {
-                    Ok(pl) => pl,
+                let is_own = path == self.playlist_path;
+                let result = self.with_list_at(&path, |pl, lib| {
+                    let report = library_import::merge_scan(lib, pl, &root, files);
+                    (pl.name.clone(), report)
+                });
+                let (name, report) = match result {
+                    Ok(pair) => pair,
                     Err(e) => {
-                        error!(err = %e, path = %path.display(), "cannot rescan a playlist that will not load");
-                        self.set_status("Could not read the album");
+                        error!(err = %e, path = %path.display(), "cannot rescan a playlist that will not load or save");
+                        self.set_status("Could not read or save the album");
                         return;
                     }
                 };
-                let report =
-                    library_import::merge_scan(&mut self.library, &mut album, &root, files);
-                if let Err(e) = album.save(&path) {
-                    error!(err = %e, path = %path.display(), "failed to save a rescanned album");
-                    self.set_status("Could not save the album");
-                    return;
+                // New rows mean the shuffled order no longer covers the list —
+                // only relevant when the merge landed in the displayed
+                // playlist itself, since that is the only list whose shuffle
+                // order `App` caches.
+                if is_own {
+                    self.rebuild_shuffle_order();
                 }
-                let name = album.name.clone();
                 self.report_import(&name, report);
             }
             ImportTarget::NewAlbum { parent } => {
@@ -1288,41 +1414,27 @@ impl App {
                     &library_import::album_name_for_folder(&root),
                     &taken,
                 );
-                let path = self.playlists_dir().join(format!("{name}.toml"));
-
-                let mut album = Playlist::empty(&name);
-                album.kind = PlaylistKind::Album;
-                album.parent = parent.clone();
-                // Stored open: an import the user just asked for should be visibly
-                // there, not folded away behind one row.
-                album.collapsed = false;
-                let report =
-                    library_import::merge_scan(&mut self.library, &mut album, &root, files);
-                if let Err(e) = album.save(&path) {
-                    error!(err = %e, path = %path.display(), "failed to save an imported album");
-                    self.set_status("Could not save the album");
-                    return;
-                }
-
-                self.available_playlists.push(PlaylistEntry {
-                    name: name.clone(),
-                    path: path.clone(),
-                    kind: PlaylistKind::Album,
-                    parent: parent.clone(),
+                let path = match self.create_album(&name, parent) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        error!(err = %e, "failed to create a new album for import");
+                        self.set_status("Could not create the album");
+                        return;
+                    }
+                };
+                // `create_album` already joined the empty album to
+                // `self.albums` when its parent is the displayed playlist, so
+                // the merge goes through `with_list_at` like any other target.
+                let merge_result = self.with_list_at(&path, |pl, lib| {
+                    library_import::merge_scan(lib, pl, &root, files)
                 });
-                self.available_playlists.sort_by(|a, b| a.name.cmp(&b.name));
-                // A new album under the playlist on screen is a new group in it, so
-                // it has to join the loaded ones rather than only exist on disk.
-                if parent.as_deref() == Some(&*self.displayed_playlist_name()) {
-                    self.albums.push(LoadedAlbum {
-                        name: name.clone(),
-                        path,
-                        playlist: album,
-                    });
-                    self.albums.sort_by(|a, b| a.name.cmp(&b.name));
-                    self.rebuild_rows();
+                match merge_result {
+                    Ok(report) => self.report_import(&name, report),
+                    Err(e) => {
+                        error!(err = %e, path = %path.display(), "failed to save an imported album");
+                        self.set_status("Could not save the album");
+                    }
                 }
-                self.report_import(&name, report);
             }
         }
     }
@@ -1378,32 +1490,33 @@ impl App {
                 // Which playlist the row goes into. The track's own document is
                 // global; only this list membership is per-playlist.
                 let owning_path = target_path.unwrap_or_else(|| self.playlist_path.clone());
-                let displayed = owning_path == self.playlist_path;
 
-                // Load the target list up front, so nothing is written and no
-                // download is started if the row cannot be recorded anywhere: a
-                // download completing against a playlist that has no such row
-                // leaves an untracked file in the audio cache.
-                let mut target_pl = if displayed {
-                    None
-                } else {
-                    match Playlist::load(&owning_path) {
-                        Ok(pl) => Some(pl),
+                // A read-only check, so nothing is written and no download is
+                // started if the row cannot be recorded anywhere: a download
+                // completing against a playlist that has no such row leaves an
+                // untracked file in the audio cache. Reads whichever in-memory
+                // copy is loaded (the displayed playlist or one of its albums)
+                // rather than the disk, so a target that already has unsaved
+                // edits is checked accurately.
+                //
+                // Adding the same URL twice used to produce a second row
+                // sharing the first one's id, and so its cached file too — two
+                // rows whose download, cache status and deletion all fight
+                // over one file.
+                let already_present = match self.source_of_path(&owning_path) {
+                    Some(source) => self
+                        .source_playlist(source)
+                        .is_some_and(|(pl, _)| pl.tracks.contains(&id)),
+                    None => match Playlist::load(&owning_path) {
+                        Ok(pl) => pl.tracks.contains(&id),
                         Err(e) => {
                             error!(err = %e, path = %owning_path.display(), "target playlist not found, track not added");
                             self.set_status("Target playlist not found");
                             return;
                         }
-                    }
+                    },
                 };
-
-                // Adding the same URL twice used to produce a second row sharing
-                // the first one's id, and so its cached file too — two rows whose
-                // download, cache status and deletion all fight over one file.
-                let ids = target_pl
-                    .as_ref()
-                    .map_or(&self.playlist.tracks, |pl| &pl.tracks);
-                if ids.contains(&id) {
+                if already_present {
                     info!(id = %id, path = %owning_path.display(), "track already in target playlist, not adding again");
                     self.set_status(format!("Already in playlist: {status_title}"));
                     return;
@@ -1442,28 +1555,26 @@ impl App {
                     }
                 }
 
-                match target_pl.as_mut() {
-                    Some(pl) => {
-                        pl.add_track(id.clone());
-                        if let Err(e) = pl.save(&owning_path) {
-                            error!(err = %e, "failed to save target playlist after URL add");
-                            self.set_status("Could not save to target playlist");
-                            return;
-                        }
-                        self.set_status(format!("Added to playlist: {status_title}"));
-                    }
-                    None => {
-                        // The cursor deliberately stays where the user left it. It
-                        // used to jump to the new row, which meant adding a track
-                        // while browsing moved the selection out from under `Enter`
-                        // and `d` — and with a search filter active it jumped to a
-                        // row index that the filter does not even display.
-                        self.playlist.add_track(id.clone());
-                        self.save_playlist();
-                        self.rebuild_rows();
-                        self.set_status(format!("Added: {status_title}"));
-                    }
+                // The cursor deliberately stays where the user left it. It used
+                // to jump to the new row, which meant adding a track while
+                // browsing moved the selection out from under `Enter` and `d`
+                // — and with a search filter active it jumped to a row index
+                // that the filter does not even display. `with_list_at` routes
+                // to whichever list is at `owning_path` — the displayed
+                // playlist, one of its loaded albums, or a file on disk — and
+                // keeps that list's in-memory copy (and `self.rows`) in step.
+                let displayed = owning_path == self.playlist_path;
+                let added_id = id.clone();
+                if let Err(e) = self.with_list_at(&owning_path, |pl, _lib| pl.add_track(added_id)) {
+                    error!(err = %e, path = %owning_path.display(), "failed to save target playlist after URL add");
+                    self.set_status("Could not save to target playlist");
+                    return;
                 }
+                self.set_status(if displayed {
+                    format!("Added: {status_title}")
+                } else {
+                    format!("Added to playlist: {status_title}")
+                });
                 self.start_download(id, url);
             }
 
@@ -1580,6 +1691,25 @@ impl App {
                 files,
             } => {
                 self.apply_import(root, target, files);
+            }
+
+            TaskMsg::FileProbed { file, target_path } => {
+                let title = file.meta.title.clone();
+                let result = self.with_list_at(&target_path, |pl, lib| {
+                    library_import::add_single_file(lib, pl, file)
+                });
+                match result {
+                    Ok(library_import::SingleAddOutcome::Added) => {
+                        self.set_status(format!("Added: {title}"));
+                    }
+                    Ok(library_import::SingleAddOutcome::AlreadyPresent) => {
+                        self.set_status(format!("Already in playlist: {title}"));
+                    }
+                    Err(e) => {
+                        error!(err = %e, path = %target_path.display(), "failed to add a file to the target playlist");
+                        self.set_status("Could not add the file");
+                    }
+                }
             }
         }
     }
@@ -1728,6 +1858,59 @@ impl App {
             .map(RowSource::Album)
     }
 
+    /// Run `f` against the `Playlist` at `path` (and, since almost every
+    /// caller is folding a track into both a list and the library, the
+    /// library alongside it) wherever that list currently lives —
+    /// `self.playlist` if `path` is the displayed playlist, the matching
+    /// `self.albums[i]` if it's one of the loaded albums, or a copy read fresh
+    /// from disk otherwise — then persist whichever one it was and, for the
+    /// first two cases, rebuild `self.rows` so the change is visible on screen
+    /// immediately rather than only on disk.
+    ///
+    /// This is the one door every add/move call site should use to write into
+    /// a list by path: writing straight to disk when the target happens to be
+    /// the displayed playlist or one of its loaded albums leaves the in-memory
+    /// copy stale until the next switch or restart (see `apply_import`, which
+    /// this generalizes — it already had to solve this once).
+    pub fn with_list_at<R>(
+        &mut self,
+        path: &Path,
+        f: impl FnOnce(&mut Playlist, &mut Library) -> R,
+    ) -> Result<R> {
+        use anyhow::Context as _;
+
+        match self.source_of_path(path) {
+            Some(RowSource::Own) => {
+                let result = f(&mut self.playlist, &mut self.library);
+                self.save_playlist();
+                self.rebuild_rows();
+                Ok(result)
+            }
+            Some(RowSource::Album(album)) => {
+                let result = f(&mut self.albums[album].playlist, &mut self.library);
+                let loaded = &self.albums[album];
+                // Best-effort, like every other in-place album mutation
+                // (`toggle_album`, `remove_row`, `rename_album`): the row is
+                // right in memory either way, and the next thing that saves
+                // this album writes it again.
+                if let Err(e) = loaded.playlist.save(&loaded.path) {
+                    error!(err = %e, path = %loaded.path.display(), "failed to save an album via with_list_at");
+                }
+                self.rebuild_rows();
+                Ok(result)
+            }
+            None => {
+                let mut playlist = Playlist::load(path)
+                    .with_context(|| format!("failed to load playlist at {}", path.display()))?;
+                let result = f(&mut playlist, &mut self.library);
+                playlist
+                    .save(path)
+                    .with_context(|| format!("failed to save playlist at {}", path.display()))?;
+                Ok(result)
+            }
+        }
+    }
+
     /// The list the row at `cursor` belongs to, and every cursor position showing
     /// a row of that same list. `None` on a header, which belongs to no list.
     ///
@@ -1865,7 +2048,7 @@ impl App {
             .get(album)
             .and_then(|loaded| loaded.playlist.source_folder.clone())
         {
-            Some(root) => self.import_folder(root),
+            Some(root) => self.import_folder(root, None),
             None => self.set_status("Not linked to a folder"),
         }
     }
@@ -2139,6 +2322,31 @@ impl App {
         self.target_playlist_for_url = Some(next);
     }
 
+    /// Cycle `target_list_for_add` to the next explicit destination, wrapping
+    /// back to "Auto" (`None`) after the last one — unlike
+    /// `cycle_url_target_playlist`, whose cycle has no "Auto" stop because a
+    /// URL add has no folder-identity matching to default to.
+    pub fn cycle_add_target(&mut self) {
+        let all: Vec<String> = self
+            .available_playlists
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+
+        if all.is_empty() {
+            self.target_list_for_add = None;
+            return;
+        }
+
+        self.target_list_for_add = match self.target_list_for_add.as_deref() {
+            Some(current) => match all.iter().position(|n| n == current) {
+                Some(pos) if pos + 1 < all.len() => Some(all[pos + 1].clone()),
+                _ => None,
+            },
+            None => Some(all[0].clone()),
+        };
+    }
+
     pub fn save_playlist(&self) {
         if let Err(e) = self.playlist.save(&self.playlist_path) {
             error!(err = %e, "failed to auto-save playlist");
@@ -2332,16 +2540,14 @@ impl App {
                 format!("target playlist '{target_name}' not found in available_playlists")
             })?;
 
-        // Load or create the target playlist from disk
-        let mut target_playlist = if target_path.exists() {
-            Playlist::load(&target_path)
-                .with_context(|| format!("failed to load target playlist '{target_name}'"))?
-        } else {
-            // Path listed but file missing – create a fresh empty playlist
-            let (pl, _) = Playlist::create(target_name)
+        // The entry is listed but its file is gone — recreate it empty before
+        // `with_list_at` tries to load it below. Can only happen for a path
+        // with no in-memory copy: `self.playlist`/`self.albums` are always
+        // backed by a real file.
+        if !target_path.exists() {
+            Playlist::create(target_name)
                 .with_context(|| format!("failed to create target playlist '{target_name}'"))?;
-            pl
-        };
+        }
 
         // Stop playback only if the track being moved is literally the one
         // actually driving playback right now — identity is `(path,
@@ -2367,12 +2573,11 @@ impl App {
         };
         anyhow::ensure!(removed, "track '{id}' not found in source playlist");
 
-        // Append to target playlist
-        target_playlist.add_track(id);
-
-        // Save target first, then source (both atomic)
-        target_playlist
-            .save(&target_path)
+        // Append to the target list, wherever it lives — the displayed
+        // playlist, one of its loaded albums, or a file nothing currently
+        // holds in memory. Save target first, then source (both atomic).
+        let moved_id = id.clone();
+        self.with_list_at(&target_path, |pl, _lib| pl.add_track(moved_id))
             .with_context(|| format!("failed to save target playlist '{target_name}'"))?;
         let (from_playlist, _) = self
             .source_playlist(source)

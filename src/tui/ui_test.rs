@@ -3381,6 +3381,43 @@ mod tests {
         );
     }
 
+    /// Unlike `cycle_url_target_playlist`, this cycle has an "Auto" (`None`)
+    /// stop — a URL add has no folder-identity matching to fall back to, but
+    /// a folder or file add does.
+    #[test]
+    fn cycle_add_target_visits_auto_then_every_playlist_then_wraps() {
+        let mut app = make_app_with_playlists("Jazz", &["Jazz", "Rock"]);
+        assert_eq!(app.target_list_for_add, None, "starts on Auto");
+
+        app.cycle_add_target();
+        assert_eq!(app.target_list_for_add.as_deref(), Some("Jazz"));
+
+        app.cycle_add_target();
+        assert_eq!(app.target_list_for_add.as_deref(), Some("Rock"));
+
+        app.cycle_add_target();
+        assert_eq!(app.target_list_for_add, None, "wraps back to Auto");
+
+        app.cycle_add_target();
+        assert_eq!(app.target_list_for_add.as_deref(), Some("Jazz"));
+    }
+
+    #[test]
+    fn cycle_add_target_single_playlist_alternates_with_auto() {
+        let mut app = make_app_with_playlists("Jazz", &["Jazz"]);
+        app.cycle_add_target();
+        assert_eq!(app.target_list_for_add.as_deref(), Some("Jazz"));
+        app.cycle_add_target();
+        assert_eq!(app.target_list_for_add, None);
+    }
+
+    #[test]
+    fn cycle_add_target_empty_playlists_stays_on_auto() {
+        let mut app = make_app_with_playlists("Jazz", &[]);
+        app.cycle_add_target();
+        assert_eq!(app.target_list_for_add, None);
+    }
+
     #[test]
     fn url_input_target_display_fallback_when_target_none() {
         use crate::tui::ui::url_input_target_display;
@@ -6974,6 +7011,96 @@ tracks = []
         );
     }
 
+    /// `r` on a track inside an album must flip that album's own `shuffle` —
+    /// not the displayed playlist's — since the album plays as its own list
+    /// (ADR-019) and this is the only way its shuffle setting can be reached.
+    #[tokio::test]
+    async fn toggling_shuffle_on_an_albums_track_changes_only_that_album() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        open_all(&mut app);
+        let album_path = app.albums[0].path.clone();
+        app.selected = 2; // own:0, header:Kino, album0:0 -> "k1"
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('r')))
+            .await
+            .expect("handle r");
+
+        assert!(app.albums[0].playlist.shuffle, "the album's own shuffle is on");
+        assert!(!app.playlist.shuffle, "the displayed playlist's is untouched");
+        assert!(
+            crate::playlist::Playlist::load(&album_path)
+                .expect("reload")
+                .shuffle,
+            "persisted to the album's own file"
+        );
+    }
+
+    /// `l` on a track inside an album must flip that album's own `loop_mode`
+    /// — not the displayed playlist's.
+    #[tokio::test]
+    async fn toggling_loop_mode_on_an_albums_track_changes_only_that_album() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        open_all(&mut app);
+        let album_path = app.albums[0].path.clone();
+        app.selected = 2; // own:0, header:Kino, album0:0 -> "k1"
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('l')))
+            .await
+            .expect("handle l");
+
+        assert_eq!(
+            app.albums[0].playlist.loop_mode,
+            crate::playlist::LoopMode::Track,
+            "the album's own loop mode advanced"
+        );
+        assert_eq!(
+            app.playlist.loop_mode,
+            crate::playlist::LoopMode::None,
+            "the displayed playlist's is untouched"
+        );
+        assert_eq!(
+            crate::playlist::Playlist::load(&album_path)
+                .expect("reload")
+                .loop_mode,
+            crate::playlist::LoopMode::Track,
+            "persisted to the album's own file"
+        );
+    }
+
+    /// The other half of the fix: with albums present, `r`/`l` on one of the
+    /// displayed playlist's *own* tracks still changes the displayed
+    /// playlist, unchanged from today.
+    #[tokio::test]
+    async fn toggling_shuffle_and_loop_on_the_playlists_own_track_is_unchanged() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        app.selected = 0; // own:0 -> "a"
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('r')))
+            .await
+            .expect("handle r");
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('l')))
+            .await
+            .expect("handle l");
+
+        assert!(app.playlist.shuffle);
+        assert_eq!(app.playlist.loop_mode, crate::playlist::LoopMode::Track);
+        assert!(!app.albums[0].playlist.shuffle, "the album is untouched");
+        assert_eq!(
+            app.albums[0].playlist.loop_mode,
+            crate::playlist::LoopMode::None,
+            "the album is untouched"
+        );
+    }
+
     #[tokio::test]
     async fn shuffle_is_ignored_while_a_search_filter_is_active() {
         use crate::tui::input::handle_tracklist;
@@ -8361,6 +8488,228 @@ tracks = []
         app.rebuild_rows();
     }
 
+    // ── Album resume target: "play this album" and its resume-point marker ──
+
+    #[test]
+    fn album_resume_target_uses_current_track_and_its_last_position() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        app.albums[0].playlist.current_track = Some("k2".to_string());
+        app.patch_track("k2", |t| t.last_position = 42);
+
+        let target = crate::tui::album_resume_target(&app.albums[0], &app.library);
+        assert_eq!(target, Some((1, Some(42.0))));
+    }
+
+    #[test]
+    fn album_resume_target_start_pos_is_none_when_the_track_has_never_stopped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        app.albums[0].playlist.current_track = Some("k1".to_string());
+
+        let target = crate::tui::album_resume_target(&app.albums[0], &app.library);
+        assert_eq!(target, Some((0, None)));
+    }
+
+    #[test]
+    fn album_resume_target_falls_back_to_the_first_track_with_no_current_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        // Track 0 has its own last_position, but with no `current_track` at all
+        // the album has never been played from — starting "fresh" means from
+        // the very beginning, not wherever this untouched-by-the-album track
+        // happens to have last stopped.
+        app.patch_track("k1", |t| t.last_position = 999);
+
+        let target = crate::tui::album_resume_target(&app.albums[0], &app.library);
+        assert_eq!(target, Some((0, None)));
+    }
+
+    #[test]
+    fn album_resume_target_falls_back_when_current_track_no_longer_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        app.albums[0].playlist.current_track = Some("ghost".to_string());
+
+        let target = crate::tui::album_resume_target(&app.albums[0], &app.library);
+        assert_eq!(target, Some((0, None)));
+    }
+
+    #[test]
+    fn album_resume_target_is_none_for_an_empty_album() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = app_with_albums(dir.path(), &[], &[("Empty", &[])]);
+
+        assert_eq!(
+            crate::tui::album_resume_target(&app.albums[0], &app.library),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn space_on_an_album_header_with_no_current_track_starts_the_first_track() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        app.selected = 0; // the only row: the "Kino" header, folded
+        app.position = 42.0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char(' ')))
+            .await
+            .expect("handle space");
+
+        assert_eq!(
+            app.position, 0.0,
+            "no current_track: must start the album's first track from the beginning"
+        );
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_id.as_str()),
+            Some("k1")
+        );
+    }
+
+    #[tokio::test]
+    async fn space_on_an_album_header_resumes_its_last_played_track() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        app.albums[0].playlist.current_track = Some("k2".to_string());
+        app.patch_track("k2", |t| t.last_position = 77);
+        app.selected = 0;
+        app.position = 5.0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char(' ')))
+            .await
+            .expect("handle space");
+
+        assert_eq!(app.position, 77.0);
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_id.as_str()),
+            Some("k2")
+        );
+    }
+
+    #[tokio::test]
+    async fn space_on_an_empty_album_header_does_nothing() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Empty", &[])]);
+        app.selected = 0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char(' ')))
+            .await
+            .expect("handle space");
+
+        assert!(app.playing.is_none(), "an empty album has nothing to play");
+    }
+
+    #[test]
+    fn resume_marker_shows_on_the_albums_current_track_when_it_is_not_playing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["p1"], &[("Kino", &["k1", "k2"])]);
+        app.albums[0].playlist.current_track = Some("k2".to_string());
+        open_all(&mut app);
+
+        let screen = render_to_lines(&mut app, 78, 16);
+        let k2_line = screen
+            .iter()
+            .find(|l| l.contains("k2"))
+            .unwrap_or_else(|| panic!("no row for k2 in {screen:#?}"));
+        assert!(
+            k2_line.contains('‣'),
+            "resume marker expected on k2's row: {k2_line}"
+        );
+
+        let k1_line = screen
+            .iter()
+            .find(|l| l.contains("k1"))
+            .unwrap_or_else(|| panic!("no row for k1 in {screen:#?}"));
+        assert!(
+            !k1_line.contains('‣'),
+            "the marker must sit only on the resume target: {k1_line}"
+        );
+    }
+
+    #[test]
+    fn resume_marker_is_replaced_by_the_playing_indicator_once_that_track_plays() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        app.albums[0].playlist.current_track = Some("k2".to_string());
+        open_all(&mut app);
+        let album_path = app.albums[0].path.clone();
+        app.playing = Some(session_at(album_path, app.albums[0].playlist.clone(), 1));
+
+        let screen = render_to_lines(&mut app, 78, 16);
+        let k2_line = screen
+            .iter()
+            .find(|l| l.contains("k2"))
+            .unwrap_or_else(|| panic!("no row for k2 in {screen:#?}"));
+        assert!(
+            k2_line.contains('▶'),
+            "an actually-playing row shows the playing indicator: {k2_line}"
+        );
+        assert!(
+            !k2_line.contains('‣'),
+            "not the resume marker at the same time: {k2_line}"
+        );
+    }
+
+    #[test]
+    fn no_resume_marker_when_the_album_has_no_current_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        open_all(&mut app);
+
+        let screen = render_to_lines(&mut app, 78, 16);
+        assert!(
+            !screen.iter().any(|l| l.contains('‣')),
+            "nothing to mark with no current_track: {screen:#?}"
+        );
+    }
+
+    #[test]
+    fn resume_marker_does_not_leak_across_albums_sharing_a_track_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(
+            dir.path(),
+            &[],
+            &[("AlbumA", &["shared"]), ("AlbumB", &["shared"])],
+        );
+        let a = app
+            .albums
+            .iter()
+            .position(|loaded| loaded.name == "AlbumA")
+            .expect("AlbumA loaded");
+        app.albums[a].playlist.current_track = Some("shared".to_string());
+        open_all(&mut app);
+
+        let screen = render_to_lines(&mut app, 78, 16);
+        let shared_lines: Vec<&String> = screen.iter().filter(|l| l.contains("shared")).collect();
+        assert_eq!(shared_lines.len(), 2, "{screen:#?}");
+        let marked = shared_lines.iter().filter(|l| l.contains('‣')).count();
+        assert_eq!(
+            marked, 1,
+            "only AlbumA's row may be marked, not AlbumB's: {screen:#?}"
+        );
+    }
+
+    #[test]
+    fn displayed_playlists_own_rows_never_show_the_album_resume_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["p1", "p2"], &[]);
+        app.playlist.current_track = Some("p2".to_string());
+        app.rebuild_rows();
+
+        let screen = render_to_lines(&mut app, 78, 16);
+        assert!(
+            !screen.iter().any(|l| l.contains('‣')),
+            "the resume marker is an album-only signal, not the top-level playlist's: {screen:#?}"
+        );
+    }
+
     #[test]
     fn the_rows_are_the_parents_own_tracks_and_then_its_albums() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8540,6 +8889,413 @@ tracks = []
         assert_eq!(app.selected, 1);
     }
 
+    // ── with_list_at and cross-list sync ────────────────────────────────────
+
+    /// `with_list_at` on the displayed playlist's own path mutates
+    /// `self.playlist` in place and persists it.
+    #[test]
+    fn with_list_at_on_the_displayed_playlist_mutates_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[]);
+        let path = app.playlist_path.clone();
+
+        app.with_list_at(&path, |pl, _lib| pl.add_track("b".to_string()))
+            .expect("with_list_at");
+
+        assert_eq!(app.playlist.tracks, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            crate::playlist::Playlist::load(&path)
+                .expect("reload")
+                .tracks,
+            vec!["a".to_string(), "b".to_string()],
+            "persisted to disk too"
+        );
+    }
+
+    /// `with_list_at` on one of the displayed playlist's loaded albums mutates
+    /// that `LoadedAlbum` in place. Writing straight to disk instead — the bug
+    /// this change fixes — would leave `app.albums` stale until a reload.
+    #[test]
+    fn with_list_at_on_a_loaded_album_mutates_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        let album_path = app.albums[0].path.clone();
+
+        app.with_list_at(&album_path, |pl, _lib| pl.add_track("k2".to_string()))
+            .expect("with_list_at");
+
+        assert_eq!(
+            app.albums[0].playlist.tracks,
+            vec!["k1".to_string(), "k2".to_string()]
+        );
+        assert_eq!(
+            crate::playlist::Playlist::load(&album_path)
+                .expect("reload")
+                .tracks,
+            vec!["k1".to_string(), "k2".to_string()]
+        );
+    }
+
+    /// `with_list_at` on a path that names neither the displayed playlist nor
+    /// one of its loaded albums reads and writes the file on disk directly,
+    /// leaving the displayed playlist and its albums untouched.
+    #[test]
+    fn with_list_at_on_an_unrelated_file_reads_and_writes_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[]);
+
+        let other_path = dir.path().join("Other.toml");
+        make_playlist("Other")
+            .save(&other_path)
+            .expect("save other");
+
+        app.with_list_at(&other_path, |pl, _lib| pl.add_track("z".to_string()))
+            .expect("with_list_at");
+
+        assert_eq!(app.playlist.tracks, vec!["a".to_string()], "own untouched");
+        assert_eq!(
+            crate::playlist::Playlist::load(&other_path)
+                .expect("reload")
+                .tracks,
+            vec!["z".to_string()]
+        );
+    }
+
+    /// Moving a track into one of the displayed playlist's own loaded albums
+    /// must update that album's in-memory copy, not only its file — otherwise
+    /// the moved row is invisible until the playlist is reloaded.
+    #[test]
+    fn moving_a_track_into_a_loaded_album_updates_it_in_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a", "b"], &[("Kino", &["k1"])]);
+        app.selected = 0; // own:0 -> "a"
+
+        app.move_track_to_playlist("Kino").expect("move");
+
+        assert_eq!(app.playlist.tracks, vec!["b".to_string()], "left the parent");
+        assert_eq!(
+            app.albums[0].playlist.tracks,
+            vec!["k1".to_string(), "a".to_string()],
+            "landed in the loaded album's in-memory copy, not only on disk"
+        );
+
+        open_all(&mut app);
+        assert!(
+            row_shapes(&app).contains(&"album0:1".to_string()),
+            "and it is a visible row without switching away and back"
+        );
+    }
+
+    /// The mirror of the above: moving a track out of a loaded album, up into
+    /// the displayed playlist itself, must update `self.playlist` in memory.
+    #[test]
+    fn moving_a_track_out_of_an_album_into_the_parent_updates_it_in_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1", "k2"])]);
+        open_all(&mut app);
+        app.selected = 2; // album0:0 -> "k1"
+
+        app.move_track_to_playlist("aBooks").expect("move");
+
+        assert_eq!(
+            app.albums[0].playlist.tracks,
+            vec!["k2".to_string()],
+            "left the album"
+        );
+        assert_eq!(
+            app.playlist.tracks,
+            vec!["a".to_string(), "k1".to_string()],
+            "landed in the displayed playlist's in-memory copy, not only on disk"
+        );
+        assert!(row_shapes(&app).contains(&"own:1".to_string()));
+    }
+
+    /// Adding a track by URL, targeted at one of the displayed playlist's own
+    /// loaded albums (as Tab-cycling the URL prompt's target lets the user
+    /// do), must show up without switching away and back.
+    #[tokio::test]
+    async fn a_track_added_by_url_to_a_loaded_album_shows_up_immediately() {
+        use crate::tui::TaskMsg;
+        use crate::ytdlp::TrackMeta;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        let album_path = app.albums[0].path.clone();
+
+        app.handle_task_msg(TaskMsg::MetaReady {
+            url: "https://example.com/k2".to_string(),
+            meta: TrackMeta {
+                title: "Track K2".to_string(),
+                artist: "Artist".to_string(),
+                channel: "Channel".to_string(),
+                duration: 200,
+                video_id: "k2".to_string(),
+                source: "youtube.com".to_string(),
+            },
+            target_path: Some(album_path),
+        });
+
+        assert_eq!(
+            app.albums[0].playlist.tracks,
+            vec!["k1".to_string(), "youtube:k2".to_string()],
+            "the album's in-memory copy has the new track"
+        );
+        open_all(&mut app);
+        assert!(
+            row_shapes(&app).contains(&"album0:1".to_string()),
+            "and it is a visible row without switching away and back"
+        );
+    }
+
+    // ── Manual album creation ────────────────────────────────────────────────
+
+    /// `A` opens the new-album prompt; entering a name creates an empty album
+    /// under the displayed playlist and it shows up in the track list without
+    /// a folder ever being involved.
+    #[tokio::test]
+    async fn creating_an_album_manually_adds_an_empty_group() {
+        use crate::tui::input::{handle_new_album, handle_tracklist};
+        use crate::tui::InputMode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[]);
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('A')))
+            .await
+            .expect("handle A");
+        assert_eq!(app.input_mode, InputMode::NewAlbum);
+
+        app.input_buf = "Fresh".to_string();
+        handle_new_album(&mut app, key(crossterm::event::KeyCode::Enter)).expect("handle enter");
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.albums.len(), 1);
+        assert_eq!(app.albums[0].name, "Fresh");
+        assert!(app.albums[0].playlist.tracks.is_empty());
+        assert!(
+            app.albums[0].playlist.source_folder.is_none(),
+            "no folder was ever involved"
+        );
+        assert_eq!(
+            app.albums[0].playlist.parent.as_deref(),
+            Some("aBooks"),
+            "parented to the displayed playlist"
+        );
+        assert!(row_shapes(&app).contains(&"header:Fresh".to_string()));
+
+        let on_disk = crate::playlist::Playlist::load(&app.albums[0].path).expect("reload");
+        assert!(on_disk.tracks.is_empty());
+        assert_eq!(on_disk.kind, crate::playlist::PlaylistKind::Album);
+    }
+
+    /// A name already taken by another playlist/album is rejected, exactly as
+    /// `validate_playlist_name` already does for `N` and album rename, and
+    /// nothing is written to disk.
+    #[tokio::test]
+    async fn creating_an_album_with_a_taken_name_is_rejected() {
+        use crate::tui::input::handle_new_album;
+        use crate::tui::InputMode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+
+        app.input_mode = InputMode::NewAlbum;
+        app.input_buf = "Kino".to_string();
+        handle_new_album(&mut app, key(crossterm::event::KeyCode::Enter)).expect("handle enter");
+
+        assert_eq!(app.albums.len(), 1, "no second album created");
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("read dir")
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
+                .count(),
+            2,
+            "still just aBooks.toml and Kino.toml"
+        );
+    }
+
+    // ── Single-file add ─────────────────────────────────────────────────────
+
+    /// A single-file probe targeted at one of the displayed playlist's own
+    /// loaded albums must show up without switching away and back — the same
+    /// in-memory sync as `MetaReady`'s URL-add path.
+    #[test]
+    fn a_probed_file_targeted_at_a_loaded_album_shows_up_immediately() {
+        use crate::library::MediaKind;
+        use crate::library_scan::ProbedMeta;
+        use crate::tui::TaskMsg;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        let album_path = app.albums[0].path.clone();
+        let file_path = dir.path().join("Extra Track.flac");
+
+        app.handle_task_msg(TaskMsg::FileProbed {
+            file: crate::library_import::ImportedFile {
+                path: file_path.clone(),
+                meta: ProbedMeta {
+                    title: "Extra Track".to_string(),
+                    artist: "Someone".to_string(),
+                    duration: 120,
+                    media: MediaKind::Audio,
+                },
+            },
+            target_path: album_path,
+        });
+
+        let expected_id = crate::library_scan::local_id(&file_path);
+        assert_eq!(
+            app.albums[0].playlist.tracks,
+            vec!["k1".to_string(), expected_id],
+            "the album's in-memory copy has the new track"
+        );
+        open_all(&mut app);
+        assert!(
+            row_shapes(&app).contains(&"album0:1".to_string()),
+            "and it is a visible row without switching away and back"
+        );
+    }
+
+    // ── Targeted folder and file adds ───────────────────────────────────────
+
+    /// Drain `app.task_rx`, applying every message via `handle_task_msg` — a
+    /// scan reports progress once per file before its final message — until
+    /// the import or file-add actually lands.
+    async fn drain_import(app: &mut crate::tui::App) {
+        loop {
+            let Some(msg) = app.task_rx.recv().await else {
+                return;
+            };
+            let is_terminal = matches!(
+                msg,
+                crate::tui::TaskMsg::ImportScanned { .. } | crate::tui::TaskMsg::FileProbed { .. }
+            );
+            app.handle_task_msg(msg);
+            if is_terminal {
+                return;
+            }
+        }
+    }
+
+    /// folder × Auto: unchanged from today — a folder with no existing link
+    /// becomes a new sibling album under the displayed playlist.
+    #[tokio::test]
+    async fn folder_add_with_auto_target_creates_a_new_album() {
+        use crate::tui::input::handle_key;
+        use crate::tui::InputMode;
+
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+        let root = dir.path().join("Fresh Set");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(root.join("Track One.flac"), b"bytes").expect("write");
+
+        app.input_mode = InputMode::FolderInput;
+        app.input_buf = root.to_string_lossy().to_string();
+        app.target_list_for_add = None;
+
+        handle_key(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("handled");
+        drain_import(&mut app).await;
+
+        assert_eq!(app.albums.len(), 1, "auto matching made a new sibling album");
+        assert_eq!(app.albums[0].playlist.tracks.len(), 1);
+    }
+
+    /// folder × explicit (also covers the case task 5.4 asks for): `Tab`-ing
+    /// to an existing album whose `source_folder` does not match the typed
+    /// folder still merges into that album, not a new sibling.
+    #[tokio::test]
+    async fn folder_add_with_explicit_target_merges_into_the_chosen_album_regardless_of_its_own_folder(
+    ) {
+        use crate::tui::input::handle_key;
+        use crate::tui::InputMode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        // Kino is already linked to a folder of its own — a *different* one
+        // from the one about to be imported.
+        let kinos_own_folder = dir.path().join("Kinos Own Folder");
+        app.albums[0].playlist.source_folder = Some(kinos_own_folder.clone());
+        let album_path = app.albums[0].path.clone();
+        app.albums[0].playlist.save(&album_path).expect("save");
+
+        let root = dir.path().join("Unrelated Folder");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(root.join("Track One.flac"), b"bytes").expect("write");
+
+        app.input_mode = InputMode::FolderInput;
+        app.input_buf = root.to_string_lossy().to_string();
+        app.target_list_for_add = Some("Kino".to_string());
+
+        handle_key(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("handled");
+        drain_import(&mut app).await;
+
+        assert_eq!(app.albums.len(), 1, "no new sibling album was created");
+        assert_eq!(
+            app.albums[0].playlist.tracks.len(),
+            2,
+            "k1 plus the one file from the unrelated folder"
+        );
+        assert_eq!(
+            app.albums[0].playlist.source_folder.as_deref(),
+            Some(kinos_own_folder.as_path()),
+            "R still rescans Kino's own folder, not the one just merged in"
+        );
+    }
+
+    /// file × Auto: a single file with no explicit target lands in the
+    /// displayed playlist.
+    #[tokio::test]
+    async fn file_add_with_auto_target_lands_in_the_displayed_playlist() {
+        use crate::tui::input::handle_key;
+        use crate::tui::InputMode;
+
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+        let file_path = dir.path().join("Track One.flac");
+        std::fs::write(&file_path, b"bytes").expect("write");
+
+        app.input_mode = InputMode::FolderInput;
+        app.input_buf = file_path.to_string_lossy().to_string();
+        app.target_list_for_add = None;
+
+        handle_key(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("handled");
+        drain_import(&mut app).await;
+
+        assert_eq!(app.playlist.tracks.len(), 1);
+        assert!(app.albums.is_empty(), "no album was involved");
+    }
+
+    /// file × explicit: `Tab`-ing to an existing album adds the single file
+    /// straight into it.
+    #[tokio::test]
+    async fn file_add_with_explicit_target_lands_in_the_chosen_album() {
+        use crate::tui::input::handle_key;
+        use crate::tui::InputMode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &["a"], &[("Kino", &["k1"])]);
+        let file_path = dir.path().join("Track One.flac");
+        std::fs::write(&file_path, b"bytes").expect("write");
+
+        app.input_mode = InputMode::FolderInput;
+        app.input_buf = file_path.to_string_lossy().to_string();
+        app.target_list_for_add = Some("Kino".to_string());
+
+        handle_key(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("handled");
+        drain_import(&mut app).await;
+
+        assert_eq!(app.playlist.tracks, vec!["a".to_string()], "own untouched");
+        assert_eq!(app.albums[0].playlist.tracks.len(), 2, "k1 plus the new file");
+    }
+
     // ── Rendering an album ────────────────────────────────────────────────
 
     /// The glyphs are `▸`/`▾`, not the sidebar's `▶`/`▼`: `▶` is the playing
@@ -8709,6 +9465,35 @@ tracks = []
         assert!(header.contains("▸ Kino"), "{header}");
         assert!(header.contains("2 tracks"), "{header}");
         assert!(header.contains("6m"), "2 × 180s: {header}");
+    }
+
+    /// The duration column must be wide enough for `HH:MM:SS`, and a blank
+    /// column must separate the table from the scrollbar.
+    #[test]
+    fn duration_over_an_hour_is_not_clipped_and_a_gap_precedes_the_scrollbar() {
+        let mut pl = make_playlist("Active");
+        let mut track = make_track("a", "Long Track");
+        track.duration = 3723; // 01:02:03
+        add_track(&mut pl, track);
+        let (_dir, _path, mut app) = app_on_disk(pl);
+
+        let screen = render_to_lines(&mut app, 78, 16);
+        let line = screen
+            .iter()
+            .find(|line| line.contains("Long Track"))
+            .unwrap_or_else(|| panic!("no row for the track in {screen:#?}"));
+        assert!(
+            line.contains("01:02:03"),
+            "the full HH:MM:SS must render, with no digit clipped: {line:?}"
+        );
+
+        let chars: Vec<char> = line.chars().collect();
+        let width = chars.len();
+        assert_eq!(
+            chars[width - 3],
+            ' ',
+            "a blank column must separate the table from the scrollbar: {line:?}"
+        );
     }
 
     // ── An album plays as its own list ────────────────────────────────────

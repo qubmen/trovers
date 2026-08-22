@@ -330,8 +330,13 @@ pub fn merge_scan(
         report.missing += 1;
     }
 
-    // Being linked to the folder is what makes the album rescannable at all.
-    album.source_folder = Some(root.to_path_buf());
+    // Being linked to a folder is what makes the album rescannable at all —
+    // but only the *first* one: a list can now receive files from more than
+    // one folder (an explicit target bypasses `import_target_for`'s
+    // folder-identity matching), and a later import must not silently
+    // repoint `R`'s rescan away from the folder the user is used to it
+    // reaching.
+    album.source_folder.get_or_insert(root.to_path_buf());
     report
 }
 
@@ -362,6 +367,54 @@ fn refresh(track: &mut Track, file: &ImportedFile) -> bool {
     track.cache_status = CacheStatus::Cached;
     track.file = Some(file.path.clone());
     true
+}
+
+/// What adding one file to a list did — the single-file counterpart to
+/// `ImportReport`, without a `missing` count: one file cannot vanish from
+/// underneath its own add.
+#[derive(Debug, PartialEq)]
+pub enum SingleAddOutcome {
+    /// A new row for this file.
+    Added,
+    /// The list already had a row for it; nothing was added.
+    AlreadyPresent,
+}
+
+/// Fold one already-probed file into `list` and the library.
+///
+/// Deliberately not a one-file call to `merge_scan`: that function's other
+/// two jobs — marking rows whose file vanished from a folder, and stamping
+/// `source_folder` — are folder concepts that make no sense for a single
+/// file, and reusing it here would need a synthetic `root` that risks
+/// marking a sibling file "vanished" the next time its real folder gets
+/// rescanned. This touches neither: a document is written or refreshed, one
+/// id is pushed if it is not already there, and nothing else.
+pub fn add_single_file(
+    library: &mut Library,
+    list: &mut Playlist,
+    file: ImportedFile,
+) -> SingleAddOutcome {
+    let id = local_id(&file.path);
+
+    match library.get_mut(&id) {
+        Some(track) => {
+            refresh(track, &file);
+            if let Err(e) = library.save(&id) {
+                error!(err = %e, id = %id, "failed to save a re-added track's document");
+            }
+        }
+        None => {
+            if let Err(e) = library.upsert(local_track(id.clone(), file)) {
+                error!(err = %e, id = %id, "failed to write a newly added track's document");
+            }
+        }
+    }
+
+    if list.tracks.contains(&id) {
+        return SingleAddOutcome::AlreadyPresent;
+    }
+    list.tracks.push(id);
+    SingleAddOutcome::Added
 }
 
 /// A document for a file the library has not seen before.

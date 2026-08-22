@@ -71,6 +71,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.input_mode {
         InputMode::UrlInput
         | InputMode::NewPlaylist
+        | InputMode::NewAlbum
         | InputMode::SearchInput
         | InputMode::FolderInput => {
             render_input_overlay(frame, app, area);
@@ -378,8 +379,11 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = make_panel_block(&title, app.focus == Focus::TrackList);
 
     let inner = block.inner(area);
+    // Two columns reserved past the table's own content: one for the
+    // scrollbar and one left blank between it and the duration column, so no
+    // digit ever sits flush against the scrollbar's track or thumb.
     let table_area = Rect {
-        width: inner.width.saturating_sub(1),
+        width: inner.width.saturating_sub(2),
         ..inner
     };
     let scrollbar_area = Rect {
@@ -390,8 +394,8 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     app.track_list_height = table_area.height;
 
-    // icons(2) + num(4) + sep(1) + artist(16) + sep(1) + dur(7) + padding(3)
-    let title_width = table_area.width.saturating_sub(2 + 4 + 1 + 16 + 1 + 7 + 3) as usize;
+    // icons(2) + num(4) + sep(1) + artist(16) + sep(1) + dur(8) + padding(3)
+    let title_width = table_area.width.saturating_sub(2 + 4 + 1 + 16 + 1 + 8 + 3) as usize;
 
     let rows: Vec<Row> = (app.track_offset..app.track_offset + app.track_list_height as usize)
         .filter_map(|cursor| {
@@ -427,6 +431,23 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
             let (playlist, _) = app.source_playlist(source)?;
             let id = playlist.tracks.get(index)?;
             let is_playing = row_is_playing(app, source, id);
+            // Whether this row is the literal track the album remembers having
+            // last played, when that album isn't the one actually playing.
+            //
+            // This checks `current_track` directly rather than going through
+            // `album_resume_target` — that helper's fallback to track 0 when
+            // there is no `current_track` (or a stale one) is right for "where
+            // should Space start playback," but wrong here: a never-played
+            // album has no resume point to mark, and marking track 0 anyway
+            // would read as a memory the album doesn't actually have.
+            let is_resume_marker = !is_playing
+                && match source {
+                    RowSource::Own => false,
+                    RowSource::Album(album) => app
+                        .albums
+                        .get(album)
+                        .is_some_and(|loaded| loaded.playlist.current_track.as_deref() == Some(id)),
+                };
             let num_str = format!("{:>3} ", index + 1);
 
             // A row holds an id, and the document it names can go missing —
@@ -443,7 +464,13 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 ));
             };
 
-            let play_icon = if is_playing { "▶" } else { " " };
+            let play_icon = if is_playing {
+                "▶"
+            } else if is_resume_marker {
+                "‣"
+            } else {
+                " "
+            };
             // `None` means "no distinct color" — the icon just takes whatever
             // the row's own style is (selected/playing/default), same as
             // every other cell in the row. `Cached`/`Streaming` stay that way
@@ -496,10 +523,16 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
             let artist_str = truncate(track.user_artist.as_deref().unwrap_or(&track.artist), 15);
             let dur_str = format_duration(track.duration);
 
+            let icon_span = if is_resume_marker {
+                Span::styled(format!("{play_icon} "), Style::new().fg(TEXT_DIM))
+            } else {
+                Span::raw(format!("{play_icon} "))
+            };
+
             Some(
                 Row::new(vec![
                     Cell::from(Line::from(vec![
-                        Span::raw(format!("{play_icon} ")),
+                        icon_span,
                         status_span,
                     ])),
                     Cell::from(Span::styled(num_str, Style::new().fg(TEXT_DIM))),
@@ -517,7 +550,9 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(5),
         Constraint::Fill(1),
         Constraint::Length(16),
-        Constraint::Length(7),
+        // `HH:MM:SS` — `format_duration` always pads hours to 2 digits, so
+        // anything an hour or longer needs the full 8, not 7.
+        Constraint::Length(8),
     ];
 
     let mut table_state = TableState::default();
@@ -977,6 +1012,9 @@ fn footer_left_message(app: &App) -> String {
         (InputMode::NewPlaylist, _) => {
             return "New playlist: Enter name · [enter] confirm · [esc] cancel".to_string();
         }
+        (InputMode::NewAlbum, _) => {
+            return "New album: Enter name · [enter] confirm · [esc] cancel".to_string();
+        }
         (InputMode::SearchInput, _) => {
             return "Search: type to filter · [enter] done · [esc] clear".to_string()
         }
@@ -1031,6 +1069,7 @@ fn footer_center_context(app: &App) -> String {
         InputMode::Normal => "Normal".to_string(),
         InputMode::UrlInput => "Add URL".to_string(),
         InputMode::NewPlaylist => "New playlist".to_string(),
+        InputMode::NewAlbum => "New album".to_string(),
         InputMode::ConfirmDelete => "Confirm delete".to_string(),
         InputMode::SearchInput => {
             if app.input_buf.trim().is_empty() {
@@ -1100,13 +1139,16 @@ fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let (title, prompt) = match app.input_mode {
         InputMode::UrlInput => ("Add Track", "URL: "),
         InputMode::NewPlaylist => ("New Playlist", "Name: "),
+        InputMode::NewAlbum => ("New Album", "Name: "),
         InputMode::SearchInput => ("Search", "/"),
         InputMode::FolderInput => ("Import Folder", "Path: "),
         _ => return,
     };
 
-    // For URL input mode, show the target playlist hint as a second line
-    let show_playlist_hint = app.input_mode == InputMode::UrlInput;
+    // For URL and folder/file input, show the target playlist hint as a
+    // second line.
+    let show_playlist_hint =
+        matches!(app.input_mode, InputMode::UrlInput | InputMode::FolderInput);
     let height = if show_playlist_hint { 5u16 } else { 3u16 };
     let width = area.width.clamp(30, 64);
     let x = area.x + area.width.saturating_sub(width) / 2;
@@ -1139,7 +1181,11 @@ fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
             rows[0],
         );
 
-        let target_name = url_input_target_display(app);
+        let target_name = if app.input_mode == InputMode::FolderInput {
+            folder_input_target_display(app)
+        } else {
+            url_input_target_display(app)
+        };
         let has_multiple = app.available_playlists.len() > 1;
         let tab_hint = if has_multiple { "  [tab] cycle" } else { "" };
 
@@ -1167,6 +1213,15 @@ pub(crate) fn url_input_target_display(app: &App) -> String {
         .as_deref()
         .unwrap_or(&app.playlist.name)
         .to_string()
+}
+
+/// Returns the display name for the current folder/file add's target list.
+/// "Auto" (today's folder-identity matching, or the displayed playlist for a
+/// single file) when nothing has been explicitly `Tab`-cycled to.
+pub(crate) fn folder_input_target_display(app: &App) -> String {
+    app.target_list_for_add
+        .clone()
+        .unwrap_or_else(|| "Auto".to_string())
 }
 
 // ── Track context menu ────────────────────────────────────────────────────
@@ -1291,7 +1346,8 @@ fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
     lines.push(Line::raw(
         "  [n] next           [b] previous    [N] new playlist",
     ));
-    lines.push(Line::raw("  [F] import folder  [R] rescan folder"));
+    lines.push(Line::raw("  [F] import folder  [A] new album"));
+    lines.push(Line::raw("  [R] rescan folder"));
     lines.push(Line::raw("  [JK] move row down/up"));
 
     lines.push(Line::raw(""));
@@ -1300,7 +1356,7 @@ fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
         Style::new().fg(GOLD).bold(),
     )]));
     lines.push(Line::raw("  [enter] open/close  [r] rename   [d] forget"));
-    lines.push(Line::raw("  [R] rescan its folder"));
+    lines.push(Line::raw("  [spc] play album    [R] rescan its folder"));
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![Span::styled(
