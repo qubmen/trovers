@@ -244,20 +244,22 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             }
         }
 
-        // Space: on an album header, play that album — resuming from its
+        // Space: toggle pause if anything is playing, full stop — that check
+        // comes first and wins over everything below it. Without this
+        // ordering, pressing Space a second time while sitting on an album
+        // header (to pause) instead re-ran the "play this album" branch: it
+        // called `play_from_list` again with the album's saved
+        // `current_track`/`last_position`, which respawned mpv a few seconds
+        // behind the live position instead of pausing it — "seeks back and
+        // keeps playing" rather than stopping.
+        //
+        // Only when nothing is playing does the row matter: on an album
+        // header, play that album — resuming from its
         // `current_track`/`last_position` if it has one, otherwise from its
-        // first track. Elsewhere: toggle pause if playing, otherwise start
-        // (resuming from `last_position` if the track has one).
+        // first track. On any other row, start it (resuming from
+        // `last_position` if the track has one).
         KeyCode::Char(' ') => {
-            if let Some(album) = app.album_of(app.selected) {
-                if let Some(loaded) = app.albums.get(album) {
-                    if let Some((idx, start_pos)) =
-                        crate::tui::album_resume_target(loaded, &app.library)
-                    {
-                        app.play_from_list(crate::tui::RowSource::Album(album), idx, start_pos);
-                    }
-                }
-            } else if app.player.is_some() {
+            if app.player.is_some() {
                 app.is_paused = !app.is_paused;
                 let pausing = app.is_paused;
                 let res = match &app.player {
@@ -269,6 +271,14 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                     None => None,
                 };
                 note_ipc_result(app, "pause", res);
+            } else if let Some(album) = app.album_of(app.selected) {
+                if let Some(loaded) = app.albums.get(album) {
+                    if let Some((idx, start_pos)) =
+                        crate::tui::album_resume_target(loaded, &app.library)
+                    {
+                        app.play_from_list(crate::tui::RowSource::Album(album), idx, start_pos);
+                    }
+                }
             } else {
                 app.play_row(app.selected);
             }

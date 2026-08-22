@@ -8606,6 +8606,42 @@ tracks = []
         assert!(app.playing.is_none(), "an empty album has nothing to play");
     }
 
+    /// The bug this fixes: pressing Space a second time while sitting on an
+    /// album header — meaning to pause — must not re-trigger "play this
+    /// album from its resume point". That branch used to run unconditionally,
+    /// so it always won: it respawned mpv a few seconds behind the live
+    /// position instead of pausing it, which read as "seeks back and keeps
+    /// playing" rather than stopping.
+    #[tokio::test]
+    async fn space_on_a_header_pauses_instead_of_restarting_when_the_album_is_already_playing() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        app.patch_track("k1", |t| t.last_position = 12);
+        let album_path = app.albums[0].path.clone();
+        let album_playlist = app.albums[0].playlist.clone();
+        app.player = Some(make_dead_player(dead_player_socket("header-pause")));
+        app.playing = Some(session_at(album_path, album_playlist, 0)); // k1
+        app.position = 50.0; // well past the saved last_position
+        app.selected = 0; // the "Kino" header, the only row while folded
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char(' ')))
+            .await
+            .expect("handle space");
+
+        assert!(app.is_paused, "space must pause, not restart");
+        assert_eq!(
+            app.position, 50.0,
+            "must not jump back to the saved last_position"
+        );
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_id.as_str()),
+            Some("k1"),
+            "must not have switched to a different track"
+        );
+    }
+
     #[test]
     fn resume_marker_shows_on_the_albums_current_track_when_it_is_not_playing() {
         let dir = tempfile::tempdir().expect("tempdir");
