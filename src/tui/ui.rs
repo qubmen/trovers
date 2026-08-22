@@ -1,6 +1,7 @@
 use super::{effective_speed, App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
 use crate::config::AudioQuality;
-use crate::playlist::{CacheStatus, LoopMode};
+use crate::library::CacheStatus;
+use crate::playlist::LoopMode;
 use crate::tui::input::validate_playlist_name;
 use ratatui::{
     layout::{Constraint, Layout, Rect},

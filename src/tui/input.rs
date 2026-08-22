@@ -1,6 +1,7 @@
 use super::{App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
 use crate::library;
-use crate::playlist::{LoopMode, Playlist, Track};
+use crate::library::Track;
+use crate::playlist::{LoopMode, Playlist};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tracing::{error, info, warn};

@@ -4,13 +4,59 @@
 //! so a track's title, cache status, position and speed have exactly one home
 //! however many playlists reference it.
 
-use crate::playlist::{CacheStatus, LoopMode, Playlist, Track};
+use crate::playlist::{LoopMode, Playlist};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheStatus {
+    Cached,
+    Streaming,
+    Downloading,
+    /// All download attempts (see `ytdlp::download_with_retries`) were
+    /// exhausted. Unlike `Downloading`, this is a real terminal state and
+    /// survives restarts — `Library::load`'s crash recovery only resets
+    /// `Downloading`, never `Failed`. Cleared only by a fresh download,
+    /// automatic (re-adding the track) or manual (the recache hotkey).
+    Failed,
+}
+
+/// One track, as stored in its own document. The unit playlists reference by id
+/// and the only home for a track's title, cache status, position and speed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Track {
+    pub url: String,
+    pub source: String,
+    pub title: String,
+    pub artist: String,
+    pub channel: String,
+    pub duration: u64,
+    /// `<source-slug>:<platform-id>` — authoritative, and the only thing
+    /// playlists store. The document's filename is derived from it but is only a
+    /// hint; see `Library::load`.
+    pub id: String,
+    pub cache_status: CacheStatus,
+    pub file: Option<PathBuf>,
+    pub last_position: u64,
+    pub speed: Option<f32>,
+    pub user_title: Option<String>,
+    pub user_artist: Option<String>,
+    pub added_at: DateTime<Utc>,
+}
+
+impl Track {
+    /// The platform's own id for this track — what the audio cache filename and
+    /// yt-dlp are keyed by. Derived from `id` so there is no second field to
+    /// fall out of step with it.
+    pub fn platform_id(&self) -> &str {
+        platform_id_of(&self.id)
+    }
+}
 
 /// How many `-N` suffixes to try before giving up on finding a free filename for
 /// a document. A bound rather than an unbounded loop: reaching it means something

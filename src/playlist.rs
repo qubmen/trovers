@@ -6,53 +6,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum CacheStatus {
-    Cached,
-    Streaming,
-    Downloading,
-    /// All download attempts (see `ytdlp::download_with_retries`) were
-    /// exhausted. Unlike `Downloading`, this is a real terminal state and
-    /// survives restarts — `Playlist::load`'s crash recovery only resets
-    /// `Downloading`, never `Failed`. Cleared only by a fresh download,
-    /// automatic (re-adding the track) or manual (the recache hotkey).
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
 pub enum LoopMode {
     None,
     Track,
     Playlist,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Track {
-    pub url: String,
-    pub source: String,
-    pub title: String,
-    pub artist: String,
-    pub channel: String,
-    pub duration: u64,
-    /// Library id — `<source-slug>:<platform-id>`, the name of this track's
-    /// document and the only thing playlists store. See `crate::library`.
-    pub id: String,
-    pub cache_status: CacheStatus,
-    pub file: Option<PathBuf>,
-    pub last_position: u64,
-    pub speed: Option<f32>,
-    pub user_title: Option<String>,
-    pub user_artist: Option<String>,
-    pub added_at: DateTime<Utc>,
-}
-
-impl Track {
-    /// The platform's own id for this track — what the audio cache filename and
-    /// yt-dlp are keyed by. Derived from `id` so there is no second field to
-    /// fall out of step with it.
-    pub fn platform_id(&self) -> &str {
-        crate::library::platform_id_of(&self.id)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

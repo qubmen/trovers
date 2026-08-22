@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::library::{make_id, platform_id_of, source_slug, Library};
-    use crate::playlist::{CacheStatus, Track};
+    use crate::library::{make_id, platform_id_of, source_slug, CacheStatus, Library, Track};
 
     fn track_with_id(id: &str) -> Track {
         Track {

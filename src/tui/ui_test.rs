@@ -44,7 +44,7 @@ mod tests {
 
     /// Append `track` to `pl` as a row and write its document, so the row
     /// resolves once an `App` is built around `test_library()`.
-    fn add_track(pl: &mut crate::playlist::Playlist, track: crate::playlist::Track) {
+    fn add_track(pl: &mut crate::playlist::Playlist, track: crate::library::Track) {
         let mut lib = test_library();
         let id = track.id.clone();
         lib.upsert(track).expect("write track document");
@@ -53,7 +53,7 @@ mod tests {
 
     /// `add_track` for a playlist that already belongs to an `App`: the document
     /// goes through the app's own library, which is where it reads rows from.
-    fn push_track(app: &mut crate::tui::App, track: crate::playlist::Track) {
+    fn push_track(app: &mut crate::tui::App, track: crate::library::Track) {
         let id = track.id.clone();
         app.library.upsert(track).expect("write track document");
         app.playlist.tracks.push(id);
@@ -2216,9 +2216,9 @@ mod tests {
 
     // ── Task 2: track moving between playlists ────────────────────────────────
 
-    fn make_track(id: &str, title: &str) -> crate::playlist::Track {
-        use crate::playlist::CacheStatus;
-        crate::playlist::Track {
+    fn make_track(id: &str, title: &str) -> crate::library::Track {
+        use crate::library::CacheStatus;
+        crate::library::Track {
             url: format!("https://example.com/{id}"),
             source: "youtube.com".to_string(),
             title: title.to_string(),
@@ -3514,7 +3514,8 @@ tracks = []
 
     #[test]
     fn download_done_updates_non_active_playlist_on_disk() {
-        use crate::playlist::{CacheStatus, Playlist};
+        use crate::library::CacheStatus;
+        use crate::playlist::Playlist;
         use crate::tui::{App, TaskMsg};
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3584,7 +3585,7 @@ tracks = []
 
     #[test]
     fn download_done_for_active_playlist_updates_in_memory_state() {
-        use crate::playlist::CacheStatus;
+        use crate::library::CacheStatus;
         use crate::tui::{App, TaskMsg};
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3741,7 +3742,7 @@ tracks = []
 
         // B's cache metadata should still have been updated normally.
         let track_b = app.library.get("youtube:B").expect("track B");
-        assert_eq!(track_b.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(track_b.cache_status, crate::library::CacheStatus::Cached);
         assert_eq!(track_b.file.as_deref(), Some(fake_file.as_path()));
     }
 
@@ -3835,20 +3836,20 @@ tracks = []
         let fake_file = dir.path().join("vid1.m4a");
         std::fs::write(&fake_file, b"audio data").expect("write fake audio");
         app.patch_track("vid1", |t| {
-            t.cache_status = crate::playlist::CacheStatus::Cached;
+            t.cache_status = crate::library::CacheStatus::Cached;
             t.file = Some(fake_file.clone());
             t.user_title = Some("Patched".to_string());
         });
 
         // The app's own library reflects the patch immediately.
         let track = app.library.get("vid1").expect("vid1");
-        assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(track.cache_status, crate::library::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
         assert_eq!(track.user_title.as_deref(), Some("Patched"));
 
         // And the document was persisted, so a fresh library sees it too.
         let track = test_library().get("vid1").cloned().expect("vid1");
-        assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(track.cache_status, crate::library::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
         assert_eq!(track.user_title.as_deref(), Some("Patched"));
 
@@ -3875,12 +3876,12 @@ tracks = []
         let mut app = App::new(pl, config, available, path.clone(), test_library());
 
         app.patch_track("does-not-exist", |t| {
-            t.cache_status = crate::playlist::CacheStatus::Cached;
+            t.cache_status = crate::library::CacheStatus::Cached;
         });
 
         assert_eq!(
             app.library.get("vid1").map(|t| &t.cache_status),
-            Some(&crate::playlist::CacheStatus::Streaming),
+            Some(&crate::library::CacheStatus::Streaming),
             "existing track must be untouched when the patched id doesn't exist"
         );
         assert!(
@@ -3945,7 +3946,7 @@ tracks = []
         let playing_track = app.playing_track().expect("playing track should resolve");
         assert_eq!(
             playing_track.cache_status,
-            crate::playlist::CacheStatus::Cached
+            crate::library::CacheStatus::Cached
         );
         assert_eq!(playing_track.file.as_deref(), Some(fake_file.as_path()));
 
@@ -5620,7 +5621,7 @@ tracks = []
 
         assert_eq!(
             app.library.get("youtube:A").map(|t| &t.cache_status),
-            Some(&crate::playlist::CacheStatus::Downloading)
+            Some(&crate::library::CacheStatus::Downloading)
         );
         // Asserted against the raw document rather than `Library::load`, because
         // load deliberately rewrites `downloading` back to `streaming` as crash
@@ -5650,7 +5651,7 @@ tracks = []
 
         assert_eq!(
             app.library.get("youtube:A").map(|t| &t.cache_status),
-            Some(&crate::playlist::CacheStatus::Failed),
+            Some(&crate::library::CacheStatus::Failed),
             "a failed download must not leave the track claiming to be downloading, \
              and must be distinguishable from a track nobody ever tried to cache"
         );
@@ -5758,7 +5759,7 @@ tracks = []
     async fn recache_forces_a_fresh_download_regardless_of_current_status() {
         let mut pl = make_playlist("Active");
         let mut track = make_track("A", "Track A");
-        track.cache_status = crate::playlist::CacheStatus::Cached;
+        track.cache_status = crate::library::CacheStatus::Cached;
         track.file = Some(std::path::PathBuf::from("/fake/A.opus"));
         add_track(&mut pl, track);
         let (_dir, _path, mut app) = app_on_disk(pl);
@@ -5771,7 +5772,7 @@ tracks = []
         );
         assert_eq!(
             app.library.get("A").map(|t| &t.cache_status),
-            Some(&crate::playlist::CacheStatus::Downloading),
+            Some(&crate::library::CacheStatus::Downloading),
             "must show as downloading immediately, even though it was already cached"
         );
     }
@@ -5849,7 +5850,7 @@ tracks = []
         });
 
         let a = test_library().get("A").cloned().expect("track A");
-        assert_eq!(a.cache_status, crate::playlist::CacheStatus::Cached);
+        assert_eq!(a.cache_status, crate::library::CacheStatus::Cached);
         assert_eq!(a.file.as_deref(), Some(audio.as_path()));
     }
 
@@ -5894,7 +5895,7 @@ tracks = []
 
         assert_eq!(
             test_library().get("A").map(|t| t.cache_status.clone()),
-            Some(crate::playlist::CacheStatus::Cached),
+            Some(crate::library::CacheStatus::Cached),
             "the download lands in the track, wherever the row ended up"
         );
         let target = crate::playlist::Playlist::load(&target_path).expect("load target");
@@ -5954,7 +5955,7 @@ tracks = []
         });
         assert_eq!(
             test_library().get("A").map(|t| t.cache_status.clone()),
-            Some(crate::playlist::CacheStatus::Cached)
+            Some(crate::library::CacheStatus::Cached)
         );
     }
 
@@ -5979,7 +5980,7 @@ tracks = []
         std::fs::write(&audio, b"audio data").expect("write audio");
 
         let mut cached = make_track(id, "Shared Track");
-        cached.cache_status = crate::playlist::CacheStatus::Cached;
+        cached.cache_status = crate::library::CacheStatus::Cached;
         cached.file = Some(audio.clone());
 
         let displayed_path = dir.path().join("Displayed.toml");
@@ -6033,7 +6034,7 @@ tracks = []
         assert_eq!(other.tracks, vec!["A"]);
         assert_eq!(
             test_library().get("A").map(|t| t.cache_status.clone()),
-            Some(crate::playlist::CacheStatus::Cached),
+            Some(crate::library::CacheStatus::Cached),
             "the track must not be silently downgraded to streaming"
         );
     }
@@ -6401,7 +6402,7 @@ tracks = []
         // A download completes and patches X's document.
         let file_for_patch = cached_file.clone();
         app.patch_track("X", move |t| {
-            t.cache_status = crate::playlist::CacheStatus::Cached;
+            t.cache_status = crate::library::CacheStatus::Cached;
             t.file = Some(file_for_patch);
         });
 
@@ -6417,7 +6418,7 @@ tracks = []
         let x = reloaded.get("X").expect("X's document");
         assert_eq!(
             x.cache_status,
-            crate::playlist::CacheStatus::Cached,
+            crate::library::CacheStatus::Cached,
             "switching away and flushing position must not revert the cache status"
         );
         assert_eq!(
