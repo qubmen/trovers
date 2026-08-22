@@ -168,7 +168,29 @@ which amends the sidebar half of ADR-016; storage is unchanged.
 | Imports, rescans and switches keep the rows in step | ✅ | an import lands as an open album under the cursor; a rename repoints the loaded copies; deleting from the sidebar takes the row with it |
 | Manual check at a real terminal | ⬜ | fold two albums and confirm the state survives a restart; play through the end of an album and confirm auto-advance stays inside it; rename and forget an album from its header and confirm the folder is untouched |
 
-Phase 3 (video playback in a real window) is not started.
+---
+
+## Video playback (2026-08-22)
+
+Phase 3 of the same plan. A track whose `media` is `Video` — which in practice means
+a local file, since remote tracks are downloaded as audio — now plays in an mpv
+window instead of being reduced to its soundtrack. See ADR-020.
+
+| Piece | Status | Notes |
+|-------|--------|-------|
+| `player::mpv_args` — the command line as a pure function | ✅ | video drops `--no-video` and adds `--force-window=yes`; `--no-terminal`/`--really-quiet` unconditional, because the tty stays the TUI's whatever is playing |
+| `MediaKind` threaded to the spawn | ✅ | `spawn_player_for` takes it; all three callers already held the track |
+| `config.video_mpv_args` | ✅ | `serde(default)`, so an older config loads with none; appended last so a user's conflicting flag wins, and video-only so a typo can never stop music |
+| `▣` on video rows | ✅ | in the title column after an album's indent — playing one opens a window over the terminal, worth a glyph's warning before the keypress |
+| Manual check at a real terminal | ⬜ | play a video row: a window opens, the TUI keeps rendering, `Space`/seek/speed still drive it over IPC, `q` closes both; play an audio row straight after and confirm no window; set `video_mpv_args = ["--focus-on=never"]` and confirm it takes effect; set a bogus flag and confirm it surfaces as a `PlayerError` rather than a hang |
+
+**A known gap in the automated coverage, not an oversight.** `mpv_args` is tested
+exhaustively, but the one line that decides *which* `video` a given row gets
+(`spawn_player_for`) is unobservable without a real mpv — mutating it to a constant
+`false` leaves the whole suite green. Recording spawn arguments in production state
+purely so a test could read them back would be worse than the gap, so that line is
+covered by the manual check above. The plan's Phase 3 verification is deliberately
+manual for the same reason.
 
 ---
 

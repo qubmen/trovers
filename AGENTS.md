@@ -54,20 +54,32 @@ attempt to replace them with Rust crates** — this is an intentional architectu
   ```
 
 ### mpv
-- **Role:** audio playback. Always launched with `--no-video` flag.
+- **Role:** playback, audio and video. A window is opened only for a track whose
+  `media` is `Video`; everything else gets `--no-video`.
 - **Why not rodio/symphonia:** mpv handles any audio format out of the box and
   supports IPC control from Rust.
 - **Installation:** system package manager (`brew install mpv`, `apt install mpv`, etc.).
-- **Key flags:**
+- **Key flags** — the whole command line is built by `player::mpv_args`, which is
+  a pure function precisely so it can be tested without a real mpv:
   ```bash
-  # Play without opening a video window
-  mpv --no-video --really-quiet "<file_or_url>"
-
-  # With IPC socket for control from Rust
-  mpv --no-video --really-quiet \
-      --input-ipc-server=/tmp/trovers-<pid>.sock \
+  # Audio: no window, ever
+  mpv --no-video --no-terminal --really-quiet \
+      --input-ipc-server=/tmp/trovers-<pid>-<seq>.sock \
       "<file_or_url>"
+
+  # Video: a window, forced — mpv can otherwise decide a file has nothing
+  # worth a window and play it with none at all
+  mpv --force-window=yes --no-terminal --really-quiet \
+      --input-ipc-server=/tmp/trovers-<pid>-<seq>.sock \
+      "<file>"
   ```
+  `--no-terminal` and `--really-quiet` are unconditional whatever is playing:
+  mpv shares a tty with the TUI and must neither write to it nor take a
+  keystroke from it. `--start=<secs>` is added when resuming.
+- **No focus-management flags by default.** mpv *exits* on an option it does not
+  recognise, so a default of `--focus-on=never` (mpv 0.38 and up) would stop
+  playback dead on every older install. `config.video_mpv_args` is the opt-in;
+  see ADR-020.
 - **IPC commands** (JSON over Unix socket):
   ```json
   {"command": ["set_property", "pause", true]}
@@ -218,6 +230,11 @@ local media existed loads as a remote audio track that resumes, which is what it
 is. `resume`'s default is `true` (recording the position is the point of the
 design), so it needs `default = "resume_by_default"` rather than `bool`'s own
 `false`.
+
+`media` is what decides whether playing the row opens a window (`▣` in the track
+list, `--force-window=yes` at spawn — ADR-020). Only a local file is ever
+`video`: a remote track is downloaded as audio, so `TaskMsg::MetaReady` sets
+`MediaKind::Audio` regardless of what the page holds.
 
 **`id` is authoritative; the filename is only a hint.** `Library::load` indexes
 every document by the `id` written *inside* it, so a document renamed by hand,
@@ -442,10 +459,17 @@ a track, use `default_speed` from `config.toml`.
 ```toml
 default_speed = 1.0
 default_volume = 80      # 0–100
+audio_quality = "best"   # best | high | medium | low
 active_playlist = "Progressive"
+video_mpv_args = []      # extra mpv options, video playback only
 ```
 
 Stored at `~/.config/trovers/config.toml`. Created with defaults on first run.
+
+`video_mpv_args` is empty by default and must stay that way: mpv exits on an
+option it does not recognise, so a shipped default would break older installs.
+It is appended **last** so a user's conflicting flag beats ours, and passed for
+video only so a bad flag can never stop music playing. See ADR-020.
 
 ---
 
@@ -507,7 +531,9 @@ Constraint::Length(1)   footer hint line
   instead (ADR-019); an *orphaned* album — one whose parent is gone — is listed here
   at the top level, with the album glyph, because nothing else can reach it
 - Active playlist marked with `◄` suffix in `ACCENT` colour
-- `♪ Music` / `▶ Video` — shown in `TEXT_DIM`, not selectable (reserved for future)
+- `♪ Music` / `▶ Video` — shown in `TEXT_DIM`, not selectable. Reserved for
+  filtering the library by media kind; they say nothing about whether video
+  *plays* — it does, in a real window, from any list (ADR-020)
 - `↓ Plunder` — opens URL input prompt (same as `a` in track list)
 - `⚙ Settings` — reserved, no-op for now
 
@@ -587,10 +613,19 @@ progress bar: `⟳ caching ▓▓▓▓▓░░░░ 45%`.
 
 ### Track status icons
 
+In the status column:
+
 - `▶` — currently playing
 - `◈` — cached (file on disk)
 - `◌` — streaming only (no local file)
 - `⟳` — downloading right now
+- `⊘` — `Missing`: a local file the document points at is not there (dim)
+
+In the title column, before the title and *after* an album row's indent, because
+an album's video row is still one of the album's rows:
+
+- `▣` — the track is a video. It is marked before it is played, since playing one
+  opens a window over the terminal — a surprise worth one glyph's warning
 
 ### Do not use `indicatif`
 
@@ -1020,10 +1055,13 @@ loop:
 - `hot_switch_to_local_file(owning_path, id, file)` — stream→local-file switch
   triggered by `DownloadDone`; identity-checked as `(owning_path, id)` via
   `is_playing_track`, mirroring the delete/move guards.
-- `spawn_player_for(video_id, source, speed, start_pos)` — the pure "start an
+- `spawn_player_for(id, source, speed, start_pos, media)` — the pure "start an
   mpv process and wire up position polling" primitive; callers own all
-  `self.playing`/`current_track`/`position` bookkeeping beforehand. Takes the
-  *platform* id, which is what the cache and yt-dlp are keyed by.
+  `self.playing`/`current_track`/`position` bookkeeping beforehand. `media` is the
+  only thing that decides whether mpv gets a window (ADR-020), and all three
+  callers already have the track in hand. `id` is the *library* id, carried
+  through only so the reply messages (`PlayerReady`/`PlayerError`) can name the
+  track — nothing in here keys the cache by it.
 
 **What the library model removed.** `download_targets`,
 `remap_download_targets`, `retarget_download` and
@@ -1216,7 +1254,10 @@ one document.
 - Importing playlists from external services (tracks added manually one by one
   only — a *local folder* is a different thing and is supported, see `F`/`R`)
 - Mouse support in TUI
-- Video playback (architecture supports it via mpv, but UI is audio-only for now)
+- Anything about the *video window* beyond opening it: no in-TUI video controls
+  beyond the ones IPC already gives (pause/seek/speed/volume), no window
+  placement, sizing or focus policy of our own — `config.video_mpv_args` hands
+  those to mpv and to the user (ADR-020)
 - Nesting deeper than playlist → album; sorting an album by path after a rescan;
   reordering albums by hand (they are alphabetical); moving an album to another
   parent; a search that matches an album's folder path

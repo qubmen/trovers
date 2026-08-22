@@ -105,6 +105,28 @@ the playlist you're looking at, holding everything in there that mpv can play.
 - Positions are remembered per file, so a three-hour set picks up where you left
   it even after a rename-and-rescan.
 
+## 🎬 Video, in a Real Window
+
+A video file in an imported folder plays as video. Rows that will open a window are
+marked `▣` before the title, so you know before you press Enter.
+
+- The window is mpv's; the terminal stays yours. `Space`, seek, speed and volume keep
+  working from the TUI while it plays, and `q` closes both.
+- Audio rows never open a window — not even the one right after a video.
+- **Recommended, if your mpv is 0.38 or newer:** stop the new window stealing your
+  keyboard, in `~/.config/trovers/config.toml`:
+
+  ```toml
+  video_mpv_args = ["--focus-on=never"]
+  ```
+
+  These options go to mpv as-is, for video playback only, and they are applied last —
+  so if you'd rather have no window at all, `["--force-window=no"]` wins over ours.
+  Nothing is set by default on purpose: mpv *quits* on an option it doesn't recognise,
+  and `--focus-on` doesn't exist before 0.38. Check `mpv --version` before adding it —
+  a flag your mpv rejects means playback fails to start (you'll get a `PlayerError` in
+  the footer rather than a hang).
+
 ## ⏱️ Playback That Survives the Storm
 
 - **Playback keeps sailing across playlist switches**: browsing or editing a

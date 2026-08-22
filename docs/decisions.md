@@ -583,3 +583,56 @@ cursor. With no albums the two are equal and the title is what it always was.
 
 **Out of scope:** reordering albums by hand, moving an album to another parent,
 nesting deeper than two levels, and a search that matches an album's folder path.
+
+---
+
+## ADR-020: A video window only for a video track, and no focus policy of our own
+
+**Decision:** `Player::spawn` takes a `video: bool`. When set, `--no-video` is
+dropped and `--force-window=yes` added; otherwise nothing changes. The flag comes
+from the track's own `media`, which is `Video` only for a local file. mpv's whole
+command line is built by a pure `player::mpv_args(socket, start_pos, video, extra)`
+so it can be tested without mpv. `--no-terminal` and `--really-quiet` stay
+unconditional. We ship **no** window-management flags; `config.video_mpv_args`
+(default `[]`) is appended last, for video only. A video row is marked `▣` in the
+track list before it is played.
+
+**Reasoning:**
+- **The trigger is the track, not a mode.** A playlist can hold both kinds, and
+  auto-advance can walk from one to the other, so "am I in video mode" has no
+  answer. `media` does, and all three spawn sites already hold the track — the
+  change is one argument threaded through `spawn_player_for`.
+- **`--force-window=yes`, not the absence of `--no-video`.** Dropping `--no-video`
+  is not enough: mpv can decide a file has nothing worth a window and play it with
+  none at all — a video row that plays sound into an empty terminal, which reads
+  exactly like a bug.
+- **The tty stays the TUI's.** `--no-terminal` and `--really-quiet` are not audio
+  concessions to relax now that there is a window: mpv shares a terminal with
+  ratatui, and one line of its output or one stolen keystroke corrupts the display.
+  A window changes where mpv draws video, not who owns the tty.
+- **mpv exits on an option it does not know, so a default flag is a loaded gun.**
+  `--focus-on=never` is the flag we would want — a video window stealing focus
+  pulls the keyboard away from the TUI — and it needs mpv 0.38. Shipping it would
+  turn every older install's playback into an immediate spawn failure. So it is
+  documented in the README and the user opts in.
+- **The user's flags come last, and only for video.** Last because mpv takes the
+  later of two conflicting options, so someone who sets `--force-window=no` gets
+  what they asked for rather than fighting us. Video-only because these are
+  window-management flags: on an audio track they would be at best pointless, and
+  at worst — a typo is fatal to mpv — enough to stop music playing at all. The blast
+  radius of a bad entry is bounded to the files that need a window.
+- **`▣` before the title, not in the status column.** The status column says what
+  the *file* is (cached, missing, downloading); this says what playing the row will
+  *do to your screen*, which is worth knowing before the keypress rather than after
+  a window has covered the terminal. It sits after an album row's indent, because an
+  album's video row is still one of the album's rows.
+
+**Trade-off accepted:** the spawn decision itself has no automated test. `mpv_args`
+is covered exhaustively, but whether `spawn_player_for` passes the right `video` for
+a given row is only observable by watching a real mpv — asserting it would mean
+recording spawn arguments in production state purely for tests. So that one line is
+verified by hand (`docs/progress.md` records it) and kept trivial enough to read.
+
+**Out of scope:** any window behaviour we would have to implement ourselves —
+placement, size, always-on-top, focus policy, a second window for a second track.
+mpv already has options for all of it and `video_mpv_args` is the door.
