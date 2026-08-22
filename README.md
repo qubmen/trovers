@@ -42,7 +42,7 @@ brew install qubmen/trovers/trovers
 
 Or grab a prebuilt binary directly from the [Releases page](https://github.com/qubmen/trovers/releases).
 
-**Required Cannons:** ffmpeg, mpv, and [yt-dlp](https://github.com/yt-dlp/yt-dlp) (for the heavy lifting) — trovers shells out to these rather than bundling them, so install them separately:
+**Required Cannons:** mpv and [yt-dlp](https://github.com/yt-dlp/yt-dlp) (for the heavy lifting) — trovers shells out to these rather than bundling them, so install them separately. ffmpeg is optional but recommended: its `ffprobe` is what reads real titles and durations out of your own files when you import a folder. Without it an import still works — names come from filenames and durations show `--:--`.
 
 ```sh
 brew install ffmpeg mpv yt-dlp   # macOS / Linux (via Homebrew)
@@ -57,6 +57,9 @@ j/k	Sail up/down through your booty
 a	Plunder a new link (Add URL)
 Enter	Fire! (Play media)
 m	Move track to another playlist
+F	Press your own folder into service (import as an album)
+R	Rescan that folder for new arrivals
+J/K	Haul the selected track down/up the running order
 q	Abandon ship
 
 ## 🗂️ Playlist Management
@@ -69,6 +72,24 @@ Manage multiple playlists without leaving the keyboard:
 - **Delete playlist**: Tab to sidebar → highlight playlist → `d` → confirm with `y`
 - **Move track**: highlight track → `m` → pick destination playlist from context menu
 - **Add to specific playlist**: `a` → type URL → Tab to cycle target playlist → Enter
+- **Reorder tracks**: highlight track → `J`/`K` (clear the search filter first)
+
+## 📁 Your Own Folders (Albums)
+
+Point trovers at a folder and it becomes an **album** — a sub-list nested under
+the playlist you're looking at, holding everything in there that mpv can play.
+
+- **Import**: `F` in the track list (or sidebar → `+ Folder`) → type a path
+  (`~` works) → Enter. Subfolders are included; the album is named after the
+  folder.
+- **Rescan**: `R` on a linked album picks up files added since. New files land at
+  the end, files that have vanished go dim (`⊘`) instead of disappearing, and
+  **nothing is ever deleted or reshuffled**.
+- **Your files stay yours**: trovers only ever *reads* them. Deleting a row — or
+  the whole album — forgets the track and never touches the file on disk. That is
+  the one rule with no exceptions.
+- Positions are remembered per file, so a three-hour set picks up where you left
+  it even after a rename-and-rescan.
 
 ## ⏱️ Playback That Survives the Storm
 

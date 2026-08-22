@@ -130,8 +130,26 @@ one speed instead of keeping two divergent copies. See ADR-015.
 | Ownership bookkeeping deleted | ✅ | `download_targets`, `remap_download_targets`, `retarget_download`, `clear_download_state_for_playlist`, `patch_and_save_playlist`, `save_playing_session_playlist` |
 | Manual check at a real terminal | ⬜ | resume-on-`Enter`, `◈` rows playing from disk, position surviving quit → relaunch |
 
-Phase 2 (albums as child playlists, local folders, `J`/`K` reorder, duration and
-count in the panel title) and Phase 3 (video playback) are not started.
+---
+
+## Albums and local folders (2026-08-22)
+
+Phase 2 of the same plan. New user-facing behaviour: point trovers at a folder
+and it becomes an album under the current playlist. See ADR-016 (album as a child
+playlist), ADR-017 (ffprobe as a soft dependency) and ADR-018 (never delete a
+user's file).
+
+| Piece | Status | Notes |
+|-------|--------|-------|
+| `Track.origin` / `media` / `resume`, `CacheStatus::Missing` | ✅ | all `serde(default)`ed, so every Phase 1 document loads as what it is; `Missing` heals back to `Cached` when the file reappears |
+| `src/library_scan.rs` — walk, probe, filename parse | ✅ | stack-based `read_dir`, depth-capped at 16, does not follow directory symlinks; ffprobe optional, warned about once |
+| Albums as child playlists (`kind`/`parent`/`source_folder`) | ✅ | `Playlist::list_entries()`, sidebar indent, orphans fall back to top level, rename rewrites children |
+| `src/library_import.rs` + `F` import / `R` rescan | ✅ | rescan appends and marks, never deletes or reorders; counts reported in the status line |
+| Never-delete-user-files guard | ✅ | three sites: `handle_confirm_delete`, `recache_track`, `request_playback` |
+| Panel title totals + `J`/`K` reorder | ✅ | `Live Sets · 42 tracks · 6h 12m  [ 12–20 / 42 ]`; reorder refuses under a search filter |
+| Manual check at a real terminal | ⬜ | import a mixed folder, resume across a relaunch, rename-and-rescan → `⊘`, `d` on a local row leaves the file, an import with ffprobe off PATH |
+
+Phase 3 (video playback in a real window) is not started.
 
 ---
 

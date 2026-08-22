@@ -137,6 +137,10 @@ trovers/
 │   ├── playlist.rs                  ← load/save playlist TOML files (ordered id lists)
 │   ├── library.rs                   ← the track library: one TOML document per
 │   │                                   track, plus migration from the old format
+│   ├── library_scan.rs              ← walk a local folder, probe files with
+│   │                                   ffprobe (soft dep), mint local ids
+│   ├── library_import.rs            ← turn a scan into tracks and merge them into
+│   │                                   a playlist (import and rescan share this)
 │   ├── cache.rs                     ← file paths, cache directory management
 │   └── tui/
 │       ├── mod.rs                   ← App struct, Focus/InputMode/SidebarItem enums,
@@ -203,9 +207,17 @@ file = "~/.local/share/trovers/audio/vK2io4J708A.opus"
 last_position = 176
 speed = 1.5
 added_at = "2026-04-01T12:06:59Z"
+origin = "remote"        # remote | local
+media = "audio"          # audio | video
+resume = true
 ```
 
 `file`, `speed`, `user_title` and `user_artist` are absent when unset.
+`origin`, `media` and `resume` are `serde(default)`ed — a document written before
+local media existed loads as a remote audio track that resumes, which is what it
+is. `resume`'s default is `true` (recording the position is the point of the
+design), so it needs `default = "resume_by_default"` rather than `bool`'s own
+`false`.
 
 **`id` is authoritative; the filename is only a hint.** `Library::load` indexes
 every document by the `id` written *inside* it, so a document renamed by hand,
@@ -241,6 +253,9 @@ loop_mode = "none"       # none | track | playlist
 shuffle = false
 tracks = ["youtube:vK2io4J708A", "soundcloud:artbat-live-ultra-2026"]
 current_track = "youtube:vK2io4J708A"
+kind = "normal"          # normal | album
+parent = "Progressive"   # albums only: the parent's file stem
+source_folder = "/Users/me/Music/Live Sets"   # set when linked to a folder
 ```
 
 `tracks` is the running order. `current_track` means only "the row the cursor
@@ -249,6 +264,58 @@ was last on in *this* playlist", used to restore the cursor on load — never
 
 A row whose document has gone missing renders dimmed rather than vanishing, so
 the row the user can see is the row they can delete.
+
+`kind`, `parent` and `source_folder` are `serde(default)`ed, so every playlist
+written before albums existed loads as a top-level normal playlist.
+
+### Albums
+
+An album *is* a playlist file — no second type, no nesting inside a document.
+`kind = "album"` plus `parent = "<parent's file stem>"` is the whole model, which
+is why every playlist operation (rename, delete, move-track-here, shuffle, loop)
+works on an album for free.
+
+- **Two levels only.** An album's parent is always a normal playlist; importing a
+  folder while an album is displayed attaches the new album to that album's
+  parent, not to the album.
+- **`parent` names a file stem, not `Playlist.name`.** The stem is what
+  `Playlist::list_entries` and the sidebar have in hand, and it is what stays
+  unique on disk.
+- The sidebar renders albums indented under their parent. An album whose parent
+  was deleted **orphans to the top level** rather than disappearing — deleting a
+  playlist never takes data with it.
+- Renaming a parent rewrites its children's `parent`.
+
+### Local media
+
+A local track is an ordinary track document with `origin = "local"`:
+
+- `id` is `local:<fnv1a-16-hex-of-the-normalized-path>`. Derived from the path, so
+  a rescan lands on the same id and the same document — which is what makes
+  `last_position`, `speed` and a renamed `user_title` survive one. Normalization
+  is *lexical* (`path.components().collect()`), because the file may be on an
+  unplugged drive and `canonicalize` needs it to exist.
+- `url` is the absolute path, `source` is `"local"`, `file` is the user's own
+  file, and `cache_status` starts at `cached`. It then flows through the existing
+  playback resolution untouched.
+- `cache_status = "missing"` is set by `Library::load` when a local file is not
+  where the document says (renders as a dim `⊘`), and healed back to `cached` the
+  moment it reappears. Playing a `Missing` row refuses with "File not found"
+  instead of spawning mpv; recaching one says "Local file, nothing to download".
+
+**ffprobe is a soft dependency.** `deps.rs` hard-checks yt-dlp and mpv only.
+Without ffprobe an import still works: `MediaKind` comes from the extension,
+title/artist from the filename (`Artist - Title`, track-number prefixes
+stripped), and `duration` stays `0`, which the row shows as `--:--` and
+auto-advance already tolerates.
+
+**Import and rescan.** `F` prompts for a folder and creates an album named after
+it, uniquified like any duplicate playlist name; `R` rescans the folder an album
+is linked to. A rescan **never deletes or reorders**: files already in the library
+keep their documents, new files are appended to the end of the id list, and
+vanished ones go `Missing`. New rows landing at the end rather than in sorted
+position is the deliberate trade-off — reordering would move the row under the
+user's cursor and shuffle the running order — and `J`/`K` is the manual fix.
 
 ### Migration from the old format
 
@@ -284,6 +351,8 @@ domains, just take whatever host the URL contains.
   real terminal state, not a crash artifact — it is not reset on load, and
   playback still works fine via streaming. Cleared only by a fresh download,
   automatic (re-adding the same URL) or manual (`c`, recache).
+- `missing` — a **local** track whose file is not there. Never set on a remote
+  track: that one can always be streamed again. See "Local media" above.
 
 **Startup recovery:** on `Library::load()`, any document with `cache_status =
 "downloading"` is reset to `"streaming"` — the app crashed mid-download and no
@@ -472,6 +541,7 @@ route flushes state and kills mpv.
 | `d`              | Delete selected track (confirm prompt) — removes the row, and the document plus cached audio only when no other playlist lists it |
 | `c`              | Recache: force a fresh download of the selected track, regardless of its current cache status (overwrites an existing file; no-op if a download for it is already running) |
 | `N`              | Create new playlist (name prompt)               |
+| `J` / `K`        | Move the selected row down / up within the playlist (saved immediately; refused while a search filter is active, since the cursor counts visible rows there) |
 
 ### Sidebar focus
 
@@ -479,7 +549,8 @@ route flushes state and kills mpv.
 |---------|-------------------------------------------------------------|
 | `↑`/`↓` | Move between selectable items (skips disabled/separators)  |
 | `Enter` | Playlists header: expand/collapse · Playlist: switch to it |
-|         | Plunder: open URL input · Settings: (reserved)             |
+|         | Plunder: open URL input · `+ Folder`: open folder-path input |
+|         | Settings: (reserved)                                        |
 | `r`     | Rename focused playlist (opens name input overlay)         |
 | `d`     | Delete focused playlist (confirm prompt)                   |
 
@@ -489,6 +560,8 @@ route flushes state and kills mpv.
 |-----|------------------------------------------------------|
 | `m` | Move selected track: open context menu with playlist targets |
 | `N` | Create new playlist (name input prompt)              |
+| `F` | Import a local folder as an album under the displayed playlist (path prompt, `~` expanded) |
+| `R` | Rescan the folder this album mirrors — new files are appended, vanished ones go `Missing`, nothing is deleted or reordered |
 
 In URL input mode (`a` key):
 
@@ -507,6 +580,7 @@ In URL input mode (`a` key):
 | Track context menu| `↑`/`↓` navigate · `Enter` confirm · `Esc` cancel |
 | Playlist rename   | type new name · `Enter` confirm · `Esc` cancel |
 | Playlist delete   | `y`/`Enter` confirm · `n`/`Esc` cancel |
+| Folder input      | type a path (`~` expanded) · `Enter` import · `Esc` cancel |
 
 ---
 
@@ -997,9 +1071,11 @@ one document.
 
 - Format conversion (use whatever yt-dlp outputs)
 - ID3/mp4 metadata tagging
-- Importing playlists from external services (tracks added manually one by one only)
+- Importing playlists from external services (tracks added manually one by one
+  only — a *local folder* is a different thing and is supported, see `F`/`R`)
 - Mouse support in TUI
 - Video playback (architecture supports it via mpv, but UI is audio-only for now)
+- Nesting deeper than playlist → album; sorting an album by path after a rescan
 - Export/share bundles. A track document is a single self-contained file, which
   is what makes sharing possible, but a playlist alone is useless without the
   documents it references — bundling both wants a `trovers export` command that

@@ -376,7 +376,7 @@ serde enum, and backs `playlists/` up before it writes anything.
   one small file.
 - **A track becomes movable and shareable.** Moving between playlists is an
   id-list edit, and a single file describes a track completely, which is what
-  makes both albums (ADR pending) and eventual export possible.
+  makes both albums (ADR-016) and eventual export possible.
 
 **`id` is authoritative; the filename is only a hint.** macOS filesystems are
 case-insensitive and YouTube ids are not, so `aB` and `Ab` can collide as
@@ -412,3 +412,97 @@ migration: one bad file must not hold the other playlists hostage.
 one out of `playlists/` gives a list of ids and nothing else. Sharing wants a
 bundle command; see "Deferred" in the plan. The upside — one position per track,
 proportional writes, a whole class of ownership bookkeeping gone — is worth it.
+
+---
+
+## ADR-016: An album is an ordinary playlist file naming its parent
+
+**Decision:** An album is a `playlists/<name>.toml` like any other, with two extra
+fields: `kind = "album"` and `parent = "<parent's file stem>"`. There is no album
+type, no nested structure inside a playlist document, and no third directory.
+Nesting stops at two levels: playlist → album.
+
+**Reasoning:**
+- **Every playlist operation works on an album for nothing.** Rename, delete,
+  shuffle, loop mode, move-a-track-here, cursor restore, the `current_track`
+  field — all of it already operates on a playlist file, so an album inherits the
+  lot. A nested `Vec<Album>` inside a playlist document would have meant a second
+  implementation of each.
+- **A flat directory keeps the failure modes flat.** With `parent` a plain string
+  the worst case is a dangling reference, and the answer to it is obvious: an
+  album whose parent is gone renders at the top level. A tree in a single file
+  would make one unparseable document lose a whole branch.
+- **Two levels is a product decision, not a limitation of the model.** Arbitrary
+  depth costs a recursive sidebar, a recursive delete/rename, and cycle
+  detection, to serve a case nobody asked for. Importing a folder while an album
+  is displayed attaches the new album to that album's *parent*.
+
+**Why `parent` holds a file stem rather than `Playlist.name`.** The stem is what
+`Playlist::list_entries` and the sidebar have in hand without opening every file,
+and it is the thing the filesystem already keeps unique. Renaming a parent
+rewrites its children's `parent`.
+
+**Trade-off accepted:** deleting a parent orphans its albums to the top level
+instead of deleting them. Surprising for a moment, but the alternative is a
+single confirmation prompt destroying playlists the user never named — and
+trovers' rule is that deleting one thing deletes one thing.
+
+---
+
+## ADR-017: ffprobe is a soft dependency; yt-dlp and mpv stay hard
+
+**Decision:** `deps.rs` fails startup only on a missing yt-dlp or mpv. ffprobe is
+used when it happens to be on PATH and quietly not when it isn't: `MediaKind`
+falls back to the file extension, title and artist to the filename, and
+`duration` to `0`. The first spawn failure is logged once — an `AtomicBool`, not a
+warning per file, because an import is hundreds of them.
+
+**Reasoning:**
+- **yt-dlp and mpv are the program; ffprobe is a nicety.** Without either of the
+  first two trovers cannot fetch or play anything, so failing loudly at startup
+  is the honest response. Without ffprobe an import still produces playable rows
+  with readable names — refusing to run would trade a full feature for a better
+  one.
+- **The fallbacks were already there.** `duration == 0` is what a streaming
+  track's row shows before metadata arrives, `reached_end_of_track` already
+  tolerates it (mpv's own exit is the end-of-track signal, ADR-013), and the row
+  renders `--:--`. Filename parsing is ~20 lines and `Artist - Title` is a
+  convention worth honouring.
+- **ffprobe ships with ffmpeg, which many machines have and no machine promises.**
+  Making it hard would turn "import my music folder" into "install ffmpeg first"
+  for a duration column.
+
+**Where it does overrule the guess:** an `.mkv` carrying only audio needs no video
+window, and an `.m4a` that turns out to hold video does. Embedded cover art is a
+"video stream" to ffprobe, so `attached_pic` and a still-image codec list are both
+checked — otherwise every tagged mp3 would open a window.
+
+---
+
+## ADR-018: trovers never deletes a file the user brought
+
+**Decision:** Anything under `origin = "local"` is read-only to trovers. Deleting
+a row removes the row and, when nothing else references it, the *document* — never
+the media file. Deleting an entire album leaves the folder untouched. Recaching a
+local track is a no-op with a status message. A `Missing` row refuses to play
+instead of spawning mpv.
+
+**Reasoning:**
+- **The two origins mean opposite things by ownership.** A cached file under
+  `audio/` is trovers' own copy of something re-downloadable, so removing the last
+  row that references it is housekeeping. A file in the user's Music folder is the
+  only copy in the world, and trovers is a player pointed at it. One `remove_file`
+  call on the wrong branch is unrecoverable data loss, which puts it in a
+  different class from every other bug in this codebase.
+- **The guard belongs at the deletion sites, not in the confirmation text.** Three
+  places touch it — `handle_confirm_delete`, `recache_track`, `request_playback` —
+  and each checks `origin` itself rather than trusting a caller to have asked.
+- **`Missing` exists so a gone file is a visible row, not a silent one.** A local
+  track whose path is empty keeps its row and its recorded path, renders a dim
+  `⊘`, and heals back to `Cached` on the next load once the drive is plugged back
+  in. Dropping the row would lose the position and the id the moment a drive was
+  unmounted.
+
+**Consequence for rescan:** a rescan appends and marks, never deletes or reorders.
+The same instinct — the user's folder is the source of truth about files, and
+trovers' list is the source of truth about their order.
