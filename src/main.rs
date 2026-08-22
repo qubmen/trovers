@@ -1,6 +1,9 @@
 mod cache;
 mod config;
 mod deps;
+mod library;
+#[cfg(test)]
+mod library_test;
 mod player;
 mod playlist;
 mod tui;

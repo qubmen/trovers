@@ -625,12 +625,12 @@ fn handle_search(app: &mut App, key: KeyEvent) -> Result<Action> {
 pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
     if key.code == KeyCode::Char('y') {
         if let Some(idx) = app.track_index_at(app.selected) {
-            let video_id = app.playlist.tracks[idx].video_id.clone();
+            let id = app.playlist.tracks[idx].id.clone();
             // Only stop playback if the track being deleted is literally the
             // one actually driving playback right now (identity is `(path,
-            // video_id)`) — not just any track with a matching video_id that
+            // id)`) — not just any track with a matching id that
             // happens to exist in a differently-playing session elsewhere.
-            let is_current = app.is_playing_track(&app.playlist_path, &video_id);
+            let is_current = app.is_playing_track(&app.playlist_path, &id);
 
             if is_current {
                 // Stop playback immediately when deleting current track
@@ -649,7 +649,7 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
             let file_to_delete = app.playlist.tracks[idx].file.clone();
             app.playlist.tracks.remove(idx);
             // A download still running for this row has nowhere to land now.
-            app.clear_download_state(&video_id);
+            app.clear_download_state(&id);
             // Clear any active search filter; stale indices would point to wrong tracks
             app.filtered_indices.clear();
             if app.selected >= app.visible_track_count() && app.selected > 0 {
@@ -658,10 +658,10 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
             app.clamp_scroll();
             app.save_playlist();
             if let Some(path) = file_to_delete {
-                // The audio cache is keyed by `video_id`, so this file may well
+                // The audio cache is keyed by `id`, so this file may well
                 // be the one backing the same track in another playlist.
-                if app.video_id_referenced_elsewhere(&video_id) {
-                    info!(video_id = %video_id, path = %path.display(), "kept cached file, another playlist still references it");
+                if app.platform_id_referenced_elsewhere(&id) {
+                    info!(id = %id, path = %path.display(), "kept cached file, another playlist still references it");
                 } else if let Err(e) = std::fs::remove_file(&path) {
                     warn!(path = %path.display(), err = %e, "failed to delete cached file");
                 }

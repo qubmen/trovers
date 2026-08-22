@@ -2136,16 +2136,16 @@ mod tests {
 
     // ── Task 2: track moving between playlists ────────────────────────────────
 
-    fn make_track(video_id: &str, title: &str) -> crate::playlist::Track {
+    fn make_track(id: &str, title: &str) -> crate::playlist::Track {
         use crate::playlist::CacheStatus;
         crate::playlist::Track {
-            url: format!("https://example.com/{video_id}"),
+            url: format!("https://example.com/{id}"),
             source: "youtube.com".to_string(),
             title: title.to_string(),
             artist: "Test Artist".to_string(),
             channel: "Test Channel".to_string(),
             duration: 180,
-            video_id: video_id.to_string(),
+            id: id.to_string(),
             cache_status: CacheStatus::Streaming,
             file: None,
             last_position: 0,
@@ -2164,7 +2164,7 @@ mod tests {
         let track = make_track("vid1", "Track One");
         pl.add_track(track);
         assert_eq!(pl.tracks.len(), 1);
-        assert_eq!(pl.tracks[0].video_id, "vid1");
+        assert_eq!(pl.tracks[0].id, "vid1");
     }
 
     #[test]
@@ -2173,7 +2173,7 @@ mod tests {
         pl.add_track(make_track("vid1", "Track One"));
         pl.add_track(make_track("vid2", "Track Two"));
         assert_eq!(pl.tracks.len(), 2);
-        assert_eq!(pl.tracks[1].video_id, "vid2");
+        assert_eq!(pl.tracks[1].id, "vid2");
     }
 
     #[test]
@@ -2185,15 +2185,15 @@ mod tests {
         assert!(pl.current_track.is_none());
     }
 
-    // ── Playlist::remove_track_by_video_id tests ─────────────────────────────
+    // ── Playlist::remove_track_by_id tests ─────────────────────────────
 
     #[test]
     fn remove_track_returns_removed_track() {
         let mut pl = make_playlist("Test");
         pl.add_track(make_track("vid1", "Track One"));
-        let removed = pl.remove_track_by_video_id("vid1");
+        let removed = pl.remove_track_by_id("vid1");
         assert!(removed.is_some());
-        assert_eq!(removed.unwrap().video_id, "vid1");
+        assert_eq!(removed.unwrap().id, "vid1");
         assert!(pl.tracks.is_empty());
     }
 
@@ -2201,7 +2201,7 @@ mod tests {
     fn remove_track_returns_none_for_missing_id() {
         let mut pl = make_playlist("Test");
         pl.add_track(make_track("vid1", "Track One"));
-        let removed = pl.remove_track_by_video_id("nonexistent");
+        let removed = pl.remove_track_by_id("nonexistent");
         assert!(removed.is_none());
         assert_eq!(pl.tracks.len(), 1, "track should remain");
     }
@@ -2211,7 +2211,7 @@ mod tests {
         let mut pl = make_playlist("Test");
         pl.add_track(make_track("vid1", "Track One"));
         pl.current_track = Some("vid1".to_string());
-        pl.remove_track_by_video_id("vid1");
+        pl.remove_track_by_id("vid1");
         assert!(
             pl.current_track.is_none(),
             "current_track should be cleared"
@@ -2224,7 +2224,7 @@ mod tests {
         pl.add_track(make_track("vid1", "Track One"));
         pl.add_track(make_track("vid2", "Track Two"));
         pl.current_track = Some("vid2".to_string());
-        pl.remove_track_by_video_id("vid1");
+        pl.remove_track_by_id("vid1");
         assert_eq!(
             pl.current_track.as_deref(),
             Some("vid2"),
@@ -2238,10 +2238,10 @@ mod tests {
         pl.add_track(make_track("vid1", "Track One"));
         pl.add_track(make_track("vid2", "Track Two"));
         pl.add_track(make_track("vid3", "Track Three"));
-        pl.remove_track_by_video_id("vid2");
+        pl.remove_track_by_id("vid2");
         assert_eq!(pl.tracks.len(), 2);
-        assert_eq!(pl.tracks[0].video_id, "vid1");
-        assert_eq!(pl.tracks[1].video_id, "vid3");
+        assert_eq!(pl.tracks[0].id, "vid1");
+        assert_eq!(pl.tracks[1].id, "vid3");
     }
 
     // ── App::move_track_to_playlist tests ────────────────────────────────────
@@ -2323,7 +2323,7 @@ mod tests {
 
         // Simulate a playing track: both the legacy `current_track` pointer
         // (kept for cursor-restore purposes) and the real identity source of
-        // truth, `app.playing`, pointing at this exact (path, video_id).
+        // truth, `app.playing`, pointing at this exact (path, id).
         app.playlist.current_track = Some("vid1".to_string());
         app.playing = Some(crate::tui::PlayingSession {
             path: source_path.clone(),
@@ -2373,7 +2373,7 @@ mod tests {
         // Select last track
         app.selected = 2;
         // Simulate what move does: remove track and clamp
-        app.playlist.remove_track_by_video_id("vid3");
+        app.playlist.remove_track_by_id("vid3");
         let new_count = app.visible_track_count();
         if app.selected >= new_count && app.selected > 0 {
             app.selected -= 1;
@@ -2392,7 +2392,7 @@ mod tests {
         // Select first track
         app.selected = 0;
         // Remove middle track (simulate removing what's at cursor=0)
-        app.playlist.remove_track_by_video_id("vid1");
+        app.playlist.remove_track_by_id("vid1");
         let new_count = app.visible_track_count();
         if app.selected >= new_count && app.selected > 0 {
             app.selected -= 1;
@@ -2410,7 +2410,7 @@ mod tests {
         let mut pl = make_playlist("Round Trip");
         let track = make_track("vid1", "Track One");
         pl.add_track(track);
-        let removed = pl.remove_track_by_video_id("vid1");
+        let removed = pl.remove_track_by_id("vid1");
         assert!(removed.is_some());
         assert!(
             pl.tracks.is_empty(),
@@ -2421,7 +2421,7 @@ mod tests {
     #[test]
     fn remove_track_from_empty_playlist_returns_none() {
         let mut pl = make_playlist("Empty");
-        let result = pl.remove_track_by_video_id("vid1");
+        let result = pl.remove_track_by_id("vid1");
         assert!(
             result.is_none(),
             "removing from empty playlist should return None"
@@ -2435,11 +2435,7 @@ mod tests {
             pl.add_track(make_track(&format!("vid{i}"), &format!("Track {i}")));
         }
         for (i, track) in pl.tracks.iter().enumerate() {
-            assert_eq!(
-                track.video_id,
-                format!("vid{i}"),
-                "track order must be preserved"
-            );
+            assert_eq!(track.id, format!("vid{i}"), "track order must be preserved");
         }
     }
 
@@ -2673,7 +2669,7 @@ mod tests {
             .as_ref()
             .expect("playing session should survive switch");
         assert_eq!(session.path, gamma_path, "playing session path unchanged");
-        assert_eq!(session.track().video_id, "g1", "playing track unchanged");
+        assert_eq!(session.track().id, "g1", "playing track unchanged");
         assert_eq!(app.playlist.name, "Beta", "displayed playlist did switch");
     }
 
@@ -2768,7 +2764,7 @@ mod tests {
         let loaded = crate::playlist::Playlist::load(&new_path).expect("load renamed");
         assert_eq!(loaded.name, "Renamed");
         assert_eq!(loaded.tracks.len(), 1);
-        assert_eq!(loaded.tracks[0].video_id, "vid1");
+        assert_eq!(loaded.tracks[0].id, "vid1");
     }
 
     #[test]
@@ -3304,8 +3300,8 @@ mod tests {
         let loaded = crate::playlist::Playlist::load(&path).expect("load");
         assert_eq!(loaded.name, "RoundTrip");
         assert_eq!(loaded.tracks.len(), 2);
-        assert_eq!(loaded.tracks[0].video_id, "v1");
-        assert_eq!(loaded.tracks[1].video_id, "v2");
+        assert_eq!(loaded.tracks[0].id, "v1");
+        assert_eq!(loaded.tracks[1].id, "v2");
     }
 
     // --- Verify URL input playlist selection works with 1 and many playlists ---
@@ -3388,7 +3384,7 @@ mod tests {
         pl.add_track(make_track("only", "Only Track"));
         pl.current_track = Some("only".to_string());
 
-        let removed = pl.remove_track_by_video_id("only");
+        let removed = pl.remove_track_by_id("only");
 
         assert!(removed.is_some(), "should return the removed track");
         assert!(
@@ -3419,7 +3415,7 @@ title = "Legacy Track"
 artist = "Old Artist"
 channel = "OldChannel"
 duration = 240
-video_id = "abc123"
+id = "abc123"
 cache_status = "streaming"
 last_position = 0
 added_at = "2025-01-01T12:00:00Z"
@@ -3437,7 +3433,7 @@ added_at = "2025-01-01T12:00:00Z"
         let pl = result.unwrap();
         assert_eq!(pl.name, "LegacyPlaylist");
         assert_eq!(pl.tracks.len(), 1);
-        assert_eq!(pl.tracks[0].video_id, "abc123");
+        assert_eq!(pl.tracks[0].id, "abc123");
         assert_eq!(pl.tracks[0].title, "Legacy Track");
     }
 
@@ -3457,7 +3453,7 @@ title = "Minimal Track"
 artist = "Minimal Artist"
 channel = "MinChannel"
 duration = 120
-video_id = "min001"
+id = "min001"
 cache_status = "streaming"
 last_position = 0
 added_at = "2025-06-01T08:00:00Z"
@@ -3586,7 +3582,7 @@ tracks = []
         let fake_file = dir.path().join("vid1.m4a");
         std::fs::write(&fake_file, b"audio data").expect("write fake audio");
         app.handle_task_msg(TaskMsg::DownloadDone {
-            video_id: "vid1".to_string(),
+            id: "vid1".to_string(),
             file: fake_file.clone(),
         });
 
@@ -3607,7 +3603,7 @@ tracks = []
         let track = rock_reloaded
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(
             track.cache_status,
@@ -3643,7 +3639,7 @@ tracks = []
         let fake_file = dir.path().join("vid1.m4a");
         std::fs::write(&fake_file, b"audio data").expect("write fake audio");
         app.handle_task_msg(TaskMsg::DownloadDone {
-            video_id: "vid1".to_string(),
+            id: "vid1".to_string(),
             file: fake_file.clone(),
         });
 
@@ -3651,7 +3647,7 @@ tracks = []
             .playlist
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(
             track.cache_status,
@@ -3702,9 +3698,10 @@ tracks = []
             target_path: None,
         });
 
-        // Track B must have been added...
+        // Track B must have been added, under the library id minted from its
+        // source domain and platform id...
         assert!(
-            app.playlist.tracks.iter().any(|t| t.video_id == "B"),
+            app.playlist.tracks.iter().any(|t| t.id == "youtube:B"),
             "track B should be added"
         );
         // ...but current_track must remain unchanged (still A), and playback
@@ -3759,7 +3756,7 @@ tracks = []
         let fake_file = dir.path().join("B.m4a");
         std::fs::write(&fake_file, b"audio data").expect("write fake audio");
         app.handle_task_msg(TaskMsg::DownloadDone {
-            video_id: "B".to_string(),
+            id: "youtube:B".to_string(),
             file: fake_file.clone(),
         });
 
@@ -3782,7 +3779,7 @@ tracks = []
             .playlist
             .tracks
             .iter()
-            .find(|t| t.video_id == "B")
+            .find(|t| t.id == "youtube:B")
             .expect("track B");
         assert_eq!(track_b.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track_b.file.as_deref(), Some(fake_file.as_path()));
@@ -3845,14 +3842,14 @@ tracks = []
         let track = rock_reloaded
             .tracks
             .iter()
-            .find(|t| t.video_id == "vidX")
+            .find(|t| t.id == "youtube:vidX")
             .expect("vidX added to Rock");
         assert_eq!(track.title, "Track X");
 
         // download_targets must be populated so DownloadDone patches Rock.toml,
         // not the active playlist.
         assert_eq!(
-            app.download_targets.get("vidX"),
+            app.download_targets.get("youtube:vidX"),
             Some(&rock_path),
             "download_targets must map vidX to the target playlist's path"
         );
@@ -3892,7 +3889,7 @@ tracks = []
             .playlist
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
@@ -3903,7 +3900,7 @@ tracks = []
         let track = reloaded
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
@@ -3950,7 +3947,7 @@ tracks = []
         let track = reloaded
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
@@ -3971,7 +3968,7 @@ tracks = []
         let available = vec![("Active".to_string(), path.clone())];
         let mut app = App::new(pl, config, available, path.clone());
 
-        // Patch a video_id that doesn't exist — must be a silent no-op, no panic.
+        // Patch a id that doesn't exist — must be a silent no-op, no panic.
         app.patch_and_save_playlist(&path, "does-not-exist", |t| {
             t.cache_status = crate::playlist::CacheStatus::Cached;
         });
@@ -3980,12 +3977,12 @@ tracks = []
             .playlist
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(
             track.cache_status,
             crate::playlist::CacheStatus::Streaming,
-            "existing track must be untouched when the patched video_id doesn't exist"
+            "existing track must be untouched when the patched id doesn't exist"
         );
     }
 
@@ -4019,7 +4016,7 @@ tracks = []
         let track = reloaded
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(
             track.cache_status,
@@ -4079,7 +4076,7 @@ tracks = []
         // `app.playlist.current_track` (which points at nothing relevant to
         // Playing.toml since the displayed playlist is Browsing).
         app.handle_task_msg(TaskMsg::DownloadDone {
-            video_id: "vid1".to_string(),
+            id: "vid1".to_string(),
             file: fake_file.clone(),
         });
 
@@ -4089,7 +4086,7 @@ tracks = []
         let track = reloaded
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(track.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(track.file.as_deref(), Some(fake_file.as_path()));
@@ -4126,7 +4123,7 @@ tracks = []
         playing_pl.save(&playing_path).expect("save playing");
 
         // ...but the user is browsing a *different* playlist with a
-        // coincidentally-matching video_id at the cursor, to prove speed
+        // coincidentally-matching id at the cursor, to prove speed
         // adjustment is not keyed off the displayed playlist's cursor.
         let browsing_path = dir.path().join("Browsing.toml");
         let mut browsing_pl = make_playlist("Browsing");
@@ -4154,7 +4151,7 @@ tracks = []
             .playlist
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(
             displayed_track.speed, None,
@@ -4177,7 +4174,7 @@ tracks = []
         let track = reloaded_playing
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert!(
             track.speed.is_some(),
@@ -4189,7 +4186,7 @@ tracks = []
         let track = reloaded_browsing
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(
             track.speed, None,
@@ -4222,7 +4219,7 @@ tracks = []
             .playlist
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(
             track.speed, None,
@@ -4259,7 +4256,7 @@ tracks = []
             .playlist
             .tracks
             .iter()
-            .find(|t| t.video_id == "vid1")
+            .find(|t| t.id == "vid1")
             .expect("vid1");
         assert_eq!(track.speed, Some(3.0), "speed must clamp at 3.0");
     }
@@ -4300,7 +4297,7 @@ tracks = []
         use crate::tui::PlayingSession;
 
         // Playing session lives in "Alpha.toml" and its track happens to
-        // share a video_id with a track in the displayed "Beta" playlist.
+        // share a id with a track in the displayed "Beta" playlist.
         let mut alpha = make_playlist("Alpha");
         alpha.tracks.push(make_track("shared", "Alpha Track"));
         let alpha_path = std::path::PathBuf::from("/fake/Alpha.toml");
@@ -4317,7 +4314,7 @@ tracks = []
 
         assert!(
             !row_is_playing(&app, "shared"),
-            "must not highlight a row just because the video_id matches across different playlist files"
+            "must not highlight a row just because the id matches across different playlist files"
         );
     }
 
@@ -4535,10 +4532,10 @@ tracks = []
         });
 
         // A different playlist (Beta) happens to also contain a track with
-        // the same video_id — this must NOT count as "the playing track".
+        // the same id — this must NOT count as "the playing track".
         assert!(
             !app.is_playing_track(&std::path::PathBuf::from("/fake/Beta.toml"), "shared"),
-            "matching video_id across different playlist files must not count as identity match"
+            "matching id across different playlist files must not count as identity match"
         );
     }
 
@@ -4547,11 +4544,11 @@ tracks = []
         use crate::tui::input::handle_confirm_delete;
         use crate::tui::{InputMode, PlayingSession};
 
-        // The actually-playing track lives in "Playing.toml" with video_id
+        // The actually-playing track lives in "Playing.toml" with id
         // "shared". The displayed playlist ("Browsing") coincidentally has a
         // *different* track that also happens to use the id "shared" (e.g.
         // a hypothetical id collision) — deleting it must not stop playback,
-        // since identity requires both path and video_id to match.
+        // since identity requires both path and id to match.
         let mut app = make_app_with_playlists("Browsing", &["Browsing", "Playing"]);
         app.playlist
             .tracks
@@ -4575,7 +4572,7 @@ tracks = []
 
         assert!(
             app.playing.is_some(),
-            "playing session in a different playlist must survive deleting a colliding video_id elsewhere"
+            "playing session in a different playlist must survive deleting a colliding id elsewhere"
         );
         assert!(
             app.playlist.tracks.is_empty(),
@@ -4635,7 +4632,7 @@ tracks = []
         let mut app = crate::tui::App::new(browsing_pl, config, available, browsing_path.clone());
 
         // The track actually playing lives in a wholly different, unrelated
-        // playlist file and just happens to share the "shared" video_id.
+        // playlist file and just happens to share the "shared" id.
         let mut playing_pl = make_playlist("Playing");
         playing_pl
             .tracks
@@ -4840,7 +4837,7 @@ tracks = []
         let fake_file = dir.path().join("vid1.m4a");
         std::fs::write(&fake_file, b"audio data").expect("write fake audio");
         app.handle_task_msg(TaskMsg::DownloadDone {
-            video_id: "vid1".to_string(),
+            id: "vid1".to_string(),
             file: fake_file.clone(),
         });
 
@@ -4869,7 +4866,7 @@ tracks = []
         app.download_progress.insert("vid2".to_string(), 60.0);
 
         app.handle_task_msg(TaskMsg::DownloadError {
-            video_id: "vid1".to_string(),
+            id: "vid1".to_string(),
             err: "boom".to_string(),
         });
 
@@ -5122,7 +5119,7 @@ tracks = []
         app.request_playback(0, None);
 
         // The displayed playlist must be untouched by the leaving-track save.
-        assert_eq!(app.playlist.tracks[0].video_id, "B");
+        assert_eq!(app.playlist.tracks[0].id, "B");
 
         let reloaded = crate::playlist::Playlist::load(&elsewhere_path).expect("reload elsewhere");
         assert_eq!(
@@ -5340,7 +5337,7 @@ tracks = []
         app.stop_player();
 
         app.handle_task_msg(TaskMsg::PlayerReady {
-            video_id: "vid1".to_string(),
+            id: "vid1".to_string(),
             player: Box::new(make_dead_player(dead_player_socket("ready-stale"))),
             generation: stale,
         });
@@ -5748,7 +5745,7 @@ tracks = []
         let a = on_disk
             .tracks
             .iter()
-            .find(|t| t.video_id == "A")
+            .find(|t| t.id == "A")
             .expect("track A");
         assert_eq!(
             a.last_position, 77,
@@ -5758,23 +5755,25 @@ tracks = []
 
     // ── Phase 2: duplicate adds ─────────────────────────────────────────────
 
-    fn meta_for(video_id: &str, title: &str) -> crate::ytdlp::TrackMeta {
+    fn meta_for(id: &str, title: &str) -> crate::ytdlp::TrackMeta {
         crate::ytdlp::TrackMeta {
             title: title.to_string(),
             artist: "Artist".to_string(),
             channel: "Channel".to_string(),
             duration: 100,
-            video_id: video_id.to_string(),
+            video_id: id.to_string(),
             source: "youtube.com".to_string(),
         }
     }
 
     #[tokio::test]
-    async fn meta_ready_rejects_a_duplicate_video_id_in_the_displayed_playlist() {
+    async fn meta_ready_rejects_a_duplicate_id_in_the_displayed_playlist() {
         use crate::tui::TaskMsg;
 
         let mut pl = make_playlist("Active");
-        pl.add_track(make_track("A", "Track A"));
+        // The id `meta_for("A", ..)` would mint, so the row already present is
+        // genuinely the same track.
+        pl.add_track(make_track("youtube:A", "Track A"));
         let (_dir, _path, mut app) = app_on_disk(pl);
 
         app.handle_task_msg(TaskMsg::MetaReady {
@@ -5786,7 +5785,7 @@ tracks = []
         assert_eq!(
             app.playlist.tracks.len(),
             1,
-            "the same video_id must not be added twice"
+            "the same id must not be added twice"
         );
         assert!(
             app.downloading.is_empty(),
@@ -5796,7 +5795,7 @@ tracks = []
     }
 
     #[tokio::test]
-    async fn meta_ready_rejects_a_duplicate_video_id_in_a_target_playlist() {
+    async fn meta_ready_rejects_a_duplicate_id_in_a_target_playlist() {
         use crate::tui::{App, TaskMsg};
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5807,7 +5806,7 @@ tracks = []
 
         let rock_path = dir.path().join("Rock.toml");
         let mut rock = make_playlist("Rock");
-        rock.add_track(make_track("A", "Track A"));
+        rock.add_track(make_track("youtube:A", "Track A"));
         rock.save(&rock_path).expect("save rock");
 
         let available = vec![
@@ -5883,7 +5882,7 @@ tracks = []
             target_path: None,
         });
         app.handle_task_msg(TaskMsg::DownloadError {
-            video_id: "A".to_string(),
+            id: "youtube:A".to_string(),
             err: "network unreachable".to_string(),
         });
 
@@ -6104,7 +6103,7 @@ tracks = []
         let audio = dir.path().join("A.opus");
         std::fs::write(&audio, b"audio").expect("write audio");
         app.handle_task_msg(TaskMsg::DownloadDone {
-            video_id: "A".to_string(),
+            id: "A".to_string(),
             file: audio.clone(),
         });
 
@@ -6112,7 +6111,7 @@ tracks = []
         let a = renamed
             .tracks
             .iter()
-            .find(|t| t.video_id == "A")
+            .find(|t| t.id == "A")
             .expect("track A");
         assert_eq!(a.cache_status, crate::playlist::CacheStatus::Cached);
         assert_eq!(a.file.as_deref(), Some(audio.as_path()));
@@ -6206,10 +6205,10 @@ tracks = []
 
     // ── Phase 2: shared cached files ────────────────────────────────────────
 
-    /// Two playlists on disk, both holding a `Cached` row for `video_id` backed
+    /// Two playlists on disk, both holding a `Cached` row for `id` backed
     /// by the same file. Returns (dir, displayed path, other path, audio file).
     fn two_playlists_sharing_a_file(
-        video_id: &str,
+        id: &str,
         also_in_other: bool,
     ) -> (
         tempfile::TempDir,
@@ -6221,10 +6220,10 @@ tracks = []
         use crate::tui::App;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let audio = dir.path().join(format!("{video_id}.opus"));
+        let audio = dir.path().join(format!("{id}.opus"));
         std::fs::write(&audio, b"audio data").expect("write audio");
 
-        let mut cached = make_track(video_id, "Shared Track");
+        let mut cached = make_track(id, "Shared Track");
         cached.cache_status = crate::playlist::CacheStatus::Cached;
         cached.file = Some(audio.clone());
 
@@ -6299,9 +6298,9 @@ tracks = []
     }
 
     #[test]
-    fn video_id_referenced_elsewhere_reports_a_duplicate_row_in_the_displayed_playlist() {
+    fn platform_id_referenced_elsewhere_reports_a_duplicate_row_in_the_displayed_playlist() {
         // Playlists written before duplicate rejection landed may still hold two
-        // rows sharing a video_id; deleting one must not unlink the other's file.
+        // rows sharing a id; deleting one must not unlink the other's file.
         let mut pl = make_playlist("Active");
         pl.add_track(make_track("A", "First copy"));
         pl.add_track(make_track("A", "Second copy"));
@@ -6310,13 +6309,13 @@ tracks = []
         app.playlist.tracks.remove(0);
 
         assert!(
-            app.video_id_referenced_elsewhere("A"),
+            app.platform_id_referenced_elsewhere("A"),
             "the surviving duplicate row still needs the file"
         );
     }
 
     #[test]
-    fn video_id_referenced_elsewhere_keeps_the_file_when_a_playlist_cannot_be_read() {
+    fn platform_id_referenced_elsewhere_keeps_the_file_when_a_playlist_cannot_be_read() {
         use crate::tui::App;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6339,7 +6338,7 @@ tracks = []
         );
 
         assert!(
-            app.video_id_referenced_elsewhere("A"),
+            app.platform_id_referenced_elsewhere("A"),
             "an unreadable playlist must be treated as possibly holding the track"
         );
     }
@@ -6578,7 +6577,7 @@ tracks = []
     async fn leaving_a_tracks_twin_in_another_playlist_still_saves_its_position() {
         // The same track can live in two playlists. Starting playlist B's copy
         // while playlist A's copy plays *is* leaving a track, so A's row has to
-        // record where it got to — comparing `video_id` alone said "same track,
+        // record where it got to — comparing `id` alone said "same track,
         // nothing to save" and silently dropped it.
         let dir = tempfile::tempdir().expect("tempdir");
 
@@ -7361,7 +7360,7 @@ tracks = []
         app.playlist.tracks.push(make_track("A", "Track A"));
 
         app.handle_task_msg(TaskMsg::DownloadError {
-            video_id: "A".to_string(),
+            id: "A".to_string(),
             err: "yt-dlp download exited with status exit status: 1: ERROR: unable to download video data: HTTP Error 403: Forbidden".to_string(),
         });
 
@@ -7379,7 +7378,7 @@ tracks = []
         app.playlist.tracks.push(make_track("A", "Track A"));
 
         app.handle_task_msg(TaskMsg::DownloadError {
-            video_id: "A".to_string(),
+            id: "A".to_string(),
             err: "network unreachable".to_string(),
         });
 
@@ -7396,7 +7395,7 @@ tracks = []
         let mut app = make_app_with_playlists("Source", &["Source"]);
 
         app.handle_task_msg(TaskMsg::PlayerError {
-            video_id: "A".to_string(),
+            id: "A".to_string(),
             err: "WARNING: Only images are available for download. use --list-formats to see them"
                 .to_string(),
         });

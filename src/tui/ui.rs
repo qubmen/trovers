@@ -185,14 +185,14 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
 // ── Track table ───────────────────────────────────────────────────────────
 
-/// Whether the track table row for `video_id` should show the `▶`
+/// Whether the track table row for `id` should show the `▶`
 /// highlight — true only when the playing session's track actually belongs
 /// to the currently *displayed* playlist file, not just when the id happens
 /// to match (ids can collide across playlist files).
-pub(crate) fn row_is_playing(app: &App, video_id: &str) -> bool {
+pub(crate) fn row_is_playing(app: &App, id: &str) -> bool {
     app.playing
         .as_ref()
-        .is_some_and(|p| p.path == app.playlist_path && p.track().video_id == video_id)
+        .is_some_and(|p| p.path == app.playlist_path && p.track().id == id)
 }
 
 fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -231,7 +231,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .filter_map(|cursor| {
             let track_idx = app.track_index_at(cursor)?;
             let track = app.playlist.tracks.get(track_idx)?;
-            let is_playing = row_is_playing(app, &track.video_id);
+            let is_playing = row_is_playing(app, &track.id);
             let is_selected = cursor == app.selected;
 
             let play_icon = if is_playing { "▶" } else { " " };
@@ -240,7 +240,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
             // every other cell in the row. `Cached`/`Streaming` stay that way
             // since neither is actionable; `Downloading` and `Failed` get a
             // fixed color so they read as a status regardless of selection.
-            let (status_icon, status_color) = if app.downloading.contains(&track.video_id) {
+            let (status_icon, status_color) = if app.downloading.contains(&track.id) {
                 ("⟳", Some(GOLD))
             } else {
                 match track.cache_status {
@@ -532,15 +532,10 @@ fn render_playback_bar(frame: &mut Frame, app: &App, area: Rect) {
     let dur_str = format_duration(track.duration);
     let vol_str = format!("♪ {}%", app.config.default_volume);
 
-    let track_progress = || {
-        app.download_progress
-            .get(&track.video_id)
-            .copied()
-            .unwrap_or(0.0) as f64
-            / 100.0
-    };
+    let track_progress =
+        || app.download_progress.get(&track.id).copied().unwrap_or(0.0) as f64 / 100.0;
 
-    let cache_state = if app.downloading.contains(&track.video_id) {
+    let cache_state = if app.downloading.contains(&track.id) {
         CacheState::Downloading(track_progress())
     } else {
         match track.cache_status {

@@ -34,7 +34,9 @@ pub struct Track {
     pub artist: String,
     pub channel: String,
     pub duration: u64,
-    pub video_id: String,
+    /// Library id — `<source-slug>:<platform-id>`, the name of this track's
+    /// document and the only thing playlists store. See `crate::library`.
+    pub id: String,
     pub cache_status: CacheStatus,
     pub file: Option<PathBuf>,
     pub last_position: u64,
@@ -42,6 +44,15 @@ pub struct Track {
     pub user_title: Option<String>,
     pub user_artist: Option<String>,
     pub added_at: DateTime<Utc>,
+}
+
+impl Track {
+    /// The platform's own id for this track — what the audio cache filename and
+    /// yt-dlp are keyed by. Derived from `id` so there is no second field to
+    /// fall out of step with it.
+    pub fn platform_id(&self) -> &str {
+        crate::library::platform_id_of(&self.id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,13 +175,13 @@ impl Playlist {
             .with_context(|| format!("failed to delete playlist at {}", path.display()))
     }
 
-    /// Remove a track by video_id and return it.
-    /// Returns `None` if no track with the given video_id exists.
-    pub fn remove_track_by_video_id(&mut self, video_id: &str) -> Option<Track> {
-        if let Some(idx) = self.tracks.iter().position(|t| t.video_id == video_id) {
+    /// Remove a track by library id and return it.
+    /// Returns `None` if no track with the given id exists.
+    pub fn remove_track_by_id(&mut self, id: &str) -> Option<Track> {
+        if let Some(idx) = self.tracks.iter().position(|t| t.id == id) {
             let track = self.tracks.remove(idx);
             // Clear current_track pointer if it pointed to the removed track
-            if self.current_track.as_deref() == Some(video_id) {
+            if self.current_track.as_deref() == Some(id) {
                 self.current_track = None;
             }
             Some(track)

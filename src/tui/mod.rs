@@ -6,6 +6,7 @@ mod ui_test;
 
 use crate::cache;
 use crate::config::{AudioQuality, Config};
+use crate::library;
 use crate::player::{self, Player};
 use crate::playlist::{self, CacheStatus, LoopMode, Playlist, Track};
 use crate::ytdlp::{self, TrackMeta};
@@ -83,23 +84,23 @@ pub enum TaskMsg {
         err: String,
     },
     DownloadDone {
-        video_id: String,
+        id: String,
         file: PathBuf,
     },
     DownloadError {
-        video_id: String,
+        id: String,
         err: String,
     },
     /// A freshly spawned mpv is ready. `generation` identifies which playback
     /// request it belongs to, so a player that finished starting *after* the
     /// user already moved on is discarded instead of hijacking the new track.
     PlayerReady {
-        video_id: String,
+        id: String,
         player: Box<Player>,
         generation: u64,
     },
     PlayerError {
-        video_id: String,
+        id: String,
         err: String,
     },
     /// mpv exited on its own — it reached the end of the track, or crashed.
@@ -221,7 +222,7 @@ pub struct App {
     // Playback state
     pub position: f64,
     /// Per-track download progress percentage (0.0-100.0), keyed by
-    /// `video_id`. A `HashMap` (rather than a single global `f32`) so
+    /// `id`. A `HashMap` (rather than a single global `f32`) so
     /// multiple concurrent downloads never cross-contaminate each other's
     /// displayed percentage.
     pub download_progress: HashMap<String, f32>,
@@ -232,7 +233,7 @@ pub struct App {
 
     // Tracks being downloaded
     pub downloading: HashSet<String>,
-    // Maps video_id → target playlist path for tracks downloading into a non-active playlist
+    // Maps id → target playlist path for tracks downloading into a non-active playlist
     pub download_targets: HashMap<String, PathBuf>,
     // In-flight metadata fetches
     pub pending_fetches: usize,
@@ -318,20 +319,20 @@ impl App {
     /// See `self.playing` (`PlayingSession`) for that.
     pub fn current_track_index(&self) -> Option<usize> {
         let id = self.playlist.current_track.as_deref()?;
-        self.playlist.tracks.iter().position(|t| t.video_id == id)
+        self.playlist.tracks.iter().position(|t| t.id == id)
     }
 
-    /// Returns true if the track identified by `(path, video_id)` is
+    /// Returns true if the track identified by `(path, id)` is
     /// literally the one actually driving playback right now — i.e.
     /// `self.playing` points at a session whose playlist file is `path` and
-    /// whose current track's `video_id` matches. Used to guard delete/move
+    /// whose current track's `id` matches. Used to guard delete/move
     /// operations so they only stop playback when the track being removed is
     /// truly the one playing, not just any track that happens to share a
-    /// `video_id` with an unrelated playing session in a different playlist.
-    pub fn is_playing_track(&self, path: &Path, video_id: &str) -> bool {
+    /// `id` with an unrelated playing session in a different playlist.
+    pub fn is_playing_track(&self, path: &Path, id: &str) -> bool {
         self.playing
             .as_ref()
-            .is_some_and(|p| p.path == path && p.track().video_id == video_id)
+            .is_some_and(|p| p.path == path && p.track().id == id)
     }
 
     /// Persist whatever mutation was just made (via `playing_track_mut()`)
@@ -377,11 +378,8 @@ impl App {
     pub fn playing_track(&self) -> Option<&Track> {
         let session = self.playing.as_ref()?;
         if session.path == self.playlist_path {
-            let video_id = &session.track().video_id;
-            self.playlist
-                .tracks
-                .iter()
-                .find(|t| t.video_id == *video_id)
+            let id = &session.track().id;
+            self.playlist.tracks.iter().find(|t| t.id == *id)
         } else {
             Some(session.track())
         }
@@ -392,17 +390,14 @@ impl App {
     pub fn playing_track_mut(&mut self) -> Option<&mut Track> {
         let path_matches = self.playing.as_ref()?.path == self.playlist_path;
         if path_matches {
-            let video_id = self.playing.as_ref().unwrap().track().video_id.clone();
-            self.playlist
-                .tracks
-                .iter_mut()
-                .find(|t| t.video_id == video_id)
+            let id = self.playing.as_ref().unwrap().track().id.clone();
+            self.playlist.tracks.iter_mut().find(|t| t.id == id)
         } else {
             self.playing.as_mut().map(|p| p.track_mut())
         }
     }
 
-    /// Kick off a background download for `video_id` and record which
+    /// Kick off a background download for `id` and record which
     /// playlist file it belongs to, so `DownloadDone`/`DownloadError` patch
     /// the right row even if the user has since switched to browsing a
     /// different playlist. Shared by the add-track flow and the manual
@@ -412,26 +407,29 @@ impl App {
     ///
     /// Retries on failure (`ytdlp::download_with_retries`), so a track only
     /// reaches `Failed` after every attempt has been exhausted.
-    fn start_download(&mut self, owning_path: PathBuf, video_id: String, url: String) {
-        self.downloading.insert(video_id.clone());
-        self.download_targets.insert(video_id.clone(), owning_path);
+    fn start_download(&mut self, owning_path: PathBuf, id: String, url: String) {
+        self.downloading.insert(id.clone());
+        self.download_targets.insert(id.clone(), owning_path);
 
         let task_tx = self.task_tx.clone();
         let dl_tx = self.download_tx.clone();
         let quality = self.config.audio_quality.clone();
         let audio_dir = cache::audio_dir();
-        let vid = video_id.clone();
+        // The cached file is named after the *platform's* id, not the library
+        // id — that is what keeps audio downloaded by earlier versions valid.
+        // Progress, meanwhile, is keyed by the library id, because that is what
+        // the rows on screen are keyed by.
+        let platform_id = library::platform_id_of(&id).to_string();
         tokio::spawn(async move {
-            match ytdlp::download_with_retries(&url, &audio_dir, &vid, &quality, dl_tx).await {
+            match ytdlp::download_with_retries(&url, &audio_dir, &platform_id, &id, &quality, dl_tx)
+                .await
+            {
                 Ok(file) => {
-                    let _ = task_tx.send(TaskMsg::DownloadDone {
-                        video_id: vid,
-                        file,
-                    });
+                    let _ = task_tx.send(TaskMsg::DownloadDone { id, file });
                 }
                 Err(e) => {
                     let _ = task_tx.send(TaskMsg::DownloadError {
-                        video_id: vid,
+                        id,
                         err: e.to_string(),
                     });
                 }
@@ -447,8 +445,8 @@ impl App {
         let Some(track) = self.playlist.tracks.get(idx) else {
             return;
         };
-        let video_id = track.video_id.clone();
-        if self.downloading.contains(&video_id) {
+        let id = track.id.clone();
+        if self.downloading.contains(&id) {
             self.set_status("Already downloading");
             return;
         }
@@ -456,14 +454,14 @@ impl App {
         let title = track.title.clone();
         let owning_path = self.playlist_path.clone();
 
-        self.patch_and_save_playlist(&owning_path, &video_id, |t| {
+        self.patch_and_save_playlist(&owning_path, &id, |t| {
             t.cache_status = CacheStatus::Downloading;
         });
-        self.start_download(owning_path, video_id, url);
+        self.start_download(owning_path, id, url);
         self.set_status(format!("Recaching: {title}"));
     }
 
-    /// Forget every trace of an in-flight download for `video_id`.
+    /// Forget every trace of an in-flight download for `id`.
     ///
     /// Called when the row the download was going to fill disappears (track
     /// deleted, or its whole playlist deleted). Without it the `⟳` spinner and
@@ -473,10 +471,10 @@ impl App {
     /// so `DownloadDone` can still arrive afterwards. `patch_and_save_playlist`
     /// then finds no matching row and logs a warning, which is the intended
     /// no-op.
-    pub fn clear_download_state(&mut self, video_id: &str) {
-        self.downloading.remove(video_id);
-        self.download_progress.remove(video_id);
-        self.download_targets.remove(video_id);
+    pub fn clear_download_state(&mut self, id: &str) {
+        self.downloading.remove(id);
+        self.download_progress.remove(id);
+        self.download_targets.remove(id);
     }
 
     /// Drop the download state of every track whose target playlist is `path`,
@@ -509,36 +507,42 @@ impl App {
         }
     }
 
-    /// Re-point the in-flight download for a single `video_id` at `new_path`,
+    /// Re-point the in-flight download for a single `id` at `new_path`,
     /// for when that one track's row moves to another playlist. No-op when
     /// nothing is downloading for it.
-    pub fn retarget_download(&mut self, video_id: &str, new_path: &Path) {
-        if let Some(target) = self.download_targets.get_mut(video_id) {
+    pub fn retarget_download(&mut self, id: &str, new_path: &Path) {
+        if let Some(target) = self.download_targets.get_mut(id) {
             *target = new_path.to_path_buf();
         }
     }
 
-    /// True when the cached audio for `video_id` is still referenced by some
+    /// True when the cached audio for `platform_id` is still referenced by some
     /// playlist other than the displayed one — or by a duplicate row within it —
     /// and so must not be deleted.
     ///
-    /// The audio cache is keyed by `video_id` alone, so one file backs the track
-    /// in *every* playlist holding it. Deleting a track used to unlink that file
+    /// Scoped to the *platform* id, not the library id, because that is what the
+    /// audio cache is keyed by: one `<platform-id>.opus` backs the track in every
+    /// playlist holding it. Deleting a track used to unlink that file
     /// unconditionally, silently downgrading every other playlist's copy to
     /// `streaming`.
     ///
     /// Deliberately answers "yes" whenever a playlist cannot be read: a stray
     /// cached file costs disk, whereas another playlist's deleted audio costs a
     /// re-download.
-    pub fn video_id_referenced_elsewhere(&self, video_id: &str) -> bool {
-        if self.playlist.tracks.iter().any(|t| t.video_id == video_id) {
+    pub fn platform_id_referenced_elsewhere(&self, platform_id: &str) -> bool {
+        if self
+            .playlist
+            .tracks
+            .iter()
+            .any(|t| t.platform_id() == platform_id)
+        {
             return true;
         }
         self.available_playlists
             .iter()
             .filter(|(_, path)| path != &self.playlist_path)
             .any(|(_, path)| match Playlist::load(path) {
-                Ok(pl) => pl.tracks.iter().any(|t| t.video_id == video_id),
+                Ok(pl) => pl.tracks.iter().any(|t| t.platform_id() == platform_id),
                 Err(e) => {
                     warn!(err = %e, path = %path.display(), "could not check playlist for shared cache file; keeping it");
                     true
@@ -730,7 +734,7 @@ impl App {
         let Some(track) = session.playlist.tracks.get(idx) else {
             return;
         };
-        let video_id = track.video_id.clone();
+        let id = track.id.clone();
         let start_pos = input::resume_start_pos(track);
         let speed = track
             .speed
@@ -743,13 +747,13 @@ impl App {
 
         if let Some(session) = self.playing.as_mut() {
             session.track_idx = idx;
-            session.playlist.current_track = Some(video_id.clone());
+            session.playlist.current_track = Some(id.clone());
         }
         self.is_paused = false;
         self.position = start_pos.unwrap_or(0.0);
         let _ = self.pos_tx.send(self.position);
         self.save_playing_session_playlist();
-        self.spawn_player_for(video_id, source, speed, start_pos);
+        self.spawn_player_for(id, source, speed, start_pos);
     }
 
     /// Start playback of the track at Vec index `idx` within the displayed
@@ -758,11 +762,11 @@ impl App {
     /// from stream to local file mid-play; pass `None` for a fresh start).
     pub fn request_playback(&mut self, idx: usize, start_pos: Option<f64>) {
         // Collect all track data before any mutations (borrow checker)
-        let (video_id, speed, source) = {
+        let (id, speed, source) = {
             let Some(track) = self.playlist.tracks.get(idx) else {
                 return;
             };
-            let video_id = track.video_id.clone();
+            let id = track.id.clone();
             let speed = track
                 .speed
                 .or(self.playlist.default_speed)
@@ -771,7 +775,7 @@ impl App {
                 (CacheStatus::Cached, Some(file)) => PlaySource::File(file.clone()),
                 _ => PlaySource::Stream(track.url.clone()),
             };
-            (video_id, speed, source)
+            (id, speed, source)
         };
 
         // Save position of the track we're leaving (not applicable when switching
@@ -780,13 +784,13 @@ impl App {
         // was browsing elsewhere while it played) — route the write through
         // whichever copy is the source of truth for that track's identity.
         if let Some(session) = self.playing.as_ref() {
-            // Identity is `(path, video_id)`, not `video_id` alone: the same
+            // Identity is `(path, id)`, not `id` alone: the same
             // track can sit in two playlists, and starting playlist B's copy
             // while playlist A's copy plays *is* leaving a track, so its
             // position still has to be written. Comparing ids alone silently
             // dropped that position.
-            let leaving = (session.path.clone(), session.track().video_id.clone());
-            if leaving != (self.playlist_path.clone(), video_id.clone()) {
+            let leaving = (session.path.clone(), session.track().id.clone());
+            if leaving != (self.playlist_path.clone(), id.clone()) {
                 let pos = self.position as u64;
                 if let Some(t) = self.playing_track_mut() {
                     t.last_position = pos;
@@ -809,7 +813,7 @@ impl App {
         // restore the cursor on load. Since `idx` always indexes into
         // `self.playlist` here, the playing track does live in the
         // displayed playlist, so record it.
-        self.playlist.current_track = Some(video_id.clone());
+        self.playlist.current_track = Some(id.clone());
         self.is_paused = false;
         // Set the position to wherever this player is actually about to start.
         //
@@ -823,10 +827,10 @@ impl App {
         self.position = start_pos.unwrap_or(0.0);
         let _ = self.pos_tx.send(self.position);
 
-        self.spawn_player_for(video_id, source, speed, start_pos);
+        self.spawn_player_for(id, source, speed, start_pos);
     }
 
-    /// If `(owning_path, video_id)` identifies the track actually driving
+    /// If `(owning_path, id)` identifies the track actually driving
     /// playback right now (per `self.playing`, independent of what's
     /// displayed), sync its cache status/file into the playing session's own
     /// view, and — if a player is actually running — spawn a fresh mpv
@@ -834,12 +838,12 @@ impl App {
     /// current live position. This is the stream→local-file hot-switch
     /// triggered by `TaskMsg::DownloadDone`.
     ///
-    /// Identity is checked as `(path, video_id)`, not `video_id` alone —
+    /// Identity is checked as `(path, id)`, not `id` alone —
     /// matching `is_playing_track` — so a download for a track that merely
-    /// shares a `video_id` with the actually-playing track in a *different*
+    /// shares a `id` with the actually-playing track in a *different*
     /// playlist file never hijacks playback.
-    fn hot_switch_to_local_file(&mut self, owning_path: &Path, video_id: &str, file: PathBuf) {
-        if !self.is_playing_track(owning_path, video_id) {
+    fn hot_switch_to_local_file(&mut self, owning_path: &Path, id: &str, file: PathBuf) {
+        if !self.is_playing_track(owning_path, id) {
             return;
         }
 
@@ -872,14 +876,9 @@ impl App {
             effective_speed(track, playing_playlist, &self.config)
         };
         let pos = self.position;
-        info!(video_id = %video_id, pos = pos, "switching stream → local file");
+        info!(id = %id, pos = pos, "switching stream → local file");
         self.is_paused = false;
-        self.spawn_player_for(
-            video_id.to_string(),
-            PlaySource::File(file),
-            speed,
-            Some(pos),
-        );
+        self.spawn_player_for(id.to_string(), PlaySource::File(file), speed, Some(pos));
     }
 
     /// Resolve the stream/local-file source and spawn mpv, wiring up position
@@ -892,7 +891,7 @@ impl App {
     /// retired before the new one starts reporting positions.
     fn spawn_player_for(
         &mut self,
-        video_id: String,
+        id: String,
         source: PlaySource,
         speed: f32,
         start_pos: Option<f64>,
@@ -911,7 +910,7 @@ impl App {
                     Ok(s) => s,
                     Err(e) => {
                         let _ = task_tx.send(TaskMsg::PlayerError {
-                            video_id,
+                            id,
                             err: e.to_string(),
                         });
                         return;
@@ -922,7 +921,7 @@ impl App {
             // Resolving the stream URL above can take seconds; bail out rather
             // than spawn an mpv nobody asked for any more.
             if player_generation.load(Ordering::SeqCst) != generation {
-                info!(video_id = %video_id, "playback request superseded before spawn");
+                info!(id = %id, "playback request superseded before spawn");
                 return;
             }
 
@@ -949,14 +948,14 @@ impl App {
                         }
                     });
                     let _ = task_tx.send(TaskMsg::PlayerReady {
-                        video_id,
+                        id,
                         player: Box::new(player),
                         generation,
                     });
                 }
                 Err(e) => {
                     let _ = task_tx.send(TaskMsg::PlayerError {
-                        video_id,
+                        id,
                         err: e.to_string(),
                     });
                 }
@@ -989,8 +988,8 @@ impl App {
             self.position = *self.position_rx.borrow_and_update();
         }
         if self.download_rx.has_changed().unwrap_or(false) {
-            let (video_id, pct) = self.download_rx.borrow_and_update().clone();
-            self.download_progress.insert(video_id, pct);
+            let (id, pct) = self.download_rx.borrow_and_update().clone();
+            self.download_progress.insert(id, pct);
         }
         while let Ok(msg) = self.task_rx.try_recv() {
             self.handle_task_msg(msg);
@@ -1010,8 +1009,10 @@ impl App {
                 target_path,
             } => {
                 self.pending_fetches = self.pending_fetches.saturating_sub(1);
-                let video_id = meta.video_id.clone();
-                info!(video_id = %video_id, title = %meta.title, "metadata ready, starting download");
+                // This is the one place a remote track's library id is minted:
+                // the source domain's slug plus the platform's own id.
+                let id = library::make_id(&meta.source, &meta.video_id);
+                info!(id = %id, title = %meta.title, "metadata ready, starting download");
                 let status_title = meta.title.clone();
 
                 let track = Track {
@@ -1021,7 +1022,7 @@ impl App {
                     artist: meta.artist,
                     channel: meta.channel,
                     duration: meta.duration,
-                    video_id: meta.video_id,
+                    id: id.clone(),
                     // The download starts unconditionally a few lines below, so
                     // record that in the row that is about to be written. It was
                     // saved as `streaming`, which meant the `downloading` state
@@ -1052,8 +1053,8 @@ impl App {
                     // the audio cache that nothing will ever clean up.
                     match Playlist::load(&owning_path) {
                         Ok(mut target_pl) => {
-                            if target_pl.tracks.iter().any(|t| t.video_id == video_id) {
-                                info!(video_id = %video_id, path = %owning_path.display(), "track already in target playlist, not adding again");
+                            if target_pl.tracks.iter().any(|t| t.id == id) {
+                                info!(id = %id, path = %owning_path.display(), "track already in target playlist, not adding again");
                                 self.set_status(format!("Already in playlist: {status_title}"));
                                 return;
                             }
@@ -1073,11 +1074,11 @@ impl App {
                     self.set_status(format!("Added to playlist: {status_title}"));
                 } else {
                     // Adding the same URL twice used to produce a second row
-                    // sharing the first one's `video_id`, and so its cached file
+                    // sharing the first one's `id`, and so its cached file
                     // too — two rows whose download, cache status and deletion
                     // all fight over one file.
-                    if self.playlist.tracks.iter().any(|t| t.video_id == video_id) {
-                        info!(video_id = %video_id, "track already in displayed playlist, not adding again");
+                    if self.playlist.tracks.iter().any(|t| t.id == id) {
+                        info!(id = %id, "track already in displayed playlist, not adding again");
                         self.set_status(format!("Already in playlist: {status_title}"));
                         return;
                     }
@@ -1092,7 +1093,7 @@ impl App {
                     self.save_playlist();
                     self.set_status(format!("Added: {status_title}"));
                 }
-                self.start_download(owning_path, video_id, url);
+                self.start_download(owning_path, id, url);
             }
 
             TaskMsg::MetaError { url, err } => {
@@ -1101,10 +1102,10 @@ impl App {
                 self.set_status("Metadata fetch failed");
             }
 
-            TaskMsg::DownloadDone { video_id, file } => {
-                info!(video_id = %video_id, path = %file.display(), "download complete");
-                self.downloading.remove(&video_id);
-                self.download_progress.remove(&video_id);
+            TaskMsg::DownloadDone { id, file } => {
+                info!(id = %id, path = %file.display(), "download complete");
+                self.downloading.remove(&id);
+                self.download_progress.remove(&id);
                 self.set_status("Download complete");
 
                 // `download_targets` is always populated at add-time (see
@@ -1116,11 +1117,11 @@ impl App {
                 // missing (should not normally happen).
                 let owning_path = self
                     .download_targets
-                    .remove(&video_id)
+                    .remove(&id)
                     .unwrap_or_else(|| self.playlist_path.clone());
 
                 let file_for_patch = file.clone();
-                self.patch_and_save_playlist(&owning_path, &video_id, move |track| {
+                self.patch_and_save_playlist(&owning_path, &id, move |track| {
                     track.cache_status = CacheStatus::Cached;
                     track.file = Some(file_for_patch);
                 });
@@ -1128,11 +1129,11 @@ impl App {
                 // If this track is the one actually driving playback right now — per
                 // `self.playing`, independent of whatever playlist is displayed — and
                 // it was streaming, hot-switch mpv to the freshly downloaded local file.
-                self.hot_switch_to_local_file(&owning_path, &video_id, file);
+                self.hot_switch_to_local_file(&owning_path, &id, file);
             }
 
-            TaskMsg::DownloadError { video_id, err } => {
-                error!(video_id = %video_id, err = %err, "download failed after all retries");
+            TaskMsg::DownloadError { id, err } => {
+                error!(id = %id, err = %err, "download failed after all retries");
                 // Roll the row back off `downloading`, otherwise it keeps
                 // claiming a download is in progress until the next
                 // `Playlist::load` happens to reset it.
@@ -1144,13 +1145,13 @@ impl App {
                 // finds the row in.
                 let owning_path = self
                     .download_targets
-                    .get(&video_id)
+                    .get(&id)
                     .cloned()
                     .unwrap_or_else(|| self.playlist_path.clone());
-                self.patch_and_save_playlist(&owning_path, &video_id, |track| {
+                self.patch_and_save_playlist(&owning_path, &id, |track| {
                     track.cache_status = CacheStatus::Failed;
                 });
-                self.clear_download_state(&video_id);
+                self.clear_download_state(&id);
                 self.set_status(match ytdlp::blocked_by_youtube_hint(&err) {
                     Some(hint) => format!("Download failed — {hint}"),
                     None => "Download failed".to_string(),
@@ -1158,7 +1159,7 @@ impl App {
             }
 
             TaskMsg::PlayerReady {
-                video_id,
+                id,
                 player,
                 generation,
             } => {
@@ -1168,17 +1169,17 @@ impl App {
                 // hot switch, where the id alone cannot tell the two apart.
                 // Dropping `player` here kills its mpv.
                 if generation != self.player_generation.load(Ordering::SeqCst) {
-                    info!(video_id = %video_id, generation, "player ready but superseded, discarding");
+                    info!(id = %id, generation, "player ready but superseded, discarding");
                     return;
                 }
-                info!(video_id = %video_id, "player started");
+                info!(id = %id, "player started");
                 self.player = Some(*player);
                 self.is_paused = false;
                 self.set_status("Player ready");
             }
 
-            TaskMsg::PlayerError { video_id, err } => {
-                error!(video_id = %video_id, err = %err, "player failed to start");
+            TaskMsg::PlayerError { id, err } => {
+                error!(id = %id, err = %err, "player failed to start");
                 self.set_status(match ytdlp::blocked_by_youtube_hint(&err) {
                     Some(hint) => format!("Player error — {hint}"),
                     None => "Player error".to_string(),
@@ -1415,7 +1416,7 @@ impl App {
         self.flush_playing_position();
     }
 
-    /// Patch a single track (found by `video_id`) in the playlist at `path`
+    /// Patch a single track (found by `id`) in the playlist at `path`
     /// and persist the change to disk — the general "mutate a track that
     /// might not be in the currently displayed playlist" mechanism.
     ///
@@ -1425,26 +1426,16 @@ impl App {
     /// - Otherwise, load the playlist at `path` from disk, mutate the track
     ///   there, and save it back to `path`. `self.playlist` (the displayed
     ///   playlist) is left untouched.
-    /// - If no track with `video_id` exists in the target playlist, this is
+    /// - If no track with `id` exists in the target playlist, this is
     ///   a no-op (logged, not an error) — matches the existing style used by
     ///   the target-playlist branch this replaces.
     /// - Load/save errors are logged and cause an early return.
-    pub fn patch_and_save_playlist(
-        &mut self,
-        path: &Path,
-        video_id: &str,
-        f: impl FnOnce(&mut Track),
-    ) {
+    pub fn patch_and_save_playlist(&mut self, path: &Path, id: &str, f: impl FnOnce(&mut Track)) {
         if path == self.playlist_path.as_path() {
-            match self
-                .playlist
-                .tracks
-                .iter_mut()
-                .find(|t| t.video_id == video_id)
-            {
+            match self.playlist.tracks.iter_mut().find(|t| t.id == id) {
                 Some(track) => f(track),
                 None => {
-                    warn!(video_id = %video_id, path = %path.display(), "patch_and_save_playlist: track not found in displayed playlist");
+                    warn!(id = %id, path = %path.display(), "patch_and_save_playlist: track not found in displayed playlist");
                     return;
                 }
             }
@@ -1460,10 +1451,10 @@ impl App {
             }
         };
 
-        match target_pl.tracks.iter_mut().find(|t| t.video_id == video_id) {
+        match target_pl.tracks.iter_mut().find(|t| t.id == id) {
             Some(track) => f(track),
             None => {
-                warn!(video_id = %video_id, path = %path.display(), "patch_and_save_playlist: track not found");
+                warn!(id = %id, path = %path.display(), "patch_and_save_playlist: track not found");
                 return;
             }
         }
@@ -1554,7 +1545,7 @@ impl App {
             .track_index_at(self.selected)
             .with_context(|| "no track at current selection")?;
 
-        let video_id = self.playlist.tracks[track_idx].video_id.clone();
+        let id = self.playlist.tracks[track_idx].id.clone();
 
         // Resolve the target playlist path
         let target_path = self
@@ -1579,9 +1570,9 @@ impl App {
 
         // Stop playback only if the track being moved is literally the one
         // actually driving playback right now — identity is `(path,
-        // video_id)`, not just a matching `video_id` that might coincidentally
+        // id)`, not just a matching `id` that might coincidentally
         // also exist in an unrelated playing session elsewhere.
-        let is_current = self.is_playing_track(&self.playlist_path, &video_id);
+        let is_current = self.is_playing_track(&self.playlist_path, &id);
         if is_current {
             self.stop_player(); // kills mpv and retires its position poller
             self.playing = None;
@@ -1593,8 +1584,8 @@ impl App {
         // Remove from source playlist
         let track = self
             .playlist
-            .remove_track_by_video_id(&video_id)
-            .with_context(|| format!("track '{video_id}' not found in source playlist"))?;
+            .remove_track_by_id(&id)
+            .with_context(|| format!("track '{id}' not found in source playlist"))?;
 
         // Append to target playlist
         target_playlist.add_track(track);
@@ -1603,7 +1594,7 @@ impl App {
         // re-point `DownloadDone` at it. Clearing the state instead would leave
         // the moved track stuck at `downloading` with a finished file on disk
         // that nothing ever records.
-        self.retarget_download(&video_id, &target_path);
+        self.retarget_download(&id, &target_path);
 
         // Save target first, then source (both atomic)
         target_playlist
