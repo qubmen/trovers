@@ -1,0 +1,77 @@
+name: Release Please
+
+# Decides the next version and pushes the release tag. Everything after the tag
+# — cross-building the binaries, creating the GitHub Release, publishing the
+# Homebrew formula — is owned by cargo-dist's tag-triggered release.yml.
+#
+# Flow:
+#   1. Every conventional commit landing on main updates a single accumulating
+#      release PR ("chore(main): release X.Y.Z").
+#   2. Merging that PR lands the bumped Cargo.toml/Cargo.lock/CHANGELOG.md and
+#      the new version in .release-please-manifest.json.
+#   3. On that push, the tag step below sees the manifest version has no tag yet
+#      and pushes it, which starts release.yml.
+#
+# Never bump `version` in Cargo.toml by hand — it is derived from the manifest.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    steps:
+      # Uses a PAT (RELEASE_PLZ_TOKEN), not the default GITHUB_TOKEN: GitHub
+      # doesn't let the built-in token trigger other workflows, so a tag pushed
+      # with it would silently never start cargo-dist's release.yml.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      # Runs before release-please on purpose. When a release PR has just been
+      # merged, the manifest already holds the new version but the tag doesn't
+      # exist yet; release-please resolves the "commits since last release"
+      # boundary from GitHub Releases and falls back to git tags, so the tag has
+      # to be in place before it looks. On an ordinary feature merge the tag is
+      # already there and this is a no-op.
+      - name: Push release tag if missing
+        run: |
+          version="$(jq -r '.["."]' .release-please-manifest.json)"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::could not read version from .release-please-manifest.json"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "Tag v${version} already exists — nothing to release."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${version}"
+          git push origin "v${version}"
+          echo "Pushed tag v${version} — cargo-dist takes over from here."
+
+      # skip-github-release keeps release-please out of cargo-dist's way: the
+      # GitHub Release is created by release.yml, which attaches the platform
+      # archives and the installer script that README.md links to.
+      - name: Run release-please
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true

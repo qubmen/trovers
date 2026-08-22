@@ -472,6 +472,34 @@ regex = "1"
 
 ---
 
+## Releases
+
+Fully automated. **Never hand-edit `version` in `Cargo.toml`** — it is derived from
+`.release-please-manifest.json`, and a manual bump desynchronizes the two and ships a
+duplicate release.
+
+1. Land conventional commits on `main`. `.github/workflows/release-please.yml` keeps a
+   single accumulating release PR (`chore(main): release X.Y.Z`) up to date on every push.
+2. Merge that PR. It lands the bumped `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md`, and
+   the same workflow then pushes tag `vX.Y.Z`.
+3. The tag triggers `.github/workflows/release.yml` (cargo-dist): cross-builds the five
+   targets, creates the GitHub Release with the installer script README links to, and
+   publishes the Homebrew formula to `qubmen/homebrew-trovers`.
+
+| Commit prefix | Effect while the project is `0.x` |
+| --- | --- |
+| `fix`, `perf` | patch bump (0.1.2 → 0.1.3) |
+| `feat` | patch bump (`bump-patch-for-minor-pre-major`) |
+| `feat!`, `BREAKING CHANGE:` | minor bump (0.1.2 → 0.2.0) — never jumps to 1.0.0 |
+| `refactor`, `docs`, `revert` | listed in the changelog; patch bump if nothing else landed |
+| `chore`, `test`, `ci`, `build`, `style` | hidden, no release |
+
+Reaching 1.0.0 is a deliberate act: drop `bump-minor-pre-major` and
+`bump-patch-for-minor-pre-major` from `release-please-config.json`, or run release-please
+once with `release-as: 1.0.0`.
+
+---
+
 ## Implementation Details
 
 ### deps.rs — dependency check on startup
