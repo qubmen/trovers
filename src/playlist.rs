@@ -153,9 +153,12 @@ impl Playlist {
         Ok(entries)
     }
 
-    /// Create a new empty playlist and save it to disk.
-    pub fn create(name: &str) -> Result<(Self, PathBuf)> {
-        let playlist = Playlist {
+    /// A new, empty, top-level playlist — in memory only.
+    ///
+    /// Separate from `create` because an album is born from an import, which
+    /// decides its own path and its `kind`/`parent` before anything is written.
+    pub fn empty(name: &str) -> Self {
+        Playlist {
             name: name.to_string(),
             created: Utc::now(),
             loop_mode: LoopMode::None,
@@ -166,7 +169,12 @@ impl Playlist {
             kind: PlaylistKind::Normal,
             parent: None,
             source_folder: None,
-        };
+        }
+    }
+
+    /// Create a new empty playlist and save it to disk.
+    pub fn create(name: &str) -> Result<(Self, PathBuf)> {
+        let playlist = Playlist::empty(name);
         let path = cache::playlists_dir().join(format!("{name}.toml"));
         playlist.save(&path)?;
         Ok((playlist, path))

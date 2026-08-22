@@ -1,6 +1,7 @@
 use super::{App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
 use crate::library;
 use crate::library::Track;
+use crate::library_import;
 use crate::playlist::{LoopMode, Playlist, PlaylistEntry, PlaylistKind};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -51,6 +52,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
                 | InputMode::TrackContextMenu
                 | InputMode::PlaylistRename
                 | InputMode::PlaylistDelete
+                | InputMode::FolderInput
         )
     {
         app.focus = match app.focus {
@@ -73,6 +75,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
         InputMode::TrackContextMenu => handle_track_context_menu(app, key),
         InputMode::PlaylistRename => handle_playlist_rename(app, key).await,
         InputMode::PlaylistDelete => handle_playlist_delete(app, key).await,
+        InputMode::FolderInput => handle_folder_input(app, key),
         InputMode::Help => Ok(Action::Continue),
     }
 }
@@ -123,6 +126,11 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                         app.input_mode = InputMode::UrlInput;
                         app.input_buf.clear();
                         app.target_playlist_for_url = Some(app.playlist.name.clone());
+                        app.focus = Focus::TrackList;
+                    }
+                    SidebarItem::ImportFolder => {
+                        app.input_mode = InputMode::FolderInput;
+                        app.input_buf.clear();
                         app.focus = Focus::TrackList;
                     }
                     SidebarItem::Settings => {
@@ -346,6 +354,22 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             app.input_mode = InputMode::NewPlaylist;
             app.input_buf.clear();
         }
+
+        // Import a local folder as an album
+        KeyCode::Char('F') => {
+            app.input_mode = InputMode::FolderInput;
+            app.input_buf.clear();
+        }
+
+        // Rescan the folder this album mirrors
+        KeyCode::Char('R') => match app.playlist.source_folder.clone() {
+            Some(root) => app.import_folder(root),
+            None => app.set_status("Not linked to a folder"),
+        },
+
+        // Reorder the selected row within this playlist
+        KeyCode::Char('J') => app.move_selected_row(true),
+        KeyCode::Char('K') => app.move_selected_row(false),
 
         // Move track to another playlist
         KeyCode::Char('m') => {
@@ -603,6 +627,30 @@ async fn handle_new_playlist(app: &mut App, key: KeyEvent) -> Result<Action> {
     Ok(Action::Continue)
 }
 
+/// The folder path prompt. Deliberately thin: everything the path means is
+/// `App::import_folder`'s business, so `F` and the sidebar item and a rescan all
+/// go through one place.
+fn handle_folder_input(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let typed = app.input_buf.trim().to_string();
+            app.input_buf.clear();
+            app.input_mode = InputMode::Normal;
+            if !typed.is_empty() {
+                // `~` is what a user types; only a shell expands it for free.
+                let root = library_import::expand_tilde(&typed, dirs::home_dir().as_deref());
+                app.import_folder(root);
+            }
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.input_buf.clear();
+        }
+        _ => type_char(app, key),
+    }
+    Ok(Action::Continue)
+}
+
 fn handle_search(app: &mut App, key: KeyEvent) -> Result<Action> {
     match key.code {
         KeyCode::Enter | KeyCode::Esc => {
@@ -646,7 +694,15 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
                 let _ = app.pos_tx.send(0.0);
             }
 
-            let file_to_delete = app.library.get(&id).and_then(|t| t.file.clone());
+            // The cached file is trovers' own copy of a remote track and goes with
+            // the last row referencing it. A local file is the user's music,
+            // which trovers only ever reads: deleting the row means forgetting
+            // it, never touching what is on disk.
+            let file_to_delete = app
+                .library
+                .get(&id)
+                .filter(|t| t.origin != crate::library::TrackOrigin::Local)
+                .and_then(|t| t.file.clone());
             app.playlist.tracks.remove(idx);
             // A download still running for this row has nowhere to land now.
             app.clear_download_state(&id);

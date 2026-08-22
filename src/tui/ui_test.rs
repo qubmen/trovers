@@ -7595,4 +7595,633 @@ tracks = []
         assert_eq!(track.last_position, 175, "position must survive re-adding");
         assert_eq!(track.speed, Some(1.5), "so must the per-track speed");
     }
+
+    // ── Importing a local folder ──────────────────────────────────────────
+
+    /// A scanned-and-probed file, as an import task hands one back.
+    fn imported_file(path: &std::path::Path, title: &str) -> crate::library_import::ImportedFile {
+        crate::library_import::ImportedFile {
+            path: path.to_path_buf(),
+            meta: crate::library_scan::ProbedMeta {
+                title: title.to_string(),
+                artist: "Miss Monique".to_string(),
+                duration: 3529,
+                media: crate::library::MediaKind::Audio,
+            },
+        }
+    }
+
+    fn status_of(app: &crate::tui::App) -> Option<&str> {
+        app.status_message.as_ref().map(|(m, _)| m.as_str())
+    }
+
+    #[tokio::test]
+    async fn f_opens_the_folder_prompt() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut app = make_app_with_playlists("Live Sets", &["Live Sets"]);
+        app.input_buf = "leftovers".to_string();
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('F')))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.input_mode, crate::tui::InputMode::FolderInput);
+        assert!(app.input_buf.is_empty(), "the prompt starts empty");
+    }
+
+    /// The `+ Folder` sidebar item is the discoverable half of `F`.
+    #[tokio::test]
+    async fn the_sidebar_folder_item_opens_the_folder_prompt() {
+        use crate::tui::input::handle_key;
+        use crate::tui::{Focus, SidebarItem};
+
+        let mut app = make_app_with_playlists("Live Sets", &["Live Sets"]);
+        app.focus = Focus::Sidebar;
+        let pos = app
+            .sidebar_items()
+            .iter()
+            .position(|i| matches!(i, SidebarItem::ImportFolder))
+            .expect("the sidebar offers a folder import item");
+        app.sidebar_selected = pos;
+
+        handle_key(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.input_mode, crate::tui::InputMode::FolderInput);
+    }
+
+    /// Being in the list is not enough: `sidebar_next` steps straight over an
+    /// unselectable row, so an item nobody can land on can never be pressed.
+    #[test]
+    fn the_sidebar_folder_item_can_be_reached_with_the_arrow_keys() {
+        use crate::tui::SidebarItem;
+
+        let mut app = make_app_with_playlists("Live Sets", &["Live Sets"]);
+        let plunder = app
+            .sidebar_items()
+            .iter()
+            .position(|i| matches!(i, SidebarItem::Plunder))
+            .expect("the sidebar offers Plunder");
+        app.sidebar_selected = plunder;
+
+        app.sidebar_next();
+
+        assert!(matches!(
+            app.sidebar_items()[app.sidebar_selected],
+            SidebarItem::ImportFolder
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_is_not_there_is_reported_and_imports_nothing() {
+        use crate::tui::input::handle_key;
+        use crate::tui::InputMode;
+
+        let (_dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+        let before = app.available_playlists.len();
+        app.input_mode = InputMode::FolderInput;
+        app.input_buf = "/no/such/folder".to_string();
+
+        handle_key(&mut app, key(crossterm::event::KeyCode::Enter))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(status_of(&app), Some("Not a folder: /no/such/folder"));
+        assert_eq!(app.available_playlists.len(), before, "no album appeared");
+    }
+
+    /// Two levels only, so an import lands under the playlist on screen.
+    #[test]
+    fn a_folder_imported_from_a_playlist_becomes_an_album_under_it() {
+        use crate::tui::ImportTarget;
+
+        let (_dir, _tracks, _path, app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+
+        assert_eq!(
+            app.import_target_for(std::path::Path::new("/Volumes/Sets/Ultra")),
+            ImportTarget::NewAlbum {
+                parent: Some("Live Sets".to_string())
+            }
+        );
+    }
+
+    /// An album cannot hold an album — a third level. Importing from one makes a
+    /// sibling under the same parent instead.
+    #[test]
+    fn a_folder_imported_from_an_album_becomes_a_sibling_album() {
+        use crate::playlist::PlaylistKind;
+        use crate::tui::ImportTarget;
+
+        let mut pl = make_playlist("Ultra 2026");
+        pl.kind = PlaylistKind::Album;
+        pl.parent = Some("Live Sets".to_string());
+        let (_dir, _tracks, _path, app) = app_with_own_library(pl, &[]);
+
+        assert_eq!(
+            app.import_target_for(std::path::Path::new("/Volumes/Sets/Other")),
+            ImportTarget::NewAlbum {
+                parent: Some("Live Sets".to_string())
+            }
+        );
+    }
+
+    /// Importing a folder that is already an album is what `R` does, whichever way
+    /// the user asks for it — otherwise every import makes another `Ultra (2)`.
+    #[test]
+    fn importing_a_folder_that_is_already_linked_rescans_that_album() {
+        use crate::playlist::PlaylistKind;
+        use crate::tui::ImportTarget;
+
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+        let root = dir.path().join("Ultra");
+        let album_path = dir.path().join("Ultra.toml");
+        let mut existing = make_playlist("Ultra");
+        existing.kind = PlaylistKind::Album;
+        existing.parent = Some("Live Sets".to_string());
+        existing.source_folder = Some(root.clone());
+        existing.save(&album_path).expect("save album");
+        app.available_playlists
+            .push(crate::playlist::PlaylistEntry {
+                name: "Ultra".to_string(),
+                path: album_path.clone(),
+                kind: PlaylistKind::Album,
+                parent: Some("Live Sets".to_string()),
+            });
+
+        assert_eq!(
+            app.import_target_for(&root),
+            ImportTarget::Existing(album_path)
+        );
+    }
+
+    #[test]
+    fn applying_an_import_writes_the_album_beside_the_displayed_playlist() {
+        use crate::playlist::{Playlist, PlaylistKind};
+        use crate::tui::ImportTarget;
+
+        let (dir, _tracks, path, mut app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+        let root = dir.path().join("Ultra 2026");
+        let files = vec![
+            imported_file(&root.join("Day One.flac"), "Day One"),
+            imported_file(&root.join("Day Two.flac"), "Day Two"),
+        ];
+
+        app.apply_import(
+            root.clone(),
+            ImportTarget::NewAlbum {
+                parent: Some("Live Sets".to_string()),
+            },
+            files,
+        );
+
+        let album_path = dir.path().join("Ultra 2026.toml");
+        let album = Playlist::load(&album_path).expect("album written");
+        assert_eq!(album.kind, PlaylistKind::Album);
+        assert_eq!(album.parent.as_deref(), Some("Live Sets"));
+        assert_eq!(album.source_folder.as_deref(), Some(root.as_path()));
+        assert_eq!(album.tracks.len(), 2);
+
+        // Listed in the sidebar, and under its parent.
+        let entry = app
+            .available_playlists
+            .iter()
+            .find(|e| e.name == "Ultra 2026")
+            .expect("listed in the sidebar");
+        assert_eq!(entry.kind, PlaylistKind::Album);
+        assert_eq!(entry.parent.as_deref(), Some("Live Sets"));
+
+        // The parent's own track list is not what was imported into.
+        assert!(app.playlist.tracks.is_empty());
+        assert_eq!(app.playlist_path, path);
+    }
+
+    #[test]
+    fn applying_an_import_numbers_an_album_whose_name_is_taken() {
+        use crate::tui::ImportTarget;
+
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+        let root = dir.path().join("Ultra 2026");
+        make_playlist("Ultra 2026")
+            .save(&dir.path().join("Ultra 2026.toml"))
+            .expect("save");
+        app.available_playlists
+            .push(crate::playlist::PlaylistEntry::normal(
+                "Ultra 2026".to_string(),
+                dir.path().join("Ultra 2026.toml"),
+            ));
+
+        app.apply_import(
+            root.clone(),
+            ImportTarget::NewAlbum { parent: None },
+            vec![imported_file(&root.join("Day One.flac"), "Day One")],
+        );
+
+        assert!(dir.path().join("Ultra 2026 (2).toml").exists());
+        assert!(app
+            .available_playlists
+            .iter()
+            .any(|e| e.name == "Ultra 2026 (2)"));
+    }
+
+    #[test]
+    fn a_folder_with_no_playable_files_makes_no_album() {
+        use crate::tui::ImportTarget;
+
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+        let root = dir.path().join("Documents");
+        let before = app.available_playlists.len();
+
+        app.apply_import(
+            root.clone(),
+            ImportTarget::NewAlbum { parent: None },
+            Vec::new(),
+        );
+
+        assert_eq!(app.available_playlists.len(), before);
+        assert!(!dir.path().join("Documents.toml").exists());
+        assert_eq!(
+            status_of(&app),
+            Some(format!("No playable files in {}", root.display()).as_str())
+        );
+    }
+
+    /// Rescanning the album on screen has to change the rows the user is looking
+    /// at, not just the file behind them.
+    #[test]
+    fn rescanning_the_displayed_album_updates_the_rows_on_screen() {
+        use crate::playlist::{Playlist, PlaylistKind};
+        use crate::tui::ImportTarget;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("Ultra 2026");
+        let mut pl = make_playlist("Ultra 2026");
+        pl.kind = PlaylistKind::Album;
+        pl.source_folder = Some(root.clone());
+        let (dir2, _tracks, path, mut app) = app_with_own_library(pl, &[]);
+        let root = dir2.path().join("Ultra 2026");
+
+        app.apply_import(
+            root.clone(),
+            ImportTarget::Existing(path.clone()),
+            vec![imported_file(&root.join("Day One.flac"), "Day One")],
+        );
+
+        assert_eq!(app.playlist.tracks.len(), 1, "the displayed rows changed");
+        assert!(app.track_at(0).is_some(), "and the row resolves");
+        let saved = Playlist::load(&path).expect("load");
+        assert_eq!(saved.tracks, app.playlist.tracks, "and reached disk");
+        // No second album for a folder that already has one.
+        assert!(!dir2.path().join("Ultra 2026 (2).toml").exists());
+        let _ = dir;
+    }
+
+    #[tokio::test]
+    async fn r_on_a_playlist_that_is_not_linked_to_a_folder_says_so() {
+        use crate::tui::input::handle_tracklist;
+
+        let (_dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('R')))
+            .await
+            .expect("handled");
+
+        assert_eq!(status_of(&app), Some("Not linked to a folder"));
+    }
+
+    #[tokio::test]
+    async fn r_rescans_the_folder_the_displayed_album_is_linked_to() {
+        use crate::playlist::PlaylistKind;
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("Ultra 2026");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let mut pl = make_playlist("Ultra 2026");
+        pl.kind = PlaylistKind::Album;
+        pl.source_folder = Some(root.clone());
+        let (_dir2, _tracks, _path, mut app) = app_with_own_library(pl, &[]);
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('R')))
+            .await
+            .expect("handled");
+
+        assert_eq!(
+            status_of(&app),
+            Some(format!("Scanning {}", root.display()).as_str())
+        );
+    }
+
+    // ── The user's own files are never deleted ─────────────────────────────
+
+    /// A local track pointing at `path`, as an import would have written one.
+    fn local_track(path: &std::path::Path) -> crate::library::Track {
+        use crate::library::{CacheStatus, MediaKind, TrackOrigin};
+        crate::library::Track {
+            url: path.to_string_lossy().to_string(),
+            source: "local".to_string(),
+            title: "Day One".to_string(),
+            artist: "Miss Monique".to_string(),
+            channel: "Miss Monique".to_string(),
+            duration: 3529,
+            id: crate::library_scan::local_id(path),
+            cache_status: CacheStatus::Cached,
+            file: Some(path.to_path_buf()),
+            last_position: 0,
+            speed: None,
+            user_title: None,
+            user_artist: None,
+            added_at: chrono::Utc::now(),
+            origin: TrackOrigin::Local,
+            media: MediaKind::Audio,
+            resume: true,
+        }
+    }
+
+    /// The invariant that matters most: `d` on an imported row takes the row, not
+    /// the user's music.
+    #[test]
+    fn deleting_a_local_row_leaves_the_users_file_alone() {
+        use crate::tui::input::handle_confirm_delete;
+
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Ultra"), &[]);
+        let file = dir.path().join("Day One.flac");
+        std::fs::write(&file, b"audio").expect("write file");
+        let track = local_track(&file);
+        let id = track.id.clone();
+        push_track(&mut app, track);
+        app.selected = 0;
+
+        handle_confirm_delete(&mut app, key(crossterm::event::KeyCode::Char('y')))
+            .expect("confirm delete");
+
+        assert!(app.playlist.tracks.is_empty(), "the row goes");
+        assert!(app.library.get(&id).is_none(), "and so does its document");
+        assert!(file.exists(), "but never the user's own file");
+    }
+
+    /// Deleting an album is deleting a list. The folder it mirrors is not ours.
+    #[tokio::test]
+    async fn deleting_an_album_leaves_the_users_files_alone() {
+        use crate::playlist::PlaylistKind;
+        use crate::tui::input::handle_playlist_delete;
+        use crate::tui::SidebarItem;
+
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Live Sets"), &[]);
+        let file = dir.path().join("Day One.flac");
+        std::fs::write(&file, b"audio").expect("write file");
+
+        // An album listing that file, sitting beside the displayed playlist.
+        let album_path = dir.path().join("Ultra.toml");
+        let mut album = make_playlist("Ultra");
+        album.kind = PlaylistKind::Album;
+        let track = local_track(&file);
+        album.tracks.push(track.id.clone());
+        app.library.upsert(track).expect("write document");
+        album.save(&album_path).expect("save album");
+        app.available_playlists
+            .push(crate::playlist::PlaylistEntry {
+                name: "Ultra".to_string(),
+                path: album_path.clone(),
+                kind: PlaylistKind::Album,
+                parent: None,
+            });
+        app.sidebar_selected = app
+            .sidebar_items()
+            .iter()
+            .position(|i| matches!(i, SidebarItem::Playlist { name, .. } if name == "Ultra"))
+            .expect("the album is in the sidebar");
+
+        handle_playlist_delete(&mut app, key(crossterm::event::KeyCode::Char('y')))
+            .await
+            .expect("confirm delete");
+
+        assert!(!album_path.exists(), "the album file goes");
+        assert!(file.exists(), "the user's own file stays");
+    }
+
+    #[tokio::test]
+    async fn recaching_a_local_track_does_nothing() {
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Ultra"), &[]);
+        let file = dir.path().join("Day One.flac");
+        std::fs::write(&file, b"audio").expect("write file");
+        let track = local_track(&file);
+        let id = track.id.clone();
+        push_track(&mut app, track);
+
+        app.recache_track(0);
+
+        assert!(
+            app.downloading.is_empty(),
+            "there is nothing to download a local file from"
+        );
+        assert_eq!(
+            app.library.get(&id).map(|t| t.cache_status.clone()),
+            Some(crate::library::CacheStatus::Cached),
+            "and its status must not be moved to downloading"
+        );
+        assert_eq!(status_of(&app), Some("Local file, nothing to download"));
+    }
+
+    /// A moved or unplugged file has nothing to stream instead — playing it would
+    /// hand mpv a path to nothing and look like a hang.
+    #[tokio::test]
+    async fn a_local_file_that_is_gone_refuses_to_play() {
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Ultra"), &[]);
+        let track = local_track(&dir.path().join("Day One.flac"));
+        let id = track.id.clone();
+        push_track(&mut app, track);
+
+        app.request_playback(0, None);
+
+        assert!(app.playing.is_none(), "nothing may start playing");
+        assert_eq!(status_of(&app), Some("File not found"));
+        assert_eq!(
+            app.library.get(&id).map(|t| t.cache_status.clone()),
+            Some(crate::library::CacheStatus::Missing),
+            "and the row says why"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_file_that_is_there_still_plays() {
+        let (dir, _tracks, _path, mut app) = app_with_own_library(make_playlist("Ultra"), &[]);
+        let file = dir.path().join("Day One.flac");
+        std::fs::write(&file, b"audio").expect("write file");
+        let track = local_track(&file);
+        let id = track.id.clone();
+        push_track(&mut app, track);
+
+        app.request_playback(0, None);
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_id.as_str()),
+            Some(id.as_str())
+        );
+    }
+
+    // ── Panel totals and row reordering ───────────────────────────────────
+
+    #[test]
+    fn the_panel_title_shows_the_count_and_the_total_duration() {
+        use crate::tui::ui::track_panel_title;
+
+        assert_eq!(
+            track_panel_title("Live Sets", 42, 12, 20, 6 * 3600 + 12 * 60),
+            " Live Sets · 42 tracks · 6h 12m  [ 12–20 / 42 ] "
+        );
+    }
+
+    #[test]
+    fn the_panel_title_counts_one_track_in_the_singular() {
+        use crate::tui::ui::track_panel_title;
+
+        assert_eq!(
+            track_panel_title("Live Sets", 1, 1, 1, 90),
+            " Live Sets · 1 track · 1m  [ 1–1 / 1 ] "
+        );
+    }
+
+    /// Without ffprobe every local duration is zero, and "0m" would read as a
+    /// claim rather than an absence.
+    #[test]
+    fn the_panel_title_omits_a_duration_nothing_knows() {
+        use crate::tui::ui::track_panel_title;
+
+        assert_eq!(
+            track_panel_title("Live Sets", 3, 1, 3, 0),
+            " Live Sets · 3 tracks  [ 1–3 / 3 ] "
+        );
+    }
+
+    #[test]
+    fn the_panel_title_says_under_a_minute_rather_than_zero() {
+        use crate::tui::ui::track_panel_title;
+
+        assert_eq!(
+            track_panel_title("Live Sets", 1, 1, 1, 30),
+            " Live Sets · 1 track · <1m  [ 1–1 / 1 ] "
+        );
+    }
+
+    #[test]
+    fn the_panel_title_of_an_empty_playlist_is_just_its_name() {
+        use crate::tui::ui::track_panel_title;
+
+        assert_eq!(track_panel_title("Live Sets", 0, 1, 0, 0), " Live Sets ");
+    }
+
+    /// The count and the total have to agree with each other, so a filter that
+    /// hides rows hides their seconds too.
+    #[test]
+    fn the_total_duration_covers_only_the_visible_rows() {
+        let mut pl = make_playlist("Live Sets");
+        add_track(&mut pl, {
+            let mut t = make_track("dur1", "Keeper");
+            t.duration = 100;
+            t
+        });
+        add_track(&mut pl, {
+            let mut t = make_track("dur2", "Hidden");
+            t.duration = 900;
+            t
+        });
+        let (_dir, _path, mut app) = app_on_disk(pl);
+
+        assert_eq!(app.visible_duration_secs(), 1000, "unfiltered, everything");
+
+        app.filtered_indices = vec![0];
+        assert_eq!(
+            app.visible_duration_secs(),
+            100,
+            "filtered, only what shows"
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_j_moves_the_selected_row_down() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut pl = make_playlist("Live Sets");
+        add_track(&mut pl, make_track("mv1", "First"));
+        add_track(&mut pl, make_track("mv2", "Second"));
+        add_track(&mut pl, make_track("mv3", "Third"));
+        let (_dir, path, mut app) = app_on_disk(pl);
+        app.selected = 0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('J')))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.playlist.tracks, vec!["mv2", "mv1", "mv3"]);
+        assert_eq!(app.selected, 1, "the cursor follows the row it moved");
+        let saved = crate::playlist::Playlist::load(&path).expect("load");
+        assert_eq!(saved.tracks, app.playlist.tracks, "and it reached disk");
+    }
+
+    #[tokio::test]
+    async fn shift_k_moves_the_selected_row_up() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut pl = make_playlist("Live Sets");
+        add_track(&mut pl, make_track("mv1", "First"));
+        add_track(&mut pl, make_track("mv2", "Second"));
+        let (_dir, _path, mut app) = app_on_disk(pl);
+        app.selected = 1;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('K')))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.playlist.tracks, vec!["mv2", "mv1"]);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn moving_past_either_end_keeps_the_order() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut pl = make_playlist("Live Sets");
+        add_track(&mut pl, make_track("mv1", "First"));
+        add_track(&mut pl, make_track("mv2", "Second"));
+        let (_dir, _path, mut app) = app_on_disk(pl);
+
+        app.selected = 0;
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('K')))
+            .await
+            .expect("handled");
+        assert_eq!(app.playlist.tracks, vec!["mv1", "mv2"]);
+        assert_eq!(app.selected, 0);
+
+        app.selected = 1;
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('J')))
+            .await
+            .expect("handled");
+        assert_eq!(app.playlist.tracks, vec!["mv1", "mv2"]);
+        assert_eq!(app.selected, 1);
+    }
+
+    /// Under a filter the cursor counts visible rows, so ±1 would move a row past
+    /// something the user cannot see.
+    #[tokio::test]
+    async fn reordering_is_refused_while_a_search_filter_is_active() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut pl = make_playlist("Live Sets");
+        add_track(&mut pl, make_track("mv1", "First"));
+        add_track(&mut pl, make_track("mv2", "Second"));
+        add_track(&mut pl, make_track("mv3", "Third"));
+        let (_dir, _path, mut app) = app_on_disk(pl);
+        app.filtered_indices = vec![0, 2];
+        app.selected = 0;
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char('J')))
+            .await
+            .expect("handled");
+
+        assert_eq!(app.playlist.tracks, vec!["mv1", "mv2", "mv3"]);
+        assert_eq!(status_of(&app), Some("Clear the search to reorder"));
+    }
 }

@@ -8,6 +8,7 @@ use crate::cache;
 use crate::config::{AudioQuality, Config};
 use crate::library::{self, Library};
 use crate::library::{CacheStatus, MediaKind, Track, TrackOrigin};
+use crate::library_import;
 use crate::player::{self, Player};
 use crate::playlist::{self, LoopMode, Playlist, PlaylistEntry, PlaylistKind};
 use crate::ytdlp::{self, TrackMeta};
@@ -44,6 +45,8 @@ pub enum InputMode {
     TrackContextMenu,
     PlaylistRename,
     PlaylistDelete,
+    /// Typing the path of a folder to import as an album.
+    FolderInput,
     Help,
 }
 
@@ -66,6 +69,8 @@ pub enum SidebarItem {
     Music,
     Video,
     Plunder,
+    /// Import a local folder as an album — the discoverable half of `F`.
+    ImportFolder,
     Settings,
 }
 
@@ -76,9 +81,24 @@ impl SidebarItem {
             SidebarItem::PlaylistsHeader
                 | SidebarItem::Playlist { .. }
                 | SidebarItem::Plunder
+                | SidebarItem::ImportFolder
                 | SidebarItem::Settings
         )
     }
+}
+
+// ── Import target ─────────────────────────────────────────────────────────
+
+/// Which playlist file an import's rows land in.
+///
+/// Decided before the scan starts, so the answer cannot drift while ffprobe
+/// works through a few hundred files.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportTarget {
+    /// A new album, under `parent` when there is one to hang it under.
+    NewAlbum { parent: Option<String> },
+    /// A playlist that already exists — an album being rescanned.
+    Existing(PathBuf),
 }
 
 // ── Task messages (async → event loop) ───────────────────────────────────
@@ -118,6 +138,18 @@ pub enum TaskMsg {
     /// "▶ Playing", and then died the moment any key sent an IPC command.
     PlayerGone {
         generation: u64,
+    },
+    /// One more file of a folder import has been probed.
+    ImportProgress {
+        done: usize,
+        total: usize,
+    },
+    /// A folder import finished scanning. The merge itself happens on this side,
+    /// because only the event loop owns the library and the album file.
+    ImportScanned {
+        root: PathBuf,
+        target: ImportTarget,
+        files: Vec<library_import::ImportedFile>,
     },
 }
 
@@ -440,12 +472,18 @@ impl App {
     /// Force a fresh download of the track at `idx` in the displayed playlist,
     /// regardless of its current `cache_status` — `cached` (overwrites the
     /// existing file), `streaming`, or `failed` all go through the same path.
-    /// A no-op, with a status message, if a download for it is already running.
+    /// A no-op, with a status message, if a download for it is already running —
+    /// or if the track is the user's own file, which has no remote to fetch it
+    /// from and whose bytes are not ours to overwrite.
     pub fn recache_track(&mut self, idx: usize) {
         let Some(track) = self.track_at(idx) else {
             return;
         };
         let id = track.id.clone();
+        if track.origin == TrackOrigin::Local {
+            self.set_status("Local file, nothing to download");
+            return;
+        }
         if self.downloading.contains(&id) {
             self.set_status("Already downloading");
             return;
@@ -743,6 +781,18 @@ impl App {
                 .speed
                 .or(self.playlist.default_speed)
                 .unwrap_or(self.config.default_speed);
+            // A remote track always has a stream to fall back on. A local one has
+            // only the file, so if that has moved or its drive is unplugged there
+            // is nothing to play — and handing mpv a path to nothing looks like a
+            // hang rather than an answer.
+            let absent_local =
+                track.origin == TrackOrigin::Local && !local_media_path(track).exists();
+            if absent_local {
+                warn!(id = %id, "local media is not where the row says it is");
+                self.patch_track(&id, |t| t.cache_status = CacheStatus::Missing);
+                self.set_status("File not found");
+                return;
+            }
             (id, speed, play_source_for(track))
         };
 
@@ -929,8 +979,198 @@ impl App {
         items.push(SidebarItem::Video);
         items.push(SidebarItem::Separator);
         items.push(SidebarItem::Plunder);
+        items.push(SidebarItem::ImportFolder);
         items.push(SidebarItem::Settings);
         items
+    }
+
+    /// Where playlist files live, taken from the displayed playlist's own path so
+    /// an import writes its album beside the list it belongs to.
+    pub fn playlists_dir(&self) -> PathBuf {
+        self.playlist_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(cache::playlists_dir)
+    }
+
+    /// The name that addresses the displayed playlist — its file stem, which is
+    /// what an album's `parent` names and what the sidebar shows.
+    pub fn displayed_playlist_name(&self) -> String {
+        self.playlist_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.playlist.name.clone())
+    }
+
+    /// Which playlist file the contents of `root` belong in.
+    ///
+    /// A folder some album already mirrors is rescanned rather than imported
+    /// again — otherwise pointing at the same folder twice leaves an `Ultra (2)`
+    /// holding a second copy of every row.
+    pub fn import_target_for(&self, root: &Path) -> ImportTarget {
+        let normalize = |p: &Path| -> PathBuf { p.components().collect() };
+        let wanted = normalize(root);
+        let linked_to_root = |folder: Option<&Path>| folder.map(normalize) == Some(wanted.clone());
+
+        if linked_to_root(self.playlist.source_folder.as_deref()) {
+            return ImportTarget::Existing(self.playlist_path.clone());
+        }
+        for entry in &self.available_playlists {
+            // The displayed list is already answered for, from memory: it may hold
+            // unsaved edits, and re-reading it would miss them.
+            if entry.path == self.playlist_path || entry.kind != PlaylistKind::Album {
+                continue;
+            }
+            // Only the link is wanted, so a list that will not load is simply not
+            // a match — the import falls back to making a new album.
+            let folder = match Playlist::load(&entry.path) {
+                Ok(pl) => pl.source_folder,
+                Err(e) => {
+                    warn!(err = %e, path = %entry.path.display(), "could not read a playlist while looking for a linked folder");
+                    continue;
+                }
+            };
+            if linked_to_root(folder.as_deref()) {
+                return ImportTarget::Existing(entry.path.clone());
+            }
+        }
+
+        // Two levels only: importing while an album is displayed makes a sibling
+        // under the same parent, not an album inside an album.
+        let parent = if self.playlist.kind == PlaylistKind::Album {
+            self.playlist.parent.clone()
+        } else {
+            Some(self.displayed_playlist_name())
+        };
+        ImportTarget::NewAlbum { parent }
+    }
+
+    /// Scan `root` in the background, ending in a `TaskMsg::ImportScanned`.
+    ///
+    /// The target is settled here rather than on arrival so the album an import
+    /// lands in is the one that was on screen when the user asked for it.
+    pub fn import_folder(&mut self, root: PathBuf) {
+        if !root.is_dir() {
+            self.set_status(format!("Not a folder: {}", root.display()));
+            return;
+        }
+
+        let target = self.import_target_for(&root);
+        self.set_status(format!("Scanning {}", root.display()));
+
+        let task_tx = self.task_tx.clone();
+        tokio::spawn(async move {
+            let progress_tx = task_tx.clone();
+            let files = library_import::scan_and_probe(&root, move |done, total| {
+                let _ = progress_tx.send(TaskMsg::ImportProgress { done, total });
+            })
+            .await;
+            let _ = task_tx.send(TaskMsg::ImportScanned {
+                root,
+                target,
+                files,
+            });
+        });
+    }
+
+    /// Fold a finished scan into the library and the album it belongs to.
+    ///
+    /// The merge rules — nothing deleted, nothing reordered, documents reused —
+    /// live in `library_import::merge_scan`; this decides only which playlist file
+    /// is merged into and keeps the sidebar and the rows on screen in step.
+    pub fn apply_import(
+        &mut self,
+        root: PathBuf,
+        target: ImportTarget,
+        files: Vec<library_import::ImportedFile>,
+    ) {
+        if files.is_empty() {
+            // Deliberately before any file is written: an empty album is worse
+            // than none, and this is most often a mistyped path.
+            self.set_status(format!("No playable files in {}", root.display()));
+            return;
+        }
+
+        match target {
+            // The album on screen. Merging into `self.playlist` is what makes the
+            // rows change under the cursor rather than only on disk.
+            ImportTarget::Existing(path) if path == self.playlist_path => {
+                let report =
+                    library_import::merge_scan(&mut self.library, &mut self.playlist, &root, files);
+                self.save_playlist();
+                // New rows mean the shuffled order no longer covers the list.
+                self.rebuild_shuffle_order();
+                let name = self.displayed_playlist_name();
+                self.report_import(&name, report);
+            }
+            ImportTarget::Existing(path) => {
+                let mut album = match Playlist::load(&path) {
+                    Ok(pl) => pl,
+                    Err(e) => {
+                        error!(err = %e, path = %path.display(), "cannot rescan a playlist that will not load");
+                        self.set_status("Could not read the album");
+                        return;
+                    }
+                };
+                let report =
+                    library_import::merge_scan(&mut self.library, &mut album, &root, files);
+                if let Err(e) = album.save(&path) {
+                    error!(err = %e, path = %path.display(), "failed to save a rescanned album");
+                    self.set_status("Could not save the album");
+                    return;
+                }
+                let name = album.name.clone();
+                self.report_import(&name, report);
+            }
+            ImportTarget::NewAlbum { parent } => {
+                let taken: Vec<String> = self
+                    .available_playlists
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect();
+                let name = library_import::unique_album_name(
+                    &library_import::album_name_for_folder(&root),
+                    &taken,
+                );
+                let path = self.playlists_dir().join(format!("{name}.toml"));
+
+                let mut album = Playlist::empty(&name);
+                album.kind = PlaylistKind::Album;
+                album.parent = parent.clone();
+                let report =
+                    library_import::merge_scan(&mut self.library, &mut album, &root, files);
+                if let Err(e) = album.save(&path) {
+                    error!(err = %e, path = %path.display(), "failed to save an imported album");
+                    self.set_status("Could not save the album");
+                    return;
+                }
+
+                self.available_playlists.push(PlaylistEntry {
+                    name: name.clone(),
+                    path,
+                    kind: PlaylistKind::Album,
+                    parent,
+                });
+                self.available_playlists.sort_by(|a, b| a.name.cmp(&b.name));
+                self.report_import(&name, report);
+            }
+        }
+    }
+
+    /// What an import did, in the footer. `missing` is worth saying out loud: it
+    /// is the only sign that a file the user still has a row for has moved.
+    fn report_import(&mut self, name: &str, report: library_import::ImportReport) {
+        info!(
+            album = %name,
+            added = report.added,
+            updated = report.updated,
+            missing = report.missing,
+            "folder import merged"
+        );
+        self.set_status(format!(
+            "{name} · {} added · {} updated · {} missing",
+            report.added, report.updated, report.missing
+        ));
     }
 
     pub fn sync_channels(&mut self) {
@@ -1158,6 +1398,18 @@ impl App {
                     self.set_status("Playback stopped unexpectedly");
                 }
             }
+
+            TaskMsg::ImportProgress { done, total } => {
+                self.set_status(format!("Scanning {done}/{total}"));
+            }
+
+            TaskMsg::ImportScanned {
+                root,
+                target,
+                files,
+            } => {
+                self.apply_import(root, target, files);
+            }
         }
     }
 
@@ -1179,6 +1431,48 @@ impl App {
         } else {
             self.filtered_indices.len()
         }
+    }
+
+    /// What the rows currently on screen add up to, in seconds.
+    ///
+    /// Only the visible ones, so the panel title's total and its count describe
+    /// the same set of rows under a search filter. A row whose document is gone,
+    /// or whose duration was never learned, contributes nothing.
+    pub fn visible_duration_secs(&self) -> u64 {
+        (0..self.visible_track_count())
+            .filter_map(|cursor| self.track_index_at(cursor))
+            .filter_map(|index| self.playlist.tracks.get(index))
+            .filter_map(|id| self.library.get(id))
+            .map(|track| track.duration)
+            .sum()
+    }
+
+    /// Move the selected row one place down (`down`) or up within the playlist.
+    ///
+    /// Refused under a search filter: the cursor counts visible rows there, so
+    /// ±1 would jump the row over whatever the filter hides. At either end it is
+    /// simply a no-op — nothing to say about a row already where it can go.
+    pub fn move_selected_row(&mut self, down: bool) {
+        if !self.filtered_indices.is_empty() {
+            self.set_status("Clear the search to reorder");
+            return;
+        }
+
+        let from = self.selected;
+        let to = if down { from + 1 } else { from.wrapping_sub(1) };
+        if from >= self.playlist.tracks.len() || to >= self.playlist.tracks.len() {
+            return;
+        }
+
+        self.playlist.tracks.swap(from, to);
+        // The cursor stays on the row the user was holding, not on the position.
+        self.selected = to;
+        self.clamp_scroll();
+        self.save_playlist();
+        // `shuffle_order` is deliberately left alone. It holds indices, so after a
+        // swap it is still a permutation of `0..len` — no track is skipped or
+        // repeated, only two of them trade places in the shuffled run. Rebuilding
+        // would throw away a run the user is in the middle of to fix nothing.
     }
 
     pub fn track_index_at(&self, cursor: usize) -> Option<usize> {
@@ -1547,6 +1841,15 @@ impl App {
 enum PlaySource {
     File(PathBuf),
     Stream(String),
+}
+
+/// Where a local track's media is meant to be: the recorded file, falling back
+/// to `url`, which for a local track is that same path.
+fn local_media_path(track: &Track) -> PathBuf {
+    track
+        .file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(&track.url))
 }
 
 /// Where mpv should read this track from: the cached file when there is one,

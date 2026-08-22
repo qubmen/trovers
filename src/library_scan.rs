@@ -9,11 +9,6 @@
 //! because those are load-bearing; without ffprobe an import still works, with
 //! titles taken from filenames and durations left at zero.
 
-// TEMPORARY: nothing outside the tests calls into here until the import and
-// rescan keys are wired up. Remove this along with the `F`/`R` handlers, at
-// which point every item below has a caller.
-#![allow(dead_code)]
-
 use crate::library::{make_id, MediaKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -245,10 +240,12 @@ fn strip_track_number_prefix(s: &str) -> String {
 
 /// Everything known about a local file: ffprobe's answer where there is one, the
 /// filename's where there is not.
-pub async fn probe(path: &Path) -> ProbedMeta {
-    let from_extension = media_kind_for_path(path).unwrap_or_default();
-    let probed = run_ffprobe(path).await;
-    resolve_meta(path, from_extension, probed)
+///
+/// Takes the whole `ScannedFile` rather than a path, so the kind its extension
+/// already implied is carried in as the fallback instead of worked out twice.
+pub async fn probe(file: &ScannedFile) -> ProbedMeta {
+    let probed = run_ffprobe(&file.path).await;
+    resolve_meta(&file.path, file.media, probed)
 }
 
 /// Combine a probe with what the filename says.

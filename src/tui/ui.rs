@@ -66,7 +66,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_footer(frame, app, rows[3]);
 
     match app.input_mode {
-        InputMode::UrlInput | InputMode::NewPlaylist | InputMode::SearchInput => {
+        InputMode::UrlInput
+        | InputMode::NewPlaylist
+        | InputMode::SearchInput
+        | InputMode::FolderInput => {
             render_input_overlay(frame, app, area);
         }
         InputMode::TrackContextMenu => {
@@ -179,6 +182,14 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     };
                     Line::styled(" ↓ Plunder", style)
                 }
+                SidebarItem::ImportFolder => {
+                    let style = if is_selected {
+                        Style::new().fg(Color::White).bg(ACCENT_DIM)
+                    } else {
+                        Style::new().fg(Color::White)
+                    };
+                    Line::styled(" + Folder", style)
+                }
                 SidebarItem::Settings => {
                     let active = app.focus == Focus::Settings;
                     let style = if is_selected || active {
@@ -233,19 +244,64 @@ fn missing_document_row<'a>(
     .style(row_style)
 }
 
+/// The track panel's title: the list's name, what it holds in total, and which
+/// slice of it is on screen.
+///
+/// `total_secs` is what the visible rows add up to, so it agrees with `total`
+/// under a search filter. Zero means nothing on screen knows its length — an
+/// import without ffprobe — and is left out rather than shown as `0m`, which
+/// would read as a claim instead of an absence.
+pub(crate) fn track_panel_title(
+    name: &str,
+    total: usize,
+    first: usize,
+    last: usize,
+    total_secs: u64,
+) -> String {
+    if total == 0 {
+        return format!(" {name} ");
+    }
+
+    let tracks = if total == 1 { "track" } else { "tracks" };
+    let mut title = format!(" {name} · {total} {tracks}");
+    if total_secs > 0 {
+        title.push_str(" · ");
+        title.push_str(&coarse_duration(total_secs));
+    }
+    // Two spaces: the counter is a separate reading from the summary, not
+    // another item in its `·` list.
+    format!("{title}  [ {first}–{last} / {total} ] ")
+}
+
+/// A running time at the resolution a total wants: `6h 12m`, `47m`, `<1m`.
+///
+/// Seconds are noise across a whole playlist, but rounding a real duration down
+/// to `0m` would look like an unknown one, so anything under a minute says so.
+fn coarse_duration(secs: u64) -> String {
+    let minutes = secs / 60;
+    if minutes == 0 {
+        return "<1m".to_string();
+    }
+    let (hours, minutes) = (minutes / 60, minutes % 60);
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
 fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let total = app.visible_track_count();
     let first = app.track_offset + 1;
     let last = (app.track_offset + app.track_list_height as usize).min(total);
 
-    let title = if total == 0 {
-        format!(" {} ", app.playlist.name)
-    } else {
-        format!(
-            " {}  [ {}–{} / {} ] ",
-            app.playlist.name, first, last, total
-        )
-    };
+    let title = track_panel_title(
+        &app.playlist.name,
+        total,
+        first,
+        last,
+        app.visible_duration_secs(),
+    );
 
     let block = make_panel_block(&title, app.focus == Focus::TrackList);
 
@@ -819,6 +875,9 @@ fn footer_left_message(app: &App) -> String {
         (InputMode::PlaylistDelete, _) => {
             return "Delete playlist? · [y/enter] confirm · [n/esc] cancel".to_string();
         }
+        (InputMode::FolderInput, _) => {
+            return "Import folder: Enter path · [enter] confirm · [esc] cancel".to_string();
+        }
         (InputMode::Help, _) => return "Help open · [?]/[esc] close".to_string(),
         _ => {}
     }
@@ -860,6 +919,7 @@ fn footer_center_context(app: &App) -> String {
         InputMode::TrackContextMenu => "Move track".to_string(),
         InputMode::PlaylistRename => "Rename playlist".to_string(),
         InputMode::PlaylistDelete => "Delete playlist".to_string(),
+        InputMode::FolderInput => "Import folder".to_string(),
         InputMode::Help => "Help".to_string(),
     };
 
@@ -916,6 +976,7 @@ fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::UrlInput => ("Add Track", "URL: "),
         InputMode::NewPlaylist => ("New Playlist", "Name: "),
         InputMode::SearchInput => ("Search", "/"),
+        InputMode::FolderInput => ("Import Folder", "Path: "),
         _ => return,
     };
 
@@ -1105,6 +1166,8 @@ fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
     lines.push(Line::raw(
         "  [n] next           [b] previous    [N] new playlist",
     ));
+    lines.push(Line::raw("  [F] import folder  [R] rescan folder"));
+    lines.push(Line::raw("  [JK] move row down/up"));
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![Span::styled(
