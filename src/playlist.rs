@@ -65,34 +65,23 @@ pub struct Playlist {
     #[serde(default)]
     pub shuffle: bool,
     pub default_speed: Option<f32>,
-    pub tracks: Vec<Track>,
+    /// Library ids, in playing order — see `crate::library`. A playlist is a
+    /// running order over the library, not a container of track data, so the
+    /// same track can sit in several playlists with one position between them.
+    pub tracks: Vec<String>,
     pub current_track: Option<String>,
 }
 
 impl Playlist {
     /// Load a playlist from a TOML file.
-    /// Resets any Cached track whose file is missing back to Streaming.
+    ///
+    /// Nothing to repair here any more: a playlist holds only ids, and reconciling
+    /// a track's recorded `cache_status` with what is actually on disk is
+    /// `Library::load`'s job — one place rather than once per playlist file.
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read playlist at {}", path.display()))?;
-        let mut playlist: Playlist =
-            toml::from_str(&raw).context("failed to parse playlist TOML")?;
-
-        // File-existence check: if cached file was deleted or never written, treat as streaming.
-        // Also reset any in-progress downloads (crash recovery) back to streaming.
-        for track in &mut playlist.tracks {
-            if track.cache_status == CacheStatus::Downloading {
-                track.cache_status = CacheStatus::Streaming;
-            } else if track.cache_status == CacheStatus::Cached {
-                let exists = track.file.as_ref().map(|p| p.exists()).unwrap_or(false);
-                if !exists {
-                    track.cache_status = CacheStatus::Streaming;
-                    track.file = None;
-                }
-            }
-        }
-
-        Ok(playlist)
+        toml::from_str(&raw).context("failed to parse playlist TOML")
     }
 
     /// Serialize playlist to TOML and write to disk atomically.
@@ -138,9 +127,10 @@ impl Playlist {
         Ok((playlist, path))
     }
 
-    /// Append a track to this playlist (does not save to disk).
-    pub fn add_track(&mut self, track: Track) {
-        self.tracks.push(track);
+    /// Append a library id to this playlist (does not save to disk). Writing the
+    /// track's own document is the library's business — see `Library::upsert`.
+    pub fn add_track(&mut self, id: String) {
+        self.tracks.push(id);
     }
 
     /// Rename this playlist to `new_name` by updating the name field,
@@ -175,19 +165,20 @@ impl Playlist {
             .with_context(|| format!("failed to delete playlist at {}", path.display()))
     }
 
-    /// Remove a track by library id and return it.
-    /// Returns `None` if no track with the given id exists.
-    pub fn remove_track_by_id(&mut self, id: &str) -> Option<Track> {
-        if let Some(idx) = self.tracks.iter().position(|t| t.id == id) {
-            let track = self.tracks.remove(idx);
-            // Clear current_track pointer if it pointed to the removed track
-            if self.current_track.as_deref() == Some(id) {
-                self.current_track = None;
-            }
-            Some(track)
-        } else {
-            None
+    /// Drop the first row referencing `id`, returning whether one was there.
+    ///
+    /// The track itself is untouched — it lives in the library and may well be
+    /// listed by other playlists.
+    pub fn remove_track_by_id(&mut self, id: &str) -> bool {
+        let Some(idx) = self.tracks.iter().position(|t| t == id) else {
+            return false;
+        };
+        self.tracks.remove(idx);
+        // Clear current_track pointer if it pointed to the removed row.
+        if self.current_track.as_deref() == Some(id) {
+            self.current_track = None;
         }
+        true
     }
 }
 

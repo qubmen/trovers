@@ -192,7 +192,31 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 pub(crate) fn row_is_playing(app: &App, id: &str) -> bool {
     app.playing
         .as_ref()
-        .is_some_and(|p| p.path == app.playlist_path && p.track().id == id)
+        .is_some_and(|p| p.path == app.playlist_path && p.track_id == id)
+}
+
+/// The row shown for a playlist entry whose track document is gone. It cannot
+/// play, so it shows the id it is looking for — the only thing left to identify
+/// it by — and is dimmed throughout, `✕` included.
+fn missing_document_row<'a>(
+    num_str: &str,
+    id: &str,
+    title_width: usize,
+    is_selected: bool,
+) -> Row<'a> {
+    let row_style = if is_selected {
+        Style::new().fg(TEXT_DIM).bg(ROW_SELECTED_BG)
+    } else {
+        Style::new().fg(TEXT_DIM)
+    };
+    Row::new(vec![
+        Cell::from(Line::from(vec![Span::raw("  "), Span::raw("✕")])),
+        Cell::from(num_str.to_string()),
+        Cell::from(truncate(&format!("missing: {id}"), title_width)),
+        Cell::from(""),
+        Cell::from("--:--"),
+    ])
+    .style(row_style)
 }
 
 fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -230,9 +254,18 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows: Vec<Row> = (app.track_offset..app.track_offset + app.track_list_height as usize)
         .filter_map(|cursor| {
             let track_idx = app.track_index_at(cursor)?;
-            let track = app.playlist.tracks.get(track_idx)?;
-            let is_playing = row_is_playing(app, &track.id);
+            let id = app.playlist.tracks.get(track_idx)?;
+            let is_playing = row_is_playing(app, id);
             let is_selected = cursor == app.selected;
+            let num_str = format!("{:>3} ", track_idx + 1);
+
+            // A row holds an id, and the document it names can go missing —
+            // deleted by hand, or by another instance. Render it dimmed rather
+            // than hiding it, so the row the user can see is the row they can
+            // delete.
+            let Some(track) = app.library.get(id) else {
+                return Some(missing_document_row(&num_str, id, title_width, is_selected));
+            };
 
             let play_icon = if is_playing { "▶" } else { " " };
             // `None` means "no distinct color" — the icon just takes whatever
@@ -240,7 +273,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
             // every other cell in the row. `Cached`/`Streaming` stay that way
             // since neither is actionable; `Downloading` and `Failed` get a
             // fixed color so they read as a status regardless of selection.
-            let (status_icon, status_color) = if app.downloading.contains(&track.id) {
+            let (status_icon, status_color) = if app.downloading.contains(id) {
                 ("⟳", Some(GOLD))
             } else {
                 match track.cache_status {
@@ -265,7 +298,6 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default()
             };
 
-            let num_str = format!("{:>3} ", track_idx + 1);
             let title_str = truncate(
                 track.user_title.as_deref().unwrap_or(&track.title),
                 title_width,

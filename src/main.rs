@@ -119,7 +119,18 @@ async fn main() -> Result<()> {
         })
         .collect();
 
-    let mut app = tui::App::new(playlist, config, available_playlists, playlist_path);
+    // The one place the library's location is decided; `Library` itself only ever
+    // works against the root it is handed, which is what makes it testable.
+    let library = library::Library::load(&cache::tracks_dir())?;
+    info!(tracks = library.len(), "loaded track library");
+
+    let mut app = tui::App::new(
+        playlist,
+        config,
+        available_playlists,
+        playlist_path,
+        library,
+    );
 
     // If a URL was provided on CLI, queue it for fetch immediately
     if let Some(url) = cli.url {

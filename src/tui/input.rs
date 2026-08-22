@@ -1,4 +1,5 @@
 use super::{App, Focus, InputMode, SettingsItem, SidebarItem, SETTINGS_ITEMS};
+use crate::library;
 use crate::playlist::{LoopMode, Playlist, Track};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -211,7 +212,7 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         // `last_position` if the track has one).
         KeyCode::Enter => {
             if let Some(idx) = app.track_index_at(app.selected) {
-                let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                let start_pos = app.track_at(idx).and_then(resume_start_pos);
                 app.request_playback(idx, start_pos);
             }
         }
@@ -232,7 +233,7 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                 };
                 note_ipc_result(app, "pause", res);
             } else if let Some(idx) = app.track_index_at(app.selected) {
-                let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+                let start_pos = app.track_at(idx).and_then(resume_start_pos);
                 app.request_playback(idx, start_pos);
             }
         }
@@ -395,7 +396,7 @@ fn step_track(app: &mut App, forward: bool) {
     app.selected = next_cursor;
     app.clamp_scroll();
     if let Some(idx) = app.track_index_at(next_cursor) {
-        let start_pos = app.playlist.tracks.get(idx).and_then(resume_start_pos);
+        let start_pos = app.track_at(idx).and_then(resume_start_pos);
         app.request_playback(idx, start_pos);
     }
 }
@@ -434,11 +435,8 @@ pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) {
     };
     note_ipc_result(app, "speed", res);
 
-    // Persist through whichever copy is the source of truth for the playing
-    // track's identity: the displayed playlist (already the case when paths
-    // match, since `playing_track_mut` mutated it directly) or the playing
-    // session's own playlist file.
-    app.save_playing_session_playlist();
+    // Persist the new speed into the track's own document.
+    app.save_playing_track();
 }
 
 /// Change the volume by `delta` and push it to mpv. The config value is updated
@@ -625,7 +623,7 @@ fn handle_search(app: &mut App, key: KeyEvent) -> Result<Action> {
 pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Action> {
     if key.code == KeyCode::Char('y') {
         if let Some(idx) = app.track_index_at(app.selected) {
-            let id = app.playlist.tracks[idx].id.clone();
+            let id = app.playlist.tracks[idx].clone();
             // Only stop playback if the track being deleted is literally the
             // one actually driving playback right now (identity is `(path,
             // id)`) — not just any track with a matching id that
@@ -646,7 +644,7 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
                 let _ = app.pos_tx.send(0.0);
             }
 
-            let file_to_delete = app.playlist.tracks[idx].file.clone();
+            let file_to_delete = app.library.get(&id).and_then(|t| t.file.clone());
             app.playlist.tracks.remove(idx);
             // A download still running for this row has nowhere to land now.
             app.clear_download_state(&id);
@@ -657,13 +655,22 @@ pub(crate) fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> Result<Acti
             }
             app.clamp_scroll();
             app.save_playlist();
-            if let Some(path) = file_to_delete {
-                // The audio cache is keyed by `id`, so this file may well
-                // be the one backing the same track in another playlist.
-                if app.platform_id_referenced_elsewhere(&id) {
-                    info!(id = %id, path = %path.display(), "kept cached file, another playlist still references it");
-                } else if let Err(e) = std::fs::remove_file(&path) {
-                    warn!(path = %path.display(), err = %e, "failed to delete cached file");
+
+            // Only the row is definitely gone. The track's document and its
+            // cached audio are shared by every playlist listing it, so they go
+            // only once nothing does — scoped to the *platform* id, which is
+            // what the audio cache is keyed by.
+            let platform_id = library::platform_id_of(&id).to_string();
+            if app.platform_id_referenced_elsewhere(&platform_id) {
+                info!(id = %id, "kept the track document, another playlist still references it");
+            } else {
+                if let Err(e) = app.library.remove(&id) {
+                    warn!(id = %id, err = %e, "failed to delete the track document");
+                }
+                if let Some(path) = file_to_delete {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        warn!(path = %path.display(), err = %e, "failed to delete cached file");
+                    }
                 }
             }
         }
@@ -767,11 +774,6 @@ pub(crate) async fn handle_playlist_rename(app: &mut App, key: KeyEvent) -> Resu
                             app.sidebar_selected = 1 + new_pos; // +1 for PlaylistsHeader
                         }
 
-                        // In-flight downloads recorded the old path at add-time;
-                        // it no longer exists, so their completion would patch
-                        // nothing and leave the tracks stuck at `downloading`.
-                        app.remap_download_targets(&old_path, &new_path);
-
                         // If the playing session belongs to the renamed playlist file,
                         // re-point it at the new path so future saves (flush_playing_position,
                         // adjust_playing_track_speed, request_playback's leaving-track save)
@@ -837,9 +839,9 @@ pub(crate) async fn handle_playlist_delete(app: &mut App, key: KeyEvent) -> Resu
 
                 match Playlist::delete(&path) {
                     Ok(()) => {
-                        // Every row an in-flight download was going to fill has
-                        // just gone with the file.
-                        app.clear_download_state_for_playlist(&path);
+                        // The tracks it listed are untouched: they live in the
+                        // library, and any in-flight download still lands in the
+                        // document it was started for.
                         app.available_playlists.retain(|(n, _)| n != &name);
                         // Move sidebar selection up if needed
                         let new_items = app.sidebar_items();

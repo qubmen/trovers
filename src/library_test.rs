@@ -177,6 +177,38 @@ mod tests {
         assert!(reloaded.get("youtube:abc").is_some());
     }
 
+    /// `speed`, `user_title`, `user_artist` and `file` are absent from a document
+    /// whenever they are `None`, so a hand-written or freshly-migrated document
+    /// carries none of them. Loading must not need them.
+    #[test]
+    fn a_document_without_the_optional_fields_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path()).expect("mkdir");
+        std::fs::write(
+            dir.path().join("bandcamp-min001.toml"),
+            r#"
+id = "bandcamp:min001"
+url = "https://example.com/minimal"
+source = "bandcamp.com"
+title = "Minimal Track"
+artist = "Minimal Artist"
+channel = "MinChannel"
+duration = 120
+cache_status = "streaming"
+last_position = 0
+added_at = "2025-06-01T08:00:00Z"
+"#,
+        )
+        .expect("write");
+
+        let lib = Library::load(dir.path()).expect("load");
+        let got = lib.get("bandcamp:min001").expect("track present");
+        assert_eq!(got.speed, None);
+        assert_eq!(got.user_title, None);
+        assert_eq!(got.user_artist, None);
+        assert_eq!(got.file, None);
+    }
+
     #[test]
     fn load_skips_an_unparseable_document_and_keeps_the_rest() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -269,28 +301,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut lib = Library::load(dir.path()).expect("load");
         assert!(lib.remove("youtube:nope").expect("remove").is_none());
-    }
-
-    /// A playlist is an ordered id list, so resolution has to preserve that
-    /// order — and tolerate an id whose document has gone missing rather than
-    /// refuse to show the playlist at all.
-    #[test]
-    fn resolve_follows_the_given_order_and_skips_unknown_ids() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut lib = Library::load(dir.path()).expect("load");
-        for id in ["youtube:one", "youtube:two"] {
-            let mut t = track_with_id(id);
-            t.title = id.to_string();
-            lib.upsert(t).expect("upsert");
-        }
-
-        let ids = vec![
-            "youtube:two".to_string(),
-            "youtube:gone".to_string(),
-            "youtube:one".to_string(),
-        ];
-        let titles: Vec<&str> = lib.resolve(&ids).iter().map(|t| t.title.as_str()).collect();
-        assert_eq!(titles, vec!["youtube:two", "youtube:one"]);
     }
 
     // ── Library::load state repair ────────────────────────────────────────

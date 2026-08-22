@@ -140,18 +140,12 @@ impl Library {
         Ok(Some(track))
     }
 
-    /// The tracks for `ids`, in that order, skipping ids with no document.
-    ///
-    /// Skipping rather than failing: a playlist referencing a document that has
-    /// gone missing should still open, minus that row.
-    pub fn resolve(&self, ids: &[String]) -> Vec<&Track> {
-        ids.iter().filter_map(|id| self.tracks.get(id)).collect()
-    }
-
     pub fn len(&self) -> usize {
         self.tracks.len()
     }
 
+    /// Pairs with `len` — clippy asks for it, and the tests read it.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
     }
