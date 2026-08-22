@@ -4576,6 +4576,57 @@ tracks = []
         );
     }
 
+    /// Space on the exact track that is playing right now pauses it — the
+    /// plain-track half of the same-vs-different rule the album header tests
+    /// above check for headers.
+    #[tokio::test]
+    async fn space_on_the_playing_track_pauses() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut pl = make_playlist("Active");
+        add_track(&mut pl, make_track("x1", "X One"));
+        add_track(&mut pl, make_track("x2", "X Two"));
+        let (_dir, path, mut app) = app_on_disk(pl.clone());
+        app.player = Some(make_dead_player(dead_player_socket("same-track-pause")));
+        app.playing = Some(session_at(path, pl, 0)); // x1
+        app.position = 30.0;
+        app.selected = 0; // cursor on x1, the track that's playing
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char(' ')))
+            .await
+            .expect("handle space");
+
+        assert!(app.is_paused, "space on the playing track must pause it");
+        assert_eq!(app.position, 30.0, "must not restart or seek");
+    }
+
+    /// Space on a *different* track — something else is playing — switches
+    /// playback to it, mirroring what Enter already does.
+    #[tokio::test]
+    async fn space_on_a_different_track_switches_playback_to_it() {
+        use crate::tui::input::handle_tracklist;
+
+        let mut pl = make_playlist("Active");
+        add_track(&mut pl, make_track("x1", "X One"));
+        add_track(&mut pl, make_track("x2", "X Two"));
+        let (_dir, path, mut app) = app_on_disk(pl.clone());
+        app.player = Some(make_dead_player(dead_player_socket("diff-track-switch")));
+        app.playing = Some(session_at(path, pl, 0)); // x1
+        app.position = 30.0;
+        app.selected = 1; // cursor on x2, not the track that's playing
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char(' ')))
+            .await
+            .expect("handle space");
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_id.as_str()),
+            Some("x2"),
+            "playback switched to the track under the cursor"
+        );
+        assert!(!app.is_paused, "a freshly started track is not paused");
+    }
+
     #[test]
     fn is_playing_track_true_for_exact_path_and_video_id_match() {
         let mut app = make_app_with_playlists("Alpha", &["Alpha"]);
@@ -8640,6 +8691,37 @@ tracks = []
             Some("k1"),
             "must not have switched to a different track"
         );
+    }
+
+    /// The other half of the fix: Space on a *different* album's header —
+    /// one that is not the one currently playing — must switch playback to
+    /// it, the same way Enter already does for a track row. Before this,
+    /// "anything playing" alone made Space always pause, with no way to
+    /// switch albums from a header at all.
+    #[tokio::test]
+    async fn space_on_a_different_albums_header_switches_playback_to_it() {
+        use crate::tui::input::handle_tracklist;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Ace", &["a1"]), ("Zed", &["z1"])]);
+        // Rows (both folded): header:Ace (0), header:Zed (1).
+        let ace_path = app.albums[0].path.clone();
+        let ace_playlist = app.albums[0].playlist.clone();
+        app.player = Some(make_dead_player(dead_player_socket("switch-album")));
+        app.playing = Some(session_at(ace_path, ace_playlist, 0)); // a1, from Ace
+        app.position = 30.0;
+        app.selected = 1; // header:Zed
+
+        handle_tracklist(&mut app, key(crossterm::event::KeyCode::Char(' ')))
+            .await
+            .expect("handle space");
+
+        assert_eq!(
+            app.playing.as_ref().map(|p| p.track_id.as_str()),
+            Some("z1"),
+            "playback switched to the album under the cursor"
+        );
+        assert!(!app.is_paused, "a freshly started track is not paused");
     }
 
     #[test]

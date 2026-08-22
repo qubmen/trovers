@@ -23,6 +23,34 @@ See `proposal.md` for motivation and scope (albums only, marker-only, no numeric
 
 ### D1: `Space` on an album header triggers "play this album"
 
+> **Superseded.** Two bugs surfaced once this shipped, both traced to the
+> same cause: `Space`'s meaning depended on cursor position (header vs.
+> track) rather than on whether the row under the cursor is the one actually
+> playing. First, pausing while sitting on the *playing* album's own header
+> re-ran "play this album from its resume point" instead of pausing — mpv
+> jumped back a few seconds instead of stopping. Fixing that by always
+> pause-toggling whenever a player is active created the second bug: there
+> was then no way to switch playback to a *different* album from its header
+> at all — Space on any header, playing or not, just paused whatever was
+> already going.
+>
+> The rule that replaced this section's "always play" and the
+> always-pause-if-a-player-exists fix that followed it: `Space` pauses/resumes
+> only when the row under the cursor (a track, or a header's resolved resume
+> target — D2) is the one `self.playing` already names; otherwise it starts
+> that row, switching playback to it exactly as `Enter` already does for a
+> plain track row. This is symmetric with `Enter` and needs no special case
+> for headers versus tracks — "starting a new album" and "starting a
+> different track" are the same action once the check is "is this what's
+> already playing," not "is this a header." See
+> `track-album-management-fixes`'s two follow-up commits on
+> `feat/album-playback-resume` for the actual fix and its tests
+> (`space_on_a_header_pauses_instead_of_restarting_when_the_album_is_already_playing`,
+> `space_on_a_different_albums_header_switches_playback_to_it`).
+>
+> The paragraphs below describe the original (superseded) reasoning as
+> history.
+
 `Space`'s handler today (`src/tui/input.rs:249-265`) is: if a player is running, toggle pause; otherwise `play_row(app.selected)`. `play_row` returns `false` on a header row (`row_at` only matches `VisibleRow::Track`), so `Space` on a header currently does nothing when idle, and toggles pause (of whatever else is playing) when something is already playing.
 
 New behavior: when the cursor is on an album header (`app.album_of(app.selected)` is `Some`), `Space` always means "play this album" — resolve its resume target (D2) and call `play_from_list(RowSource::Album(album), idx, start_pos)`, regardless of whether something else is currently playing (starting a new album is itself the pause-equivalent action for that row; there is nothing to "pause" about a header). Outside of a header row, `Space`'s existing behavior (pause toggle / play the row) is unchanged.
@@ -72,7 +100,7 @@ where `is_resume_marker` is true iff `source` is `RowSource::Album(album)`, `!is
 
 ## Risks / Trade-offs
 
-- **[Risk] `Space` on a header now always (re)starts the album, even if the user meant to just glance at the header while something else plays** → **Mitigation**: this matches `Space`'s existing meaning everywhere else in the list ("play/resume what's under the cursor"); a header having previously been an exception (silently doing nothing) was the inconsistency, not the fix.
+- **[Risk] `Space` on a header now always (re)starts the album, even if the user meant to just glance at the header while something else plays** → this risk materialized exactly as written and is what D1's superseding note above fixes: `Space` now (re)starts a header's album only when that album isn't already the one playing, pausing/resuming it otherwise.
 - **[Trade-off] The marker and "is this album empty" are both resolved via the same `Option`-returning helper, so an empty album's header still supports `Space` being pressed harmlessly** → accepted: `Space` on an empty album's header is a no-op, matching `play_row`'s existing "a header names a group, not a track" contract for `Enter`/`Space` elsewhere.
 
 ## Migration Plan

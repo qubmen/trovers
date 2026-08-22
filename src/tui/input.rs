@@ -244,43 +244,64 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             }
         }
 
-        // Space: toggle pause if anything is playing, full stop — that check
-        // comes first and wins over everything below it. Without this
-        // ordering, pressing Space a second time while sitting on an album
-        // header (to pause) instead re-ran the "play this album" branch: it
-        // called `play_from_list` again with the album's saved
-        // `current_track`/`last_position`, which respawned mpv a few seconds
-        // behind the live position instead of pausing it — "seeks back and
-        // keeps playing" rather than stopping.
+        // Space: pause/resume if the row under the cursor is the one actually
+        // playing right now; otherwise switch playback to it — a track row
+        // starts itself, a header starts its album (resuming from
+        // `current_track`/`last_position` if it has one, otherwise its first
+        // track). This is what lets Space on a *different* album's header
+        // switch playback to it, the same way Enter already does for a track
+        // row, while Space on the header of the album that's already playing
+        // pauses instead of restarting it from its last saved position.
         //
-        // Only when nothing is playing does the row matter: on an album
-        // header, play that album — resuming from its
-        // `current_track`/`last_position` if it has one, otherwise from its
-        // first track. On any other row, start it (resuming from
-        // `last_position` if the track has one).
+        // A dead player (mpv exited, crashed, or was killed) never counts as
+        // "already playing" even if `self.playing` still names this exact
+        // row — ADR-013 leaves that pointer in place so the footer can show
+        // what was last playing, but there is nothing left to pause, so
+        // Space (re)starts it instead, same as it always has.
         KeyCode::Char(' ') => {
-            if app.player.is_some() {
-                app.is_paused = !app.is_paused;
-                let pausing = app.is_paused;
-                let res = match &app.player {
-                    Some(player) => Some(if pausing {
-                        player.pause().await
-                    } else {
-                        player.resume().await
-                    }),
-                    None => None,
-                };
-                note_ipc_result(app, "pause", res);
-            } else if let Some(album) = app.album_of(app.selected) {
-                if let Some(loaded) = app.albums.get(album) {
-                    if let Some((idx, start_pos)) =
-                        crate::tui::album_resume_target(loaded, &app.library)
-                    {
-                        app.play_from_list(crate::tui::RowSource::Album(album), idx, start_pos);
-                    }
+            let target = match app.row_at(app.selected).copied() {
+                Some(crate::tui::VisibleRow::Track { source, index }) => {
+                    let start_pos = app
+                        .source_playlist(source)
+                        .and_then(|(pl, _)| pl.tracks.get(index))
+                        .and_then(|id| app.library.get(id))
+                        .and_then(resume_start_pos);
+                    Some((source, index, start_pos))
                 }
-            } else {
-                app.play_row(app.selected);
+                Some(crate::tui::VisibleRow::AlbumHeader { album }) => app
+                    .albums
+                    .get(album)
+                    .and_then(|loaded| crate::tui::album_resume_target(loaded, &app.library))
+                    .map(|(idx, start_pos)| (crate::tui::RowSource::Album(album), idx, start_pos)),
+                None => None,
+            };
+
+            if let Some((source, index, start_pos)) = target {
+                let already_playing = app.player.is_some()
+                    && app
+                        .source_playlist(source)
+                        .and_then(|(pl, path)| {
+                            pl.tracks
+                                .get(index)
+                                .map(|id| (path.to_path_buf(), id.clone()))
+                        })
+                        .is_some_and(|(path, id)| app.is_playing_track(&path, &id));
+
+                if already_playing {
+                    app.is_paused = !app.is_paused;
+                    let pausing = app.is_paused;
+                    let res = match &app.player {
+                        Some(player) => Some(if pausing {
+                            player.pause().await
+                        } else {
+                            player.resume().await
+                        }),
+                        None => None,
+                    };
+                    note_ipc_result(app, "pause", res);
+                } else {
+                    app.play_from_list(source, index, start_pos);
+                }
             }
         }
 

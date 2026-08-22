@@ -4,7 +4,7 @@ An album already remembers exactly where playback left off — `LoadedAlbum.play
 
 ## What Changes
 
-- `Space` on an album header, when nothing about that header is otherwise pending (no player toggling elsewhere), starts playback of that album: from `current_track` at its `last_position` if the album has one, otherwise from its first track. Reuses the existing `play_from_list` path — no new playback machinery.
+- `Space` on an album header starts playback of that album — from `current_track` at its `last_position` if the album has one, otherwise from its first track — reusing the existing `play_from_list` path, no new playback machinery. **Amended in a follow-up fix**: this only fires when the album isn't already the one playing; `Space` on the header of the album that *is* currently playing pauses/resumes it instead of restarting it, and `Space` on a *different* album's header now switches playback to it (previously there was no way to do that from a header once anything was playing). See `design.md`'s D1 for what broke and why.
 - A track row shows a dim marker in its otherwise-blank play-icon slot when that row's track is its album's `current_track` and the album is not the one actually driving playback right now (`row_is_playing` is false for it). This marks "this is where the album will resume from" without implying it is currently playing.
 - No new persisted fields, no numeric position display — the marker is glyph-only. Scope is explicitly limited to albums (`RowSource::Album`); the displayed (top-level) playlist's own `current_track` is not marked, by request.
 

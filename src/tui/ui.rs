@@ -1356,7 +1356,7 @@ fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
         Style::new().fg(GOLD).bold(),
     )]));
     lines.push(Line::raw("  [enter] open/close  [r] rename   [d] forget"));
-    lines.push(Line::raw("  [spc] play album    [R] rescan its folder"));
+    lines.push(Line::raw("  [R] rescan its folder"));
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![Span::styled(
