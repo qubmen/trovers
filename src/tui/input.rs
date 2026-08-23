@@ -617,6 +617,17 @@ pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) {
         }) {
             warn!(err = %e, path = %path.display(), "failed to save the album's speed");
         }
+        // `PlayingSession.playlist` is its own snapshot, taken when playback
+        // started, and `with_list_at` above only touched the real copy
+        // (`self.albums[i]` or the file) — not this one. Without refreshing
+        // it too, both the next call's `base` (recomputed from this same
+        // stale snapshot) and the Now Playing header's speed
+        // (`ui.rs`'s `playing_playlist()`) would keep reading the old value
+        // forever, which is what "speed doesn't change" actually was: the
+        // write landed, but nothing that reads it afterward ever saw it.
+        if let Some(session) = app.playing.as_mut() {
+            session.playlist.default_speed = Some(new_speed);
+        }
     } else {
         if let Some(track) = app.playing_track_mut() {
             track.speed = Some(new_speed);

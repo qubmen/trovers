@@ -4393,6 +4393,46 @@ tracks = []
         assert_eq!(k2_speed, expected, "an untouched chapter inherits it");
     }
 
+    /// The bug this fixes: `PlayingSession.playlist` is its own snapshot
+    /// taken when playback started, and writing the new speed only to the
+    /// real album (`self.albums`/the file) without also refreshing that
+    /// snapshot meant every read of "the current speed" — the next `]`
+    /// press's own base, and the Now Playing header — kept seeing the value
+    /// from *before* the first press, forever. A second press must move
+    /// further, not repeat the first press's result.
+    #[tokio::test]
+    async fn adjust_playing_track_speed_on_an_album_compounds_across_presses() {
+        use crate::tui::input::adjust_playing_track_speed;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1"])]);
+        let album_path = app.albums[0].path.clone();
+        let album_playlist = app.albums[0].playlist.clone();
+        app.playing = Some(session_at(album_path, album_playlist, 0));
+
+        adjust_playing_track_speed(&mut app, 0.1).await;
+        let after_first = app.albums[0].playlist.default_speed;
+        adjust_playing_track_speed(&mut app, 0.1).await;
+        let after_second = app.albums[0].playlist.default_speed;
+
+        assert_eq!(
+            after_first,
+            Some(app.config.default_speed + 0.1),
+            "first press"
+        );
+        assert_eq!(
+            after_second,
+            Some(app.config.default_speed + 0.2),
+            "second press must build on the first, not repeat it"
+        );
+        assert_eq!(
+            app.playing_playlist().and_then(|pl| pl.default_speed),
+            after_second,
+            "the playing session's own snapshot must stay in step too, or the \
+             Now Playing header would keep showing the old speed"
+        );
+    }
+
     // ── Task 4: Now Playing / track-highlight render from app.playing ──────────
 
     #[test]
