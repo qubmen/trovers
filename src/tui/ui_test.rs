@@ -7079,8 +7079,14 @@ tracks = []
             .await
             .expect("handle r");
 
-        assert!(app.albums[0].playlist.shuffle, "the album's own shuffle is on");
-        assert!(!app.playlist.shuffle, "the displayed playlist's is untouched");
+        assert!(
+            app.albums[0].playlist.shuffle,
+            "the album's own shuffle is on"
+        );
+        assert!(
+            !app.playlist.shuffle,
+            "the displayed playlist's is untouched"
+        );
         assert!(
             crate::playlist::Playlist::load(&album_path)
                 .expect("reload")
@@ -9090,7 +9096,11 @@ tracks = []
 
         app.move_track_to_playlist("Kino").expect("move");
 
-        assert_eq!(app.playlist.tracks, vec!["b".to_string()], "left the parent");
+        assert_eq!(
+            app.playlist.tracks,
+            vec!["b".to_string()],
+            "left the parent"
+        );
         assert_eq!(
             app.albums[0].playlist.tracks,
             vec!["k1".to_string(), "a".to_string()],
@@ -9317,7 +9327,11 @@ tracks = []
             .expect("handled");
         drain_import(&mut app).await;
 
-        assert_eq!(app.albums.len(), 1, "auto matching made a new sibling album");
+        assert_eq!(
+            app.albums.len(),
+            1,
+            "auto matching made a new sibling album"
+        );
         assert_eq!(app.albums[0].playlist.tracks.len(), 1);
     }
 
@@ -9411,7 +9425,11 @@ tracks = []
         drain_import(&mut app).await;
 
         assert_eq!(app.playlist.tracks, vec!["a".to_string()], "own untouched");
-        assert_eq!(app.albums[0].playlist.tracks.len(), 2, "k1 plus the new file");
+        assert_eq!(
+            app.albums[0].playlist.tracks.len(),
+            2,
+            "k1 plus the new file"
+        );
     }
 
     // ── Rendering an album ────────────────────────────────────────────────

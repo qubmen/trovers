@@ -716,7 +716,11 @@ mod tests {
         };
         add_single_file(&mut lib, &mut other_list, imported(&path));
 
-        assert_eq!(other_list.tracks, vec![id.clone()], "one row in the new list");
+        assert_eq!(
+            other_list.tracks,
+            vec![id.clone()],
+            "one row in the new list"
+        );
         let track = lib.get(&id).expect("track");
         assert_eq!(track.last_position, 176, "position survives");
         assert_eq!(track.speed, Some(1.5), "speed survives");

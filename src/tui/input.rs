@@ -355,19 +355,17 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         // playlist otherwise (also on a header, which belongs to no list).
         // Persisted immediately either way: relying on the save at quit meant
         // the setting was lost to any exit that did not run it.
-        KeyCode::Char('l') => {
-            match row_owning_list(app) {
-                Some(path) => {
-                    let _ = app.with_list_at(&path, |pl, _lib| {
-                        pl.loop_mode = cycle_loop_mode(&pl.loop_mode);
-                    });
-                }
-                None => {
-                    app.playlist.loop_mode = cycle_loop_mode(&app.playlist.loop_mode);
-                    app.save_playlist();
-                }
+        KeyCode::Char('l') => match row_owning_list(app) {
+            Some(path) => {
+                let _ = app.with_list_at(&path, |pl, _lib| {
+                    pl.loop_mode = cycle_loop_mode(&pl.loop_mode);
+                });
             }
-        }
+            None => {
+                app.playlist.loop_mode = cycle_loop_mode(&app.playlist.loop_mode);
+                app.save_playlist();
+            }
+        },
 
         // On an album header, rename that album. Anywhere else, toggle
         // shuffle for the list the selected row belongs to — an album's own
@@ -380,14 +378,14 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
                 // Grabbed before the mutation, since `with_list_at` may
                 // rebuild `self.rows` and there is no need to re-derive it
                 // afterwards.
-                let album_name = app.row_group(app.selected).and_then(|(source, _)| {
-                    match source {
+                let album_name = app
+                    .row_group(app.selected)
+                    .and_then(|(source, _)| match source {
                         crate::tui::RowSource::Album(album) => {
                             app.albums.get(album).map(|loaded| loaded.name.clone())
                         }
                         crate::tui::RowSource::Own => None,
-                    }
-                });
+                    });
                 match row_owning_list(app) {
                     Some(path) => {
                         let toggled = app.with_list_at(&path, |pl, _lib| {

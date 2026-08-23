@@ -531,10 +531,7 @@ fn render_track_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
             Some(
                 Row::new(vec![
-                    Cell::from(Line::from(vec![
-                        icon_span,
-                        status_span,
-                    ])),
+                    Cell::from(Line::from(vec![icon_span, status_span])),
                     Cell::from(Span::styled(num_str, Style::new().fg(TEXT_DIM))),
                     Cell::from(title_str),
                     Cell::from(Span::styled(artist_str, Style::new().fg(TEXT_DIM))),
@@ -1147,8 +1144,7 @@ fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
 
     // For URL and folder/file input, show the target playlist hint as a
     // second line.
-    let show_playlist_hint =
-        matches!(app.input_mode, InputMode::UrlInput | InputMode::FolderInput);
+    let show_playlist_hint = matches!(app.input_mode, InputMode::UrlInput | InputMode::FolderInput);
     let height = if show_playlist_hint { 5u16 } else { 3u16 };
     let width = area.width.clamp(30, 64);
     let x = area.x + area.width.saturating_sub(width) / 2;
