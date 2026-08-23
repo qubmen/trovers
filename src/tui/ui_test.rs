@@ -4352,6 +4352,47 @@ tracks = []
         );
     }
 
+    /// The audiobook case: adjusting speed while a track from an album is
+    /// playing sets the *album's* `default_speed`, not the individual
+    /// track's — so every other chapter that has never had its own speed
+    /// set inherits the change too, and re-adjusting at every chapter
+    /// boundary is no longer necessary.
+    #[tokio::test]
+    async fn adjust_playing_track_speed_on_an_albums_track_sets_the_albums_default_speed() {
+        use crate::tui::input::adjust_playing_track_speed;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_albums(dir.path(), &[], &[("Kino", &["k1", "k2"])]);
+        let album_path = app.albums[0].path.clone();
+        let album_playlist = app.albums[0].playlist.clone();
+        app.playing = Some(session_at(album_path.clone(), album_playlist, 0)); // k1
+
+        adjust_playing_track_speed(&mut app, 0.1).await;
+
+        let expected = app.config.default_speed + 0.1;
+        assert_eq!(
+            app.albums[0].playlist.default_speed,
+            Some(expected),
+            "the album's own default_speed changed"
+        );
+        assert_eq!(
+            app.library.get("k1").and_then(|t| t.speed),
+            None,
+            "the individual track's own speed was not written"
+        );
+        let on_disk = crate::playlist::Playlist::load(&album_path).expect("reload");
+        assert_eq!(on_disk.default_speed, Some(expected), "persisted to disk");
+
+        // The next chapter, never individually sped up, must pick up the new
+        // album-wide speed too.
+        let k2_speed = crate::tui::effective_speed(
+            app.library.get("k2").expect("track"),
+            &app.albums[0].playlist,
+            &app.config,
+        );
+        assert_eq!(k2_speed, expected, "an untouched chapter inherits it");
+    }
+
     // ── Task 4: Now Playing / track-highlight render from app.playing ──────────
 
     #[test]

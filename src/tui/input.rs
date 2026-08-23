@@ -582,39 +582,54 @@ fn step_track(app: &mut App, forward: bool) {
 /// Adjust the speed of the track actually driving playback right now (per
 /// `app.playing`), not whatever the displayed playlist's cursor happens to
 /// point at — the playing track may live in a different playlist entirely.
-/// No-op if nothing is playing. `delta` is added to the track's current
-/// effective speed and clamped to mpv's supported range.
+/// No-op if nothing is playing. `delta` is added to the current effective
+/// speed and clamped to mpv's supported range.
+///
+/// Written to the individual track's document for a plain playlist, same as
+/// always — but to the *album's* `default_speed` when the playing track is
+/// one of an album's, so every other chapter in it that has no speed of its
+/// own already picks it up too. That is the one case this is for: an
+/// audiobook's chapters share one natural reading speed, and having to redo
+/// `[`/`]` at every chapter boundary is the friction this removes. A track
+/// that was individually sped up before this existed keeps that override —
+/// `effective_speed`'s precedence (track, then playlist, then config) is
+/// unchanged, only which side of it gets written is new.
 ///
 /// The speed is persisted to TOML even if mpv never receives it, so the setting
 /// survives a dead player and applies the next time the track is started.
 pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) {
-    if app.playing.is_none() {
+    let Some(session) = app.playing.as_ref() else {
         return;
-    }
-    let default_speed = app.config.default_speed;
-    let playlist_default_speed = app.playing.as_ref().and_then(|p| p.playlist.default_speed);
-
-    let speed = {
-        let Some(track) = app.playing_track_mut() else {
-            return;
-        };
-        let base = track
-            .speed
-            .or(playlist_default_speed)
-            .unwrap_or(default_speed);
-        let new_speed = (base + delta).clamp(0.25, 3.0);
-        track.speed = Some(new_speed);
-        new_speed
     };
+    let is_album = session.playlist.kind == PlaylistKind::Album;
+    let path = session.path.clone();
+    let session_playlist = session.playlist.clone();
+
+    let Some(track) = app.playing_track() else {
+        return;
+    };
+    let base = super::effective_speed(track, &session_playlist, &app.config);
+    let new_speed = (base + delta).clamp(0.25, 3.0);
+
+    if is_album {
+        if let Err(e) = app.with_list_at(&path, |pl, _lib| {
+            pl.default_speed = Some(new_speed);
+        }) {
+            warn!(err = %e, path = %path.display(), "failed to save the album's speed");
+        }
+    } else {
+        if let Some(track) = app.playing_track_mut() {
+            track.speed = Some(new_speed);
+        }
+        // Persist the new speed into the track's own document.
+        app.save_playing_track();
+    }
 
     let res = match &app.player {
-        Some(player) => Some(player.set_speed(speed).await),
+        Some(player) => Some(player.set_speed(new_speed).await),
         None => None,
     };
     note_ipc_result(app, "speed", res);
-
-    // Persist the new speed into the track's own document.
-    app.save_playing_track();
 }
 
 /// Change the volume by `delta` and push it to mpv. The config value is updated
