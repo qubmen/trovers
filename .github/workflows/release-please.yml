@@ -65,6 +65,21 @@ jobs:
           git push origin "v${version}"
           echo "Pushed tag v${version} — cargo-dist takes over from here."
 
+      # skip-github-release means release-please never runs the step where it
+      # normally swaps a merged release PR's label from "autorelease: pending"
+      # to "autorelease: tagged". Left alone, that PR stays "pending" forever,
+      # and release-please treats any merged-but-still-pending release PR as an
+      # in-flight release and refuses to open a new one on every future push.
+      - name: Mark merged release PR as tagged
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          pr_number="$(gh pr list --state merged --label "autorelease: pending" --json number --jq '.[0].number')"
+          if [ -n "$pr_number" ]; then
+            gh pr edit "$pr_number" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+            echo "Marked PR #$pr_number as autorelease: tagged"
+          fi
+
       # skip-github-release keeps release-please out of cargo-dist's way: the
       # GitHub Release is created by release.yml, which attaches the platform
       # archives and the installer script that README.md links to.
