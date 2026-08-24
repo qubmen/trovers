@@ -394,7 +394,7 @@ pub(crate) fn blocked_by_youtube_hint(err: &str) -> Option<&'static str> {
 }
 
 /// Extract the bare domain from a URL (e.g. "youtube.com" from "https://www.youtube.com/...").
-fn extract_domain(url: &str) -> String {
+pub(crate) fn extract_domain(url: &str) -> String {
     url.trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_start_matches("www.")

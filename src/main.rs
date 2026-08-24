@@ -20,6 +20,8 @@ mod playlist;
 mod playlist_test;
 mod tui;
 mod ytdlp;
+#[cfg(test)]
+mod ytdlp_test;
 
 use anyhow::{Context, Result};
 use clap::Parser;
