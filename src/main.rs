@@ -43,7 +43,12 @@ fn init_logging() -> WorkerGuard {
     let log_path = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share"))
         .join("trovers");
-    let file_appender = tracing_appender::rolling::never(&log_path, "trovers.log");
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("trovers.log")
+        .max_log_files(7)
+        .build(&log_path)
+        .expect("failed to initialize the file logger");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
         .with_writer(non_blocking)
