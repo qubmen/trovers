@@ -76,6 +76,7 @@ jobs:
         run: |
           pr_number="$(gh pr list --state merged --label "autorelease: pending" --json number --jq '.[0].number')"
           if [ -n "$pr_number" ]; then
+            gh label create "autorelease: tagged" --color ededed --force
             gh pr edit "$pr_number" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
             echo "Marked PR #$pr_number as autorelease: tagged"
           fi
