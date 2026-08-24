@@ -37,4 +37,47 @@ default_volume = 80
             vec!["--focus-on=never".to_string(), "--ontop".to_string()]
         );
     }
+
+    #[test]
+    fn a_missing_config_is_created_with_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        let config = Config::load_from(&path).expect("writes and returns defaults");
+
+        assert_eq!(config.default_speed, Config::default().default_speed);
+        assert!(
+            path.exists(),
+            "a default config must be written so the next launch has something to edit"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_config_is_backed_up_and_replaced_with_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_speed = [not valid toml").expect("write broken config");
+
+        let config = Config::load_from(&path).expect("falls back instead of erroring out");
+
+        assert_eq!(config.default_speed, Config::default().default_speed);
+        let backup = path.with_extension("toml.bad");
+        assert!(
+            backup.exists(),
+            "the broken file must be preserved for inspection, not lost"
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_speed_and_volume_are_clamped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_speed = 100.0\ndefault_volume = 250\n")
+            .expect("write config");
+
+        let config = Config::load_from(&path).expect("loads");
+
+        assert_eq!(config.default_speed, 3.0, "speed must clamp at mpv's max");
+        assert_eq!(config.default_volume, 100, "volume must clamp at 100");
+    }
 }

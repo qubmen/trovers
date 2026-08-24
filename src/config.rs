@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tracing::error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -66,19 +67,44 @@ impl Config {
     }
 
     pub fn load() -> Result<Self> {
-        let path = Self::path();
+        Self::load_from(&Self::path())
+    }
+
+    pub(crate) fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             let config = Config::default();
-            config.save().context("failed to write default config")?;
+            config
+                .save_to(path)
+                .context("failed to write default config")?;
             return Ok(config);
         }
-        let raw = std::fs::read_to_string(&path)
+        let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&raw).context("failed to parse config.toml")
+        let mut config: Config = match toml::from_str(&raw) {
+            Ok(config) => config,
+            Err(err) => {
+                error!(error = %err, path = %path.display(), "config.toml is invalid, backing it up and resetting to defaults");
+                let backup = path.with_extension("toml.bad");
+                std::fs::rename(path, &backup).with_context(|| {
+                    format!("failed to back up broken config to {}", backup.display())
+                })?;
+                let config = Config::default();
+                config
+                    .save_to(path)
+                    .context("failed to write default config")?;
+                return Ok(config);
+            }
+        };
+        config.default_speed = config.default_speed.clamp(0.25, 3.0);
+        config.default_volume = config.default_volume.min(100);
+        Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = Self::path();
+        self.save_to(&Self::path())
+    }
+
+    fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("failed to create config directory")?;
         }
@@ -86,7 +112,7 @@ impl Config {
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, &raw)
             .with_context(|| format!("failed to write tmp config at {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
+        std::fs::rename(&tmp, path)
             .with_context(|| format!("failed to rename config to {}", path.display()))
     }
 }
