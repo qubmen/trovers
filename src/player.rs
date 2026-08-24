@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -120,6 +121,17 @@ impl Player {
             }
             sleep(Duration::from_millis(50)).await;
         }
+
+        // mpv creates the socket with whatever the process umask allows, which on
+        // a multi-user machine can leave it connectable by any other local user —
+        // able to send play/pause/seek/quit over it. Lock it down to the owner.
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| {
+                format!(
+                    "failed to restrict permissions on {}",
+                    socket_path.display()
+                )
+            })?;
 
         Ok(Self {
             process,

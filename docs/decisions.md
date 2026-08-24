@@ -56,6 +56,12 @@ path. `<seq>` is a per-process counter bumped on every `Player::spawn`.
 - The pid stays first and parseable so `reap_orphaned_players` (ADR-012) can
   tell whose socket a leftover file is.
 
+**Security note:** `Player::spawn` chmods the socket to `0600` right after mpv
+creates it, since mpv itself creates it with whatever the process umask
+allows. On a shared machine an unrestricted socket would let any other local
+user send play/pause/seek/quit commands to someone else's mpv — low severity
+(it is a media player, not a credential store), but free to close off.
+
 ---
 
 ## ADR-004: Crash recovery for `downloading` status
