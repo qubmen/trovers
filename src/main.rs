@@ -47,7 +47,9 @@ fn init_logging() -> WorkerGuard {
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
         .with_writer(non_blocking)
-        .with_env_filter(EnvFilter::new("trovers=debug"))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("trovers=debug")),
+        )
         .with_ansi(false)
         .init();
     guard
