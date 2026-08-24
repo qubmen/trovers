@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.4](https://github.com/qubmen/trovers/compare/v0.1.3...v0.1.4) (2026-08-24)
+
+
+### Features
+
+* fix album/track management sync bugs, add manual album & single-file adds, fix Space on album headers ([#8](https://github.com/qubmen/trovers/issues/8)) ([7c90403](https://github.com/qubmen/trovers/commit/7c90403b5ac94074d0f7ad079788f07d95796bd9))
+
+
+### Bug Fixes
+
+* add --version/-V flag to the CLI ([02445e2](https://github.com/qubmen/trovers/commit/02445e2157328a2e950a440f9cd6d2ecf441dd4f))
+* gate CI on clippy warnings, clean up the existing 10 ([d727ef8](https://github.com/qubmen/trovers/commit/d727ef88a32f8f9373b76494666ba693786fbbe1))
+* recover from a broken config.toml instead of crashing ([2680545](https://github.com/qubmen/trovers/commit/268054563d7a4bdd002c0b25c580a0c2fb051a24))
+* respect RUST_LOG for the file logger ([d06a854](https://github.com/qubmen/trovers/commit/d06a8547d07b26b40e253f2d4404ea189fc20d3c))
+* restrict the mpv IPC socket to owner-only permissions ([d24ef7e](https://github.com/qubmen/trovers/commit/d24ef7e5e5dee262b0a7fd33eff4afa1b2b1b1a1))
+* rotate and cap the file log ([4e76f7a](https://github.com/qubmen/trovers/commit/4e76f7a523fc657f690acde113c80a886cd1f52a))
+
 ## [0.1.3](https://github.com/qubmen/trovers/compare/v0.1.2...v0.1.3) (2026-08-22)
 
 
