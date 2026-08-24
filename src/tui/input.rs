@@ -43,11 +43,20 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
         return Ok(Action::Continue);
     }
 
+    // In FolderInput mode, Tab cycles the explicit add-target instead —
+    // "Auto" (today's folder-identity matching) plus every playlist/album by
+    // name, so a folder or single file can be pointed at any existing list.
+    if key.code == KeyCode::Tab && app.input_mode == InputMode::FolderInput {
+        app.cycle_add_target();
+        return Ok(Action::Continue);
+    }
+
     if key.code == KeyCode::Tab
         && !matches!(
             app.input_mode,
             InputMode::UrlInput
                 | InputMode::NewPlaylist
+                | InputMode::NewAlbum
                 | InputMode::SearchInput
                 | InputMode::TrackContextMenu
                 | InputMode::PlaylistRename
@@ -72,6 +81,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) -> Result<Action> {
         },
         InputMode::UrlInput => handle_url_input(app, key).await,
         InputMode::NewPlaylist => handle_new_playlist(app, key).await,
+        InputMode::NewAlbum => handle_new_album(app, key),
         InputMode::SearchInput => handle_search(app, key),
         InputMode::ConfirmDelete => handle_confirm_delete(app, key),
         InputMode::TrackContextMenu => handle_track_context_menu(app, key),
@@ -135,6 +145,7 @@ async fn handle_sidebar(app: &mut App, key: KeyEvent) -> Result<Action> {
                     SidebarItem::ImportFolder => {
                         app.input_mode = InputMode::FolderInput;
                         app.input_buf.clear();
+                        app.target_list_for_add = None;
                         app.focus = Focus::TrackList;
                     }
                     SidebarItem::Settings => {
@@ -233,23 +244,64 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             }
         }
 
-        // Space: toggle pause if playing, otherwise start (resuming from
-        // `last_position` if the track has one).
+        // Space: pause/resume if the row under the cursor is the one actually
+        // playing right now; otherwise switch playback to it — a track row
+        // starts itself, a header starts its album (resuming from
+        // `current_track`/`last_position` if it has one, otherwise its first
+        // track). This is what lets Space on a *different* album's header
+        // switch playback to it, the same way Enter already does for a track
+        // row, while Space on the header of the album that's already playing
+        // pauses instead of restarting it from its last saved position.
+        //
+        // A dead player (mpv exited, crashed, or was killed) never counts as
+        // "already playing" even if `self.playing` still names this exact
+        // row — ADR-013 leaves that pointer in place so the footer can show
+        // what was last playing, but there is nothing left to pause, so
+        // Space (re)starts it instead, same as it always has.
         KeyCode::Char(' ') => {
-            if app.player.is_some() {
-                app.is_paused = !app.is_paused;
-                let pausing = app.is_paused;
-                let res = match &app.player {
-                    Some(player) => Some(if pausing {
-                        player.pause().await
-                    } else {
-                        player.resume().await
-                    }),
-                    None => None,
-                };
-                note_ipc_result(app, "pause", res);
-            } else {
-                app.play_row(app.selected);
+            let target = match app.row_at(app.selected).copied() {
+                Some(crate::tui::VisibleRow::Track { source, index }) => {
+                    let start_pos = app
+                        .source_playlist(source)
+                        .and_then(|(pl, _)| pl.tracks.get(index))
+                        .and_then(|id| app.library.get(id))
+                        .and_then(resume_start_pos);
+                    Some((source, index, start_pos))
+                }
+                Some(crate::tui::VisibleRow::AlbumHeader { album }) => app
+                    .albums
+                    .get(album)
+                    .and_then(|loaded| crate::tui::album_resume_target(loaded, &app.library))
+                    .map(|(idx, start_pos)| (crate::tui::RowSource::Album(album), idx, start_pos)),
+                None => None,
+            };
+
+            if let Some((source, index, start_pos)) = target {
+                let already_playing = app.player.is_some()
+                    && app
+                        .source_playlist(source)
+                        .and_then(|(pl, path)| {
+                            pl.tracks
+                                .get(index)
+                                .map(|id| (path.to_path_buf(), id.clone()))
+                        })
+                        .is_some_and(|(path, id)| app.is_playing_track(&path, &id));
+
+                if already_playing {
+                    app.is_paused = !app.is_paused;
+                    let pausing = app.is_paused;
+                    let res = match &app.player {
+                        Some(player) => Some(if pausing {
+                            player.pause().await
+                        } else {
+                            player.resume().await
+                        }),
+                        None => None,
+                    };
+                    note_ipc_result(app, "pause", res);
+                } else {
+                    app.play_from_list(source, index, start_pos);
+                }
             }
         }
 
@@ -298,33 +350,69 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
             set_volume(app, -5).await;
         }
 
-        // Loop mode
-        KeyCode::Char('l') => {
-            app.playlist.loop_mode = match app.playlist.loop_mode {
-                LoopMode::None => LoopMode::Track,
-                LoopMode::Track => LoopMode::Playlist,
-                LoopMode::Playlist => LoopMode::None,
-            };
-            // Persist immediately. Relying on the save at quit meant the setting
-            // was lost to any exit that did not run it.
-            app.save_playlist();
-        }
+        // Loop mode: acts on the list the selected row belongs to — an
+        // album's own file when the row is inside one, the displayed
+        // playlist otherwise (also on a header, which belongs to no list).
+        // Persisted immediately either way: relying on the save at quit meant
+        // the setting was lost to any exit that did not run it.
+        KeyCode::Char('l') => match row_owning_list(app) {
+            Some(path) => {
+                let _ = app.with_list_at(&path, |pl, _lib| {
+                    pl.loop_mode = cycle_loop_mode(&pl.loop_mode);
+                });
+            }
+            None => {
+                app.playlist.loop_mode = cycle_loop_mode(&app.playlist.loop_mode);
+                app.save_playlist();
+            }
+        },
 
-        // On an album header, rename that album. Anywhere else, toggle shuffle for
-        // the displayed playlist.
+        // On an album header, rename that album. Anywhere else, toggle
+        // shuffle for the list the selected row belongs to — an album's own
+        // file when the row is inside one, the displayed playlist otherwise.
         KeyCode::Char('r') => {
             if let Some(album) = app.album_of(app.selected) {
                 app.input_buf = app.albums[album].name.clone();
                 app.input_mode = InputMode::AlbumRename;
             } else {
-                app.playlist.shuffle = !app.playlist.shuffle;
-                app.rebuild_shuffle_order();
-                app.save_playlist();
-                app.set_status(if app.playlist.shuffle {
-                    "Shuffle on"
-                } else {
-                    "Shuffle off"
-                });
+                // Grabbed before the mutation, since `with_list_at` may
+                // rebuild `self.rows` and there is no need to re-derive it
+                // afterwards.
+                let album_name = app
+                    .row_group(app.selected)
+                    .and_then(|(source, _)| match source {
+                        crate::tui::RowSource::Album(album) => {
+                            app.albums.get(album).map(|loaded| loaded.name.clone())
+                        }
+                        crate::tui::RowSource::Own => None,
+                    });
+                match row_owning_list(app) {
+                    Some(path) => {
+                        let toggled = app.with_list_at(&path, |pl, _lib| {
+                            pl.shuffle = !pl.shuffle;
+                            (pl.shuffle, pl.tracks.len())
+                        });
+                        if let Ok((shuffle, len)) = toggled {
+                            app.rebuild_shuffle_order_for(&path, shuffle, len);
+                            app.set_status(match (shuffle, album_name) {
+                                (true, Some(name)) => format!("Shuffle on for {name}"),
+                                (false, Some(name)) => format!("Shuffle off for {name}"),
+                                (true, None) => "Shuffle on".to_string(),
+                                (false, None) => "Shuffle off".to_string(),
+                            });
+                        }
+                    }
+                    None => {
+                        app.playlist.shuffle = !app.playlist.shuffle;
+                        app.rebuild_shuffle_order();
+                        app.save_playlist();
+                        app.set_status(if app.playlist.shuffle {
+                            "Shuffle on"
+                        } else {
+                            "Shuffle off"
+                        });
+                    }
+                }
             }
         }
 
@@ -375,6 +463,14 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         KeyCode::Char('F') => {
             app.input_mode = InputMode::FolderInput;
             app.input_buf.clear();
+            app.target_list_for_add = None;
+        }
+
+        // New album under the displayed playlist, with no folder required —
+        // the manual counterpart to `F`.
+        KeyCode::Char('A') => {
+            app.input_mode = InputMode::NewAlbum;
+            app.input_buf.clear();
         }
 
         // Rescan a folder: the one the album under the cursor mirrors when the
@@ -382,7 +478,7 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
         KeyCode::Char('R') => match app.album_of(app.selected) {
             Some(album) => app.rescan_album(album),
             None => match app.playlist.source_folder.clone() {
-                Some(root) => app.import_folder(root),
+                Some(root) => app.import_folder(root, None),
                 None => app.set_status("Not linked to a folder"),
             },
         },
@@ -409,6 +505,23 @@ pub(crate) async fn handle_tracklist(app: &mut App, key: KeyEvent) -> Result<Act
     }
 
     Ok(Action::Continue)
+}
+
+/// The file backing the list the selected row belongs to — an album's own
+/// path when the row is inside one, the displayed playlist's path otherwise.
+/// `None` on a header or when nothing is selected, which belong to no list.
+fn row_owning_list(app: &App) -> Option<std::path::PathBuf> {
+    let (source, _) = app.row_group(app.selected)?;
+    app.source_playlist(source)
+        .map(|(_, path)| path.to_path_buf())
+}
+
+fn cycle_loop_mode(mode: &LoopMode) -> LoopMode {
+    match mode {
+        LoopMode::None => LoopMode::Track,
+        LoopMode::Track => LoopMode::Playlist,
+        LoopMode::Playlist => LoopMode::None,
+    }
 }
 
 /// `n` / `b`: step to the next/previous track of the *displayed* playlist and
@@ -469,39 +582,65 @@ fn step_track(app: &mut App, forward: bool) {
 /// Adjust the speed of the track actually driving playback right now (per
 /// `app.playing`), not whatever the displayed playlist's cursor happens to
 /// point at — the playing track may live in a different playlist entirely.
-/// No-op if nothing is playing. `delta` is added to the track's current
-/// effective speed and clamped to mpv's supported range.
+/// No-op if nothing is playing. `delta` is added to the current effective
+/// speed and clamped to mpv's supported range.
+///
+/// Written to the individual track's document for a plain playlist, same as
+/// always — but to the *album's* `default_speed` when the playing track is
+/// one of an album's, so every other chapter in it that has no speed of its
+/// own already picks it up too. That is the one case this is for: an
+/// audiobook's chapters share one natural reading speed, and having to redo
+/// `[`/`]` at every chapter boundary is the friction this removes. A track
+/// that was individually sped up before this existed keeps that override —
+/// `effective_speed`'s precedence (track, then playlist, then config) is
+/// unchanged, only which side of it gets written is new.
 ///
 /// The speed is persisted to TOML even if mpv never receives it, so the setting
 /// survives a dead player and applies the next time the track is started.
 pub(crate) async fn adjust_playing_track_speed(app: &mut App, delta: f32) {
-    if app.playing.is_none() {
+    let Some(session) = app.playing.as_ref() else {
         return;
-    }
-    let default_speed = app.config.default_speed;
-    let playlist_default_speed = app.playing.as_ref().and_then(|p| p.playlist.default_speed);
-
-    let speed = {
-        let Some(track) = app.playing_track_mut() else {
-            return;
-        };
-        let base = track
-            .speed
-            .or(playlist_default_speed)
-            .unwrap_or(default_speed);
-        let new_speed = (base + delta).clamp(0.25, 3.0);
-        track.speed = Some(new_speed);
-        new_speed
     };
+    let is_album = session.playlist.kind == PlaylistKind::Album;
+    let path = session.path.clone();
+    let session_playlist = session.playlist.clone();
+
+    let Some(track) = app.playing_track() else {
+        return;
+    };
+    let base = super::effective_speed(track, &session_playlist, &app.config);
+    let new_speed = (base + delta).clamp(0.25, 3.0);
+
+    if is_album {
+        if let Err(e) = app.with_list_at(&path, |pl, _lib| {
+            pl.default_speed = Some(new_speed);
+        }) {
+            warn!(err = %e, path = %path.display(), "failed to save the album's speed");
+        }
+        // `PlayingSession.playlist` is its own snapshot, taken when playback
+        // started, and `with_list_at` above only touched the real copy
+        // (`self.albums[i]` or the file) — not this one. Without refreshing
+        // it too, both the next call's `base` (recomputed from this same
+        // stale snapshot) and the Now Playing header's speed
+        // (`ui.rs`'s `playing_playlist()`) would keep reading the old value
+        // forever, which is what "speed doesn't change" actually was: the
+        // write landed, but nothing that reads it afterward ever saw it.
+        if let Some(session) = app.playing.as_mut() {
+            session.playlist.default_speed = Some(new_speed);
+        }
+    } else {
+        if let Some(track) = app.playing_track_mut() {
+            track.speed = Some(new_speed);
+        }
+        // Persist the new speed into the track's own document.
+        app.save_playing_track();
+    }
 
     let res = match &app.player {
-        Some(player) => Some(player.set_speed(speed).await),
+        Some(player) => Some(player.set_speed(new_speed).await),
         None => None,
     };
     note_ipc_result(app, "speed", res);
-
-    // Persist the new speed into the track's own document.
-    app.save_playing_track();
 }
 
 /// Change the volume by `delta` and push it to mpv. The config value is updated
@@ -667,26 +806,77 @@ async fn handle_new_playlist(app: &mut App, key: KeyEvent) -> Result<Action> {
     Ok(Action::Continue)
 }
 
-/// The folder path prompt. Deliberately thin: everything the path means is
-/// `App::import_folder`'s business, so `F` and the sidebar item and a rescan all
-/// go through one place.
+/// The new-album name prompt (`A`): an empty album under the displayed
+/// playlist, with no folder required — the manual counterpart to `F`.
+pub(crate) fn handle_new_album(app: &mut App, key: KeyEvent) -> Result<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let name = app.input_buf.trim().to_string();
+            app.input_buf.clear();
+            app.input_mode = InputMode::Normal;
+            if !name.is_empty() {
+                if let Err(msg) = validate_playlist_name(&name, &app.available_playlists, None) {
+                    warn!(msg = %msg, "invalid album name");
+                    app.set_status(msg);
+                    return Ok(Action::Continue);
+                }
+                let parent = app.default_album_parent();
+                if let Err(e) = app.create_album(&name, parent) {
+                    error!(err = %e, "failed to create album");
+                    app.set_status("Could not create the album");
+                }
+            }
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.input_buf.clear();
+        }
+        _ => type_char(app, key),
+    }
+    Ok(Action::Continue)
+}
+
+/// The folder path prompt. Deliberately thin: everything a folder path means
+/// is `App::import_folder`'s business, and a single file's `App::import_file`'s
+/// — so `F` and the sidebar item and a rescan all go through one place.
 fn handle_folder_input(app: &mut App, key: KeyEvent) -> Result<Action> {
     match key.code {
         KeyCode::Enter => {
             let typed = app.input_buf.trim().to_string();
             app.input_buf.clear();
             app.input_mode = InputMode::Normal;
+            // `Tab`-cycled explicit destination, resolved to a path once: a
+            // name that no longer names anything (deleted mid-prompt) falls
+            // back to "Auto" rather than silently doing nothing.
+            let target_override = app.target_list_for_add.take().and_then(|name| {
+                app.available_playlists
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .map(|entry| entry.path.clone())
+            });
             if !typed.is_empty() {
                 // A pasted path arrives in whichever spelling the clipboard had
                 // — a `file://` URL, escaped spaces, quotes — and none of them is
                 // a path until `path_from_input` says so.
-                let root = library_import::path_from_input(&typed, dirs::home_dir().as_deref());
-                app.import_folder(root);
+                let path = library_import::path_from_input(&typed, dirs::home_dir().as_deref());
+                // A path that does not exist at all falls to `import_folder`
+                // too, which is what already reports "Not a folder" for it —
+                // only a path that positively *is* a file takes the new
+                // branch, so a typo keeps its familiar message.
+                if path.is_file() {
+                    // "Auto" for a single file has no folder identity to
+                    // match against, so it is simply the displayed playlist.
+                    let target_path = target_override.unwrap_or_else(|| app.playlist_path.clone());
+                    app.import_file(path, target_path);
+                } else {
+                    app.import_folder(path, target_override);
+                }
             }
         }
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
             app.input_buf.clear();
+            app.target_list_for_add = None;
         }
         _ => type_char(app, key),
     }

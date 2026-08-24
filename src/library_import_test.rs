@@ -605,6 +605,159 @@ mod tests {
         );
     }
 
+    /// A list is no longer tied to exactly one folder — an explicit target
+    /// can merge a second, different folder's files in. `R`'s rescan link
+    /// must not silently repoint to whichever folder happened to be imported
+    /// most recently.
+    #[test]
+    fn merge_scan_keeps_the_first_folder_linked_when_a_second_is_merged_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root_a = dir.path().join("Folder A");
+        let root_b = dir.path().join("Folder B");
+        let mut lib = Library::load(dir.path()).expect("library");
+        let mut pl = Playlist {
+            name: "Mixed".to_string(),
+            created: chrono::Utc::now(),
+            loop_mode: LoopMode::None,
+            shuffle: false,
+            default_speed: None,
+            tracks: Vec::new(),
+            current_track: None,
+            kind: PlaylistKind::Album,
+            parent: Some("Live Sets".to_string()),
+            source_folder: None,
+            collapsed: false,
+        };
+
+        let file_a = root_a.join("Day One.flac");
+        merge_scan(&mut lib, &mut pl, &root_a, vec![imported(&file_a)]);
+        assert_eq!(pl.source_folder.as_deref(), Some(root_a.as_path()));
+
+        let file_b = root_b.join("Day Two.flac");
+        let report = merge_scan(&mut lib, &mut pl, &root_b, vec![imported(&file_b)]);
+
+        assert_eq!(report.added, 1);
+        assert_eq!(
+            pl.tracks,
+            vec![local_id(&file_a), local_id(&file_b)],
+            "nothing already listed was removed or reordered"
+        );
+        assert_eq!(
+            pl.source_folder.as_deref(),
+            Some(root_a.as_path()),
+            "R still rescans the first folder, not the one just merged in"
+        );
+    }
+
+    // ── add_single_file ──────────────────────────────────────────────────
+
+    #[test]
+    fn add_single_file_creates_one_track_and_one_row() {
+        use crate::library_import::{add_single_file, SingleAddOutcome};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut lib = Library::load(dir.path()).expect("library");
+        let mut pl = Playlist {
+            name: "Active".to_string(),
+            created: chrono::Utc::now(),
+            loop_mode: LoopMode::None,
+            shuffle: false,
+            default_speed: None,
+            tracks: Vec::new(),
+            current_track: None,
+            kind: PlaylistKind::Normal,
+            parent: None,
+            source_folder: None,
+            collapsed: true,
+        };
+        let path = dir.path().join("Day One.flac");
+
+        let outcome = add_single_file(&mut lib, &mut pl, imported(&path));
+
+        assert_eq!(outcome, SingleAddOutcome::Added);
+        let id = local_id(&path);
+        assert_eq!(pl.tracks, vec![id.clone()]);
+        assert_eq!(lib.get(&id).expect("track").title, "Day One");
+        assert!(
+            pl.source_folder.is_none(),
+            "a single file must not touch source_folder"
+        );
+    }
+
+    #[test]
+    fn add_single_file_reuses_an_existing_track_document() {
+        use crate::library_import::add_single_file;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("Ultra 2026");
+        let mut lib = Library::load(dir.path()).expect("library");
+        let mut pl = album(&root);
+        let path = root.join("Day One.flac");
+
+        // The file is already known — say, from a folder import — with the
+        // user's own state on it.
+        merge_scan(&mut lib, &mut pl, &root, vec![imported(&path)]);
+        let id = local_id(&path);
+        lib.get_mut(&id).expect("track").last_position = 176;
+        lib.get_mut(&id).expect("track").speed = Some(1.5);
+
+        let mut other_list = Playlist {
+            name: "Favorites".to_string(),
+            created: chrono::Utc::now(),
+            loop_mode: LoopMode::None,
+            shuffle: false,
+            default_speed: None,
+            tracks: Vec::new(),
+            current_track: None,
+            kind: PlaylistKind::Normal,
+            parent: None,
+            source_folder: None,
+            collapsed: true,
+        };
+        add_single_file(&mut lib, &mut other_list, imported(&path));
+
+        assert_eq!(
+            other_list.tracks,
+            vec![id.clone()],
+            "one row in the new list"
+        );
+        let track = lib.get(&id).expect("track");
+        assert_eq!(track.last_position, 176, "position survives");
+        assert_eq!(track.speed, Some(1.5), "speed survives");
+    }
+
+    #[test]
+    fn add_single_file_already_listed_is_a_no_op() {
+        use crate::library_import::{add_single_file, SingleAddOutcome};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut lib = Library::load(dir.path()).expect("library");
+        let mut pl = Playlist {
+            name: "Active".to_string(),
+            created: chrono::Utc::now(),
+            loop_mode: LoopMode::None,
+            shuffle: false,
+            default_speed: None,
+            tracks: Vec::new(),
+            current_track: None,
+            kind: PlaylistKind::Normal,
+            parent: None,
+            source_folder: None,
+            collapsed: true,
+        };
+        let path = dir.path().join("Day One.flac");
+
+        assert_eq!(
+            add_single_file(&mut lib, &mut pl, imported(&path)),
+            SingleAddOutcome::Added
+        );
+        assert_eq!(
+            add_single_file(&mut lib, &mut pl, imported(&path)),
+            SingleAddOutcome::AlreadyPresent
+        );
+        assert_eq!(pl.tracks.len(), 1, "still just the one row");
+    }
+
     // ── scan_and_probe ────────────────────────────────────────────────────
 
     /// Without ffprobe every title comes from the filename; with it, these empty
