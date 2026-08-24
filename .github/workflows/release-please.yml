@@ -36,7 +36,7 @@ jobs:
       # doesn't let the built-in token trigger other workflows, so a tag pushed
       # with it would silently never start cargo-dist's release.yml.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -85,7 +85,7 @@ jobs:
       # GitHub Release is created by release.yml, which attaches the platform
       # archives and the installer script that README.md links to.
       - name: Run release-please
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
           config-file: release-please-config.json
