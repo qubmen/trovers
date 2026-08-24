@@ -28,7 +28,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "trovers", about = "Personal audio cache and player")]
+#[command(name = "trovers", version, about = "Personal audio cache and player")]
 struct Cli {
     /// URL of a track to add to the opened playlist. Adding never starts
     /// playback — press Enter on the row to play it.
