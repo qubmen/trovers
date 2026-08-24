@@ -1325,7 +1325,7 @@ pub(crate) fn validate_playlist_name(
     // Check for duplicate
     let is_duplicate = existing
         .iter()
-        .any(|entry| entry.name == name && exclude.map_or(true, |ex| entry.name != ex));
+        .any(|entry| entry.name == name && exclude.is_none_or(|ex| entry.name != ex));
     if is_duplicate {
         return Err(format!("a playlist named '{name}' already exists"));
     }

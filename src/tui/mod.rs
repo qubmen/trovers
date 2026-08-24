@@ -2260,6 +2260,9 @@ impl App {
         }
     }
 
+    /// The production build never checks this directly — `app.downloading` is
+    /// read via `.contains`/`.len` in `ui.rs` — but the tests do.
+    #[allow(dead_code)]
     pub fn is_downloading(&self) -> bool {
         !self.downloading.is_empty()
     }

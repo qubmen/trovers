@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::error;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioQuality {
+    #[default]
     Best,
     High,
     Medium,
@@ -20,12 +21,6 @@ impl AudioQuality {
             AudioQuality::Medium => "bestaudio[abr<=192][abr>=96]/bestaudio",
             AudioQuality::Low => "bestaudio[abr<=96]/bestaudio",
         }
-    }
-}
-
-impl Default for AudioQuality {
-    fn default() -> Self {
-        AudioQuality::Best
     }
 }
 

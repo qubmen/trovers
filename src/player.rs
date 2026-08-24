@@ -188,15 +188,6 @@ impl Player {
             .await?;
         Ok(())
     }
-
-    pub async fn get_position(&self) -> Result<f64> {
-        let resp = self
-            .send_command(serde_json::json!({"command": ["get_property", "time-pos"]}))
-            .await?;
-        resp["data"]
-            .as_f64()
-            .context("mpv returned non-numeric time-pos")
-    }
 }
 
 /// Standalone position poller — holds only the socket path, not the Player.

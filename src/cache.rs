@@ -26,11 +26,6 @@ pub fn tracks_dir() -> PathBuf {
         .join("tracks")
 }
 
-/// Returns the full path for a cached audio file: audio_dir/<video_id>.<ext>
-pub fn audio_path(video_id: &str, ext: &str) -> PathBuf {
-    audio_dir().join(format!("{video_id}.{ext}"))
-}
-
 /// Creates the audio, playlists and tracks directories if they do not exist.
 pub fn ensure_dirs() -> Result<()> {
     std::fs::create_dir_all(audio_dir()).context("failed to create audio directory")?;

@@ -579,8 +579,7 @@ fn render_settings_panel(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let rows = Layout::vertical(
-        std::iter::repeat(Constraint::Length(2))
-            .take(SETTINGS_ITEMS.len())
+        std::iter::repeat_n(Constraint::Length(2), SETTINGS_ITEMS.len())
             .chain(std::iter::once(Constraint::Min(0)))
             .collect::<Vec<_>>(),
     )
@@ -1257,7 +1256,7 @@ fn render_track_context_menu(frame: &mut Frame, app: &App, area: Rect) {
     // Layout: 1-row hint + item rows
     let rows = Layout::vertical(
         std::iter::once(Constraint::Length(1))
-            .chain(std::iter::repeat(Constraint::Length(1)).take(item_count))
+            .chain(std::iter::repeat_n(Constraint::Length(1), item_count))
             .chain(std::iter::once(Constraint::Min(0)))
             .collect::<Vec<_>>(),
     )
@@ -1313,64 +1312,49 @@ fn render_help_overlay(frame: &mut Frame, _app: &App, area: Rect) {
     frame.render_widget(block, popup);
 
     // Render as simple lines for stability across terminals.
-    let mut lines: Vec<Line> = Vec::new();
-
-    lines.push(Line::from(vec![
-        Span::styled(" Global", Style::new().fg(GOLD).bold()),
-        Span::raw("  "),
-        Span::styled("[?]", Style::new().fg(ACCENT)),
-        Span::raw(" help  "),
-        Span::styled("[tab]", Style::new().fg(ACCENT)),
-        Span::raw(" focus  "),
-        Span::styled("[q]", Style::new().fg(ACCENT)),
-        Span::raw(" quit"),
-    ]));
-
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![Span::styled(
-        " Track list",
-        Style::new().fg(GOLD).bold(),
-    )]));
-    lines.push(Line::raw(
-        "  [↑↓/jk] navigate   [enter] play   [spc] play/pause",
-    ));
-    lines.push(Line::raw("  [←→] seek ±10s     [shift+←→] seek ±60s"));
-    lines.push(Line::raw("  Speed: '[' slower   ']' faster"));
-    lines.push(Line::raw(
-        "  [a] add URL        [m] move track   [d] delete   [/] search",
-    ));
-    lines.push(Line::raw(
-        "  [n] next           [b] previous    [N] new playlist",
-    ));
-    lines.push(Line::raw("  [F] import folder  [A] new album"));
-    lines.push(Line::raw("  [R] rescan folder"));
-    lines.push(Line::raw("  [JK] move row down/up"));
-
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![Span::styled(
-        " On an album header",
-        Style::new().fg(GOLD).bold(),
-    )]));
-    lines.push(Line::raw("  [enter] open/close  [r] rename   [d] forget"));
-    lines.push(Line::raw("  [R] rescan its folder"));
-
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![Span::styled(
-        " Sidebar",
-        Style::new().fg(GOLD).bold(),
-    )]));
-    lines.push(Line::raw(
-        "  [↑↓] navigate   [enter] select/toggle   [r] rename   [d] delete",
-    ));
-
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled(" Close", Style::new().fg(GOLD).bold()),
-        Span::raw("  "),
-        Span::styled("[esc]", Style::new().fg(ACCENT)),
-        Span::raw(" or "),
-        Span::styled("[?]", Style::new().fg(ACCENT)),
-    ]));
+    let lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(" Global", Style::new().fg(GOLD).bold()),
+            Span::raw("  "),
+            Span::styled("[?]", Style::new().fg(ACCENT)),
+            Span::raw(" help  "),
+            Span::styled("[tab]", Style::new().fg(ACCENT)),
+            Span::raw(" focus  "),
+            Span::styled("[q]", Style::new().fg(ACCENT)),
+            Span::raw(" quit"),
+        ]),
+        Line::raw(""),
+        Line::from(vec![Span::styled(
+            " Track list",
+            Style::new().fg(GOLD).bold(),
+        )]),
+        Line::raw("  [↑↓/jk] navigate   [enter] play   [spc] play/pause"),
+        Line::raw("  [←→] seek ±10s     [shift+←→] seek ±60s"),
+        Line::raw("  Speed: '[' slower   ']' faster"),
+        Line::raw("  [a] add URL        [m] move track   [d] delete   [/] search"),
+        Line::raw("  [n] next           [b] previous    [N] new playlist"),
+        Line::raw("  [F] import folder  [A] new album"),
+        Line::raw("  [R] rescan folder"),
+        Line::raw("  [JK] move row down/up"),
+        Line::raw(""),
+        Line::from(vec![Span::styled(
+            " On an album header",
+            Style::new().fg(GOLD).bold(),
+        )]),
+        Line::raw("  [enter] open/close  [r] rename   [d] forget"),
+        Line::raw("  [R] rescan its folder"),
+        Line::raw(""),
+        Line::from(vec![Span::styled(" Sidebar", Style::new().fg(GOLD).bold())]),
+        Line::raw("  [↑↓] navigate   [enter] select/toggle   [r] rename   [d] delete"),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" Close", Style::new().fg(GOLD).bold()),
+            Span::raw("  "),
+            Span::styled("[esc]", Style::new().fg(ACCENT)),
+            Span::raw(" or "),
+            Span::styled("[?]", Style::new().fg(ACCENT)),
+        ]),
+    ];
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::new().fg(Color::White)),
@@ -1425,7 +1409,7 @@ fn render_playlist_rename_overlay(frame: &mut Frame, app: &App, area: Rect) {
 // ── Playlist delete overlay ───────────────────────────────────────────────
 
 /// Returns the name of the playlist currently targeted for delete, if any.
-pub(crate) fn playlist_delete_target<'a>(app: &'a App) -> Option<&'a str> {
+pub(crate) fn playlist_delete_target(app: &App) -> Option<&str> {
     let items = app.sidebar_items();
     // We need a stable reference – match on the sidebar items vec
     // Note: sidebar_items() returns owned Strings so we need to look up in available_playlists
@@ -1692,11 +1676,7 @@ pub(crate) fn build_separated_line(
 
         // Distribute secondary budget evenly among remaining segments
         let secondary_count = segments.len().saturating_sub(1);
-        let per_secondary = if secondary_count > 0 {
-            secondary_budget / secondary_count
-        } else {
-            0
-        };
+        let per_secondary = secondary_budget.checked_div(secondary_count).unwrap_or(0);
 
         for (i, (text, is_bold)) in segments.iter().enumerate() {
             let budget = if i == 0 { primary_len } else { per_secondary };
